@@ -23,17 +23,14 @@
 #include <mochi_core/linear_algebra/krylov_interop.h>
 #include <mochi_core/linear_algebra/matrix.h>
 #include <mochi_core/linear_algebra/utils/assembly.h>
-#include <mochi_core/linear_algebra/utils/matrix_conversions.h>
 #include <mochi_core/utils/local_to_global_map.h>
 #include <mochi_core/utils/profile.h>
-#include <mochi_core/utils/sparsity_utils.h>
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/src/mochi_deformable.h>
 #include <mochi_physics/src/mochi_shell.h>
 
 #include <memory>
 #include <string>
-#include <utility>
 #include <vector>
 
 using namespace mochi;
@@ -105,19 +102,13 @@ static void ShellElementAssemblerBenchmark(
     mochi::DestroyContext(mochiContext);
   }
 
-  // FEM Discretizations for triangular elements
-  using SurfaceElementLow = triangular::Pk2DElement<1, 1>;
-  using SurfaceElementHigh = triangular::Pk2DElement<1, 3>; // Higher order quadrature
+  // FEM Discretization for triangular elements
+  using SurfaceElement = triangular::Pk2DElement<1, 1>;
   int const numElements = triMesh->GetNumElements();
-  std::vector<SurfaceElementLow> femLowSurfDisc;
-  std::vector<SurfaceElementHigh> femHighSurfDisc;
-  femLowSurfDisc.reserve(numElements);
-  femHighSurfDisc.reserve(numElements);
+  std::vector<SurfaceElement> femSurfDisc;
+  femSurfDisc.reserve(numElements);
   for (int i = 0; i < numElements; ++i) {
-    femLowSurfDisc.emplace_back(
-        i, triMesh->GetNodeCoordinates(), triMesh->GetElementConnectivity());
-    femHighSurfDisc.emplace_back(
-        i, triMesh->GetNodeCoordinates(), triMesh->GetElementConnectivity());
+    femSurfDisc.emplace_back(i, triMesh->GetNodeCoordinates(), triMesh->GetElementConnectivity());
   }
 
   // Nodal based structure. The FEM assembler requires a uniform kNumStencilNodes-per-element
@@ -152,18 +143,7 @@ static void ShellElementAssemblerBenchmark(
 
   double merit = 0.0;
   auto res = ColumnVector<real>::Zero(numGlobalDofs);
-  auto sparsityGraph = MakeSparsityGraph(l2g, numGlobalDofs);
-  int const numRows = isize(sparsityGraph.GetPointers()) - 1;
-  int const numCols = numRows; // Symmetrical
-  DynamicArray<real> values(sparsityGraph.NumTargets(), 0_r);
-  auto actorDResFullSparse = SparseMatrixView<real const>(
-      numCols, sparsityGraph.GetPointers(), sparsityGraph.GetTargets(), MakeSpan(values));
-  auto blockStructure = BlockedStructure<3>(actorDResFullSparse);
-  BlockSparseMatrix<real, 3> dres(
-      blockStructure.nBlockCols,
-      std::move(blockStructure.ptr),
-      std::move(blockStructure.ndIndices),
-      std::move(values));
+  auto dres = BlockSparseMatrix<real, 3>(triMesh->GetNumNodes(), nbs.GetNToN());
   MOCHI_ASSERT(res.Rows() == sol.Rows());
   MOCHI_ASSERT(dres.Rows() == sol.Rows());
 
@@ -173,25 +153,24 @@ static void ShellElementAssemblerBenchmark(
   bool const assemDRes = resultFlags & kResultDRes;
 
   // Other stuff element operations might need (arbitrary values)
-  ColumnVector<real> predGlobalDisp(numGlobalDofs);
-  ColumnVector<real> predGlobalVelo(numGlobalDofs);
-  predGlobalDisp.SetRandom(111, -1_r, 1_r);
-  predGlobalVelo.SetRandom(222, -1_r, 1_r);
+  ColumnVector<real> stageStartDispl(numGlobalDofs);
+  ColumnVector<real> predTarget(numGlobalDofs);
+  stageStartDispl.SetRandom(111, -1_r, 1_r);
+  predTarget.SetRandom(222, -1_r, 1_r);
 
   // Material / physical constants (arbitrary values).
   constexpr int kBatchSize = kDefaultFemBatchSize;
   constexpr real kShellThickness = 0.001_r; // typical shell thickness
   constexpr real kShellDensity = 1000_r * kShellThickness; // surface density
   constexpr real kDt = 0.1_r; // Arbitrary
-  constexpr real kOneOverDt2 = 1_r / Sqr(kDt);
 
-  // Shell elasticity material (arbitrary values).
+  // Shell elasticity material (arbitrary values, plane-stress membrane parameters).
   constexpr real kBendingAlpha = 1e-6_r;
   constexpr real kBendingBeta = 1e-6_r;
   constexpr real kYoungsModulus = 1e3_r;
   constexpr real kPoissonRatio = 0.3_r;
   real const kMembraneLambda =
-      (kYoungsModulus * kPoissonRatio) / ((1_r + kPoissonRatio) * (1_r - 2_r * kPoissonRatio));
+      (kYoungsModulus * kPoissonRatio) / (1_r - kPoissonRatio * kPoissonRatio);
   real const kMembraneMu = kYoungsModulus / (2_r * (1_r + kPoissonRatio));
 
   bool const hasGravity = elopFlags & kShellElOpGravity;
@@ -209,18 +188,17 @@ static void ShellElementAssemblerBenchmark(
   } else {
     batchedOp = shell::MakeBatchedBodyOp(
         l2g,
-        MakeConstSpan(femLowSurfDisc),
-        MakeConstSpan(femHighSurfDisc),
+        MakeConstSpan(femSurfDisc),
         hasGravity,
         kMembraneLambda,
         kMembraneMu,
         kBendingAlpha,
         kBendingBeta,
+        /*membraneCollapseBarrierStiffness*/ 0_r,
         kDefaultGravity,
         kShellDensity,
-        kOneOverDt2,
-        predGlobalDisp.GetConstSpan(),
-        predGlobalVelo.GetConstSpan(),
+        predTarget.GetConstSpan(),
+        stageStartDispl.GetConstSpan(),
         kDt,
         0_r,
         0_r);
@@ -295,6 +273,8 @@ static void ShellElementAssemblerBenchmark(
 // the full assembly; the AssemblerOverhead cases isolate the assembler's gather/scatter cost.
 // clang-format off
 #define MOCHI_BENCHMARK_SHELL_ELEMENT_ASSEMBLER(name, file, meshSize)                                                                                                                                                    \
+  MOCHI_BENCHMARK_SHELL_ELEMENT_ASSEMBLER_FOR_THREADS(name##_AssemblerOverhead_Obj, #name "/AssemblerOverhead/Objective", file, meshSize, 0, kResultObj);                                                                \
+  MOCHI_BENCHMARK_SHELL_ELEMENT_ASSEMBLER_FOR_THREADS(name##_AssemblerOverhead_Res, #name "/AssemblerOverhead/Residual", file, meshSize, 0, kResultRes);                                                                 \
   MOCHI_BENCHMARK_SHELL_ELEMENT_ASSEMBLER_FOR_THREADS(name##_AssemblerOverhead_DRes, #name "/AssemblerOverhead/DResidual", file, meshSize, 0, kResultDRes);                                                              \
   MOCHI_BENCHMARK_SHELL_ELEMENT_ASSEMBLER_FOR_THREADS(name##_AssemblerOverhead_All, #name "/AssemblerOverhead/All", file, meshSize, 0, kResultObjResDRes);                                                               \
   MOCHI_BENCHMARK_SHELL_ELEMENT_ASSEMBLER_FOR_THREADS(name##_Full_Obj, #name "/Full/Objective", file, meshSize, kShellElOpGravity, kResultObj);                                          \

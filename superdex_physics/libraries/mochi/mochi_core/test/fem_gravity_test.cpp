@@ -33,10 +33,11 @@ using namespace mochi::fem;
 //   - for the P1 elements used here the nodal force is uniform across an element's nodes:
 //         r_{i,d} = -density * w_e * (V_e / kNumNodes) * gravity_d,
 //     where V_e = sum_q quadWeights (the element volume) and w_e the per-element extra weight,
-//   - energy is the quadrature sum of -dot(y_q, density * gravity) * w_q.
-// Each batch lane gets a distinct displacement; element indices and extra weights cycle by lane and
-// trial, covering mixed and duplicate lanes. "Test passes" implies the kernel is correct, including
-// the zero-gravity and per-output-flag edge cases.
+//   - energy is the quadrature sum of -dot(y_q, density * gravity) * w_q, with y_q the displacement
+//     since the stage start interpolated to the quadrature point.
+// Each batch lane gets a distinct displacement and stage-start displacement; element indices and
+// extra weights cycle by lane and trial, covering mixed and duplicate lanes. "Test passes" implies
+// the kernel is correct, including the zero-gravity and per-output-flag edge cases.
 
 using TetGravityElement = tetrahedral::Pk3DElement<1, 1>;
 using TriGravityElement = triangular::Pk2DElement<1, 1>;
@@ -70,6 +71,7 @@ template <class ElementT>
 double ExpectedGravityEnergy(
     ElementT const& element,
     NdArray<real, ElementT::kSpaceDim * ElementT::kNumDofs> const& disp,
+    NdArray<real, ElementT::kSpaceDim * ElementT::kNumDofs> const& stageStartDisp,
     Real3 const& gravity,
     real density,
     real extraWeight) {
@@ -79,9 +81,10 @@ double ExpectedGravityEnergy(
   for (int q = 0; q < ElementT::kNumQuadPoints; ++q) {
     double dotYG = 0.0;
     for (int d = 0; d < kSpaceDim; ++d) {
-      real y = element.mapEvaluated[q][d];
+      real y = 0_r;
       for (int f = 0; f < kNumNodes; ++f) {
-        y += element.basisEvaluated[q][f] * disp[f * kSpaceDim + d];
+        int const i = f * kSpaceDim + d;
+        y += element.basisEvaluated[q][f] * (disp[i] - stageStartDisp[i]);
       }
       dotYG += static_cast<double>(y) * static_cast<double>(gravity[d]);
     }
@@ -117,10 +120,16 @@ void VerifyGravityAnalytic() {
       idx[b] = (trial * kBS + b) % numElements;
     }
     NdArray<NdArray<real, kDim>, kBS> disp;
+    NdArray<NdArray<real, kDim>, kBS> stageStartDisp;
     for (int b = 0; b < kBS; ++b) {
       disp[b] = MakeRandomArray<kDim>(static_cast<unsigned int>(trial * kBS + b));
+      // Offset so that the displacement since the stage start, and hence the energy, stays away
+      // from zero, where the relative energy comparisons below would be ill-conditioned.
+      stageStartDisp[b] = MakeRandomArray<kDim>(
+          static_cast<unsigned int>((kNumTrials + trial) * kBS + b), -1.3_r, -0.7_r);
     }
     auto const batchDisp = PackDisp<ElementT, kBS>(disp);
+    auto const batchStageStartDisp = PackDisp<ElementT, kBS>(stageStartDisp);
 
     auto const elemSpan = MakeConstSpan(data.elements);
     auto const weightSpan = MakeConstSpan(extraWeights);
@@ -129,15 +138,22 @@ void VerifyGravityAnalytic() {
     BatchDouble<kBS> energy{0.0};
     fem::BatchElementVector<kBS, ElementT> res{};
     bool const wrote = GravityWork<kBS, ElementT>(
-        idx, elemSpan, batchDisp, &energy, &res, gravity, density, weightSpan);
+        idx, elemSpan, batchDisp, batchStageStartDisp, &energy, &res, gravity, density, weightSpan);
     EXPECT_TRUE(wrote);
 
-    // Run at zero displacement (residual must be identical; energy gives the rest-state baseline).
-    fem::BatchElementVector<kBS, ElementT> const zeroDisp{};
+    // Run at the stage start (residual must be identical; energy must vanish).
     BatchDouble<kBS> energy0{0.0};
     fem::BatchElementVector<kBS, ElementT> res0{};
     GravityWork<kBS, ElementT>(
-        idx, elemSpan, zeroDisp, &energy0, &res0, gravity, density, weightSpan);
+        idx,
+        elemSpan,
+        batchStageStartDisp,
+        batchStageStartDisp,
+        &energy0,
+        &res0,
+        gravity,
+        density,
+        weightSpan);
 
     for (int b = 0; b < kBS; ++b) {
       int const e = idx[b];
@@ -156,19 +172,22 @@ void VerifyGravityAnalytic() {
       }
 
       ExpectNearEnergy(
-          ExpectedGravityEnergy(data.elements[e], disp[b], gravity, density, w), energy[b]);
+          ExpectedGravityEnergy(data.elements[e], disp[b], stageStartDisp[b], gravity, density, w),
+          energy[b]);
+      EXPECT_EQ(0.0, energy0[b]);
 
       // Residual is independent of displacement.
       for (int k = 0; k < kDim; ++k) {
         ExpectNearRel(res0[k][b], res[k][b]);
       }
 
-      // Energy-gradient identity: E(u) - E(0) == <r, u>.
+      // Energy-gradient identity: E(u) == <r, u - u₀>.
       double dotRU = 0.0;
       for (int k = 0; k < kDim; ++k) {
-        dotRU += static_cast<double>(res[k][b]) * static_cast<double>(disp[b][k]);
+        dotRU +=
+            static_cast<double>(res[k][b]) * static_cast<double>(disp[b][k] - stageStartDisp[b][k]);
       }
-      ExpectNearEnergy(dotRU, energy[b] - energy0[b]);
+      ExpectNearEnergy(dotRU, energy[b]);
     }
   }
 }
@@ -194,19 +213,23 @@ void VerifyGravityOutputFlags() {
     disp[b] = MakeRandomArray<kDim>(static_cast<unsigned int>(b));
   }
   auto const batchDisp = PackDisp<ElementT, kBS>(disp);
+  fem::BatchElementVector<kBS, ElementT> const stageStartDisp{};
   auto const elemSpan = MakeConstSpan(data.elements);
 
   // Reference: both outputs.
   BatchDouble<kBS> energyBoth{0.0};
   fem::BatchElementVector<kBS, ElementT> resBoth{};
-  GravityWork<kBS, ElementT>(idx, elemSpan, batchDisp, &energyBoth, &resBoth, gravity, density);
+  GravityWork<kBS, ElementT>(
+      idx, elemSpan, batchDisp, stageStartDisp, &energyBoth, &resBoth, gravity, density);
 
   // Energy only.
   BatchDouble<kBS> energyOnly{0.0};
-  GravityWork<kBS, ElementT>(idx, elemSpan, batchDisp, &energyOnly, nullptr, gravity, density);
+  GravityWork<kBS, ElementT>(
+      idx, elemSpan, batchDisp, stageStartDisp, &energyOnly, nullptr, gravity, density);
   // Residual only.
   fem::BatchElementVector<kBS, ElementT> resOnly{};
-  GravityWork<kBS, ElementT>(idx, elemSpan, batchDisp, nullptr, &resOnly, gravity, density);
+  GravityWork<kBS, ElementT>(
+      idx, elemSpan, batchDisp, stageStartDisp, nullptr, &resOnly, gravity, density);
 
   for (int b = 0; b < kBS; ++b) {
     ExpectNearEnergy(energyBoth[b], energyOnly[b]);
@@ -235,11 +258,19 @@ void VerifyGravityZero() {
     disp[b] = MakeRandomArray<kDim>(static_cast<unsigned int>(b));
   }
   auto const batchDisp = PackDisp<ElementT, kBS>(disp);
+  fem::BatchElementVector<kBS, ElementT> const stageStartDisp{};
 
   BatchDouble<kBS> energy{0.0};
   fem::BatchElementVector<kBS, ElementT> res{};
   GravityWork<kBS, ElementT>(
-      idx, MakeConstSpan(data.elements), batchDisp, &energy, &res, Real3{0_r, 0_r, 0_r}, 1234.5_r);
+      idx,
+      MakeConstSpan(data.elements),
+      batchDisp,
+      stageStartDisp,
+      &energy,
+      &res,
+      Real3{0_r, 0_r, 0_r},
+      1234.5_r);
 
   for (int b = 0; b < kBS; ++b) {
     EXPECT_NEAR(0.0, energy[b], 1e-12);
@@ -270,9 +301,17 @@ void VerifyGravityNoOutputs() {
     disp[b] = MakeRandomArray<kDim>(static_cast<unsigned int>(b));
   }
   auto const batchDisp = PackDisp<ElementT, kBS>(disp);
+  fem::BatchElementVector<kBS, ElementT> const stageStartDisp{};
 
   bool const wrote = GravityWork<kBS, ElementT>(
-      idx, MakeConstSpan(data.elements), batchDisp, nullptr, nullptr, gravity, density);
+      idx,
+      MakeConstSpan(data.elements),
+      batchDisp,
+      stageStartDisp,
+      nullptr,
+      nullptr,
+      gravity,
+      density);
   EXPECT_FALSE(wrote);
 }
 

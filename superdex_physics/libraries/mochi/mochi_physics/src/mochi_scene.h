@@ -25,6 +25,7 @@
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/mochi_physics_experimental.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -82,6 +83,7 @@ class SceneImpl final : public Scene {
   Actor* CreateSoftActor(SoftActorParams const& params, Error& error) override;
   Actor* CreateArticulatedActor(ArticulatedActorParams const& params, Error& error) override;
   Actor* CreateSoftSkinnedActor(SoftSkinnedActorParams const& params, Error& error) override;
+  void DestroyActor(Actor* actor) override;
   void DestroyActor(ActorHandle actor) override;
   Actor* GetActor(ActorHandle actor) override;
   Actor const* GetActor(ActorHandle actor) const override;
@@ -145,10 +147,12 @@ class SceneImpl final : public Scene {
       std::function<void(Constraint const* constraint)> const& callback) const override;
   DebugDraw& GetDebugDraw() override;
   DebugDraw const& GetDebugDraw() const override;
-  bool IsRecording() const override;
-  void StartRecording(std::string_view filePath, RecordingParams const& params, Error& error)
-      override;
-  void StopRecording() override;
+  [[nodiscard]] bool IsRecording() const;
+  void StartRecording(
+      std::string_view filePath,
+      experimental::RecordingParams const& params,
+      Error& error);
+  void StopRecording();
   void EnableLayerContactAsymmetric(
       std::string_view layerA,
       std::string_view layerB,
@@ -159,8 +163,7 @@ class SceneImpl final : public Scene {
       std::string_view layerB,
       bool enable,
       Error& error) override;
-  MOCHI_API bool IsLayerContactEnabled(std::string_view layerA, std::string_view layerB)
-      const override;
+  bool IsLayerContactEnabled(std::string_view layerA, std::string_view layerB) const override;
   int GetNumContactLayers() const override;
   void EnumerateContactLayerNames(
       std::function<void(std::string_view name)> const& callback) const override;
@@ -176,6 +179,17 @@ class SceneImpl final : public Scene {
       bool enable,
       IncludeNestedActors includeNestedActors,
       Error& error) override;
+  void SetContactPairParamsOverride(
+      ActorHandle actorA,
+      ActorHandle actorB,
+      ContactPairParamsOverride const& paramsOverride,
+      Error& error) override;
+  void ClearContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error)
+      override;
+  bool HasContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error)
+      const override;
+  ContactPairParamsOverride
+  GetContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error) const override;
   CallbackHandle RegisterPreStepCallback(
       std::string_view debugName,
       std::function<void(StepInfo const&)> callback,
@@ -188,8 +202,12 @@ class SceneImpl final : public Scene {
   void UpdateDebugger() override;
 
   // For internal use only:
+  [[nodiscard]] bool TryClaimOwnership();
   void SetThreadAffinity();
   QueryHandle NewQueryHandle(QueryType type); // thread-safe
+  // Allocate a QueryHandle and register it with entity e. Returns an invalid handle on failure.
+  [[nodiscard]] QueryHandle
+  RegisterQuery(entt::entity e, QueryType type, bool computeImmediately, Error& error);
   void RegisterActorQuery(
       Actor* actor,
       QueryHandle preallocatedHandle,
@@ -211,25 +229,19 @@ class SceneImpl final : public Scene {
       Span<SReflect::TypeId const> excludedAttributes,
       Error& error);
   [[nodiscard]] experimental::DebugStats GetDebugStats() const;
+  [[nodiscard]] experimental::SleepParams GetSleepParams() const;
+  void SetSleepParams(experimental::SleepParams const& params, Error& error);
   void ApplyImprovedConvergenceSettings(bool logWarnings = false);
   void WarnIfNotImprovedConvergenceSettings() const;
   // Restore two captured states so that curr becomes the TimeStep::Current state and prev becomes
   // the TimeStep::Previous state, with constraint/controller targets set as they would be at the
   // beginning of a step. Unlike RestoreState (which restores a single post-step snapshot), this
   // reconstructs the full pre-step pair by restoring prev, advancing time via PreStepEcs, then
-  // restoring curr. Used by BackPropagate and GetStepJacobian to evaluate residuals across two
-  // consecutive states.
+  // restoring curr. Used by BackPropagate to evaluate residuals across two consecutive states.
   void RestoreStatePair(StateHandle curr, StateHandle prev, Error& err);
   void ResetBackPropagation();
   void PrepareBackPropagate(StateHandle stateNew, StateHandle stateOld, Error& error);
   void BackPropagate(Error& error);
-  void GetStepJacobian(
-      StateHandle stateNew,
-      StateHandle stateCurr,
-      StateHandle stateOld,
-      Span<real> outJacCurr,
-      Span<real> outJacOld,
-      Error& error);
 
   // For unit test access:
   entt::registry& GetRegistry() {
@@ -261,13 +273,13 @@ class SceneImpl final : public Scene {
    *
    * @see EnableActorContactAsymmetric, EnableActorContactSymmetric
    */
-  [[nodiscard]] MOCHI_API bool
+  [[nodiscard]] bool
   IsActorContactEnabled(ActorHandle colliding, ActorHandle collider, Error& error) const;
 
   Actor* CreateSoftActorImpl(
       SoftActorParams const& params,
       experimental::ExperimentalSoftActorParams const& experimentalParams,
-      bool isSkinned,
+      bool isNestedSoft,
       std::shared_ptr<TetrahedralMeshShape const> shapePtr,
       Error& error);
 
@@ -281,13 +293,15 @@ class SceneImpl final : public Scene {
   void SetDebugger(std::shared_ptr<dbg::SceneDebugger> debugger);
 
   // Return a shared_ptr to the current debugger (if any). For unit tests. Thread-safe.
-  MOCHI_API std::shared_ptr<dbg::SceneDebugger> GetDebugger() const;
+  std::shared_ptr<dbg::SceneDebugger> GetDebugger() const;
 
  private:
   // Private Members:
   ContextImpl* const _context;
   std::string const _name;
   uint64_t const _sceneId;
+  std::atomic<bool> _ownershipClaimed = false;
+  // Scene thread only, ctx included: functions marked thread-safe must not access the registry.
   entt::registry _registry;
   PerformanceStats _lastPerformanceStats;
   SolverStats _lastSolverStats;
@@ -318,7 +332,7 @@ class SceneImpl final : public Scene {
   void CreateArticulatedLinkActorsImpl(
       std::string_view parentActorName,
       Span<ArticulatedLinkParams const> params,
-      bool useContact,
+      Span<bool const> useContact,
       std::shared_ptr<ArticulatedBodyShape const> shapePtr,
       TransformRT const& rootTransform,
       Span<ActorHandle> outLinks,
@@ -346,13 +360,13 @@ class SceneImpl final : public Scene {
   // Return true if those bytes match this scene's ID.
   bool IsProbablyMyCallbackHandle(CallbackHandle handle) const;
 
-  // Destroy all actors and constraints in an articulated actor.
-  void DestroyAllItemsInArticulatedActor(entt::entity e);
-
   // Callbacks:
-  uint32_t _nextCallbackId = 1;
+  std::atomic<uint32_t> _nextCallbackId = 1;
   CallbackSet<void(StepInfo const&)> _preStepCallbacks;
   CallbackSet<void(StepInfo const&)> _postStepCallbacks;
+
+  // Queries:
+  std::atomic<uint32_t> _nextQueryId = 1;
 
   // Debugging:
   std::unique_ptr<DebugDrawInternal> _debugDraw; // ptr so we don't have to include the header here
@@ -361,6 +375,10 @@ class SceneImpl final : public Scene {
     DynamicArray<std::shared_ptr<dbg::SceneDebugger>> pendingShutdown;
   };
   Guarded<DebuggerInfo> _debugger;
+
+  // Finish shutting down retired debuggers, then return the current one (if any). Scene thread
+  // only.
+  std::shared_ptr<dbg::SceneDebugger> AcquireDebugger();
 
   // Recording:
   std::unique_ptr<SceneRecorder> _recorder;

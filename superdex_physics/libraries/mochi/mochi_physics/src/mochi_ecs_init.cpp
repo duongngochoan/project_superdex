@@ -47,6 +47,7 @@ namespace scene_recorder { void InitializeOnce(entt::registry& reg); }
 namespace shape { void InitializeOnce(entt::registry& reg); }
 namespace simulation { void InitializeOnce(entt::registry& reg); }
 namespace skinned { void InitializeOnce(entt::registry& reg); }
+namespace sleep { void InitializeOnce(entt::registry& reg); }
 namespace snle { void InitializeOnce(entt::registry& reg); }
 namespace soft { void InitializeOnce(entt::registry& reg); }
 namespace shell { void InitializeOnce(entt::registry& reg); }
@@ -80,6 +81,7 @@ void ecs::InitializeOnce(entt::registry& reg) {
   shape::InitializeOnce(reg);
   simulation::InitializeOnce(reg);
   skinned::InitializeOnce(reg);
+  sleep::InitializeOnce(reg);
   snle::InitializeOnce(reg);
   soft::InitializeOnce(reg);
   shell::InitializeOnce(reg);

@@ -1,3 +1,20 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+// @brief Signature of a logging callback function.
+using LogFn = Function<void, LogChannel, char const*, char const*, int>;
+
 // @brief Main entry point for SuperDex Physics simulation.
 //
 // @details A @ref Context owns all global state for SuperDex Physics: scenes, shapes, threading,
@@ -57,7 +74,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see SetIsSingleThreaded, CreateContext
-  fn IsSingleThreaded() -> bool [pure, virtual, const];
+  fn IsSingleThreaded() -> bool [pure, virtual, const, nodiscard];
 
   // @brief Return the number of worker threads available to execute asynchronous tasks.
   //
@@ -67,7 +84,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see CreateContext, IsSingleThreaded
-  fn GetNumThreads() -> int [pure, virtual, const];
+  fn GetNumThreads() -> int [pure, virtual, const, nodiscard];
 
   # Debugging
   // @brief Enable or disable log messages on the specified channel.
@@ -93,7 +110,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see EnableLogChannel
-  fn IsLogChannelEnabled(LogChannel channel) -> bool [static, export];
+  fn IsLogChannelEnabled(LogChannel channel) -> bool [static, export, nodiscard];
 
   // @brief Optionally provide a callback function to redirect SuperDex Physics logging.
   // The default function outputs to stdout and to the debugger (if attached).
@@ -106,7 +123,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see GetLogCallback
-  fn SetLogCallback(LogFn callback) -> void [static, export];
+  fn SetLogCallback(LogFn callback) -> void [static];
 
   // @brief Get the function currently being used to output logging.
   //
@@ -115,7 +132,7 @@ class Context [no_init, no_destruct, singleton] {
   // @return The current logging callback function.
   //
   // @see SetLogCallback
-  fn GetLogCallback() -> LogFn [static, export, no_python, no_capi];
+  fn GetLogCallback() -> LogFn [static, export, no_python, no_capi, nodiscard];
 
   // @brief Optionally provide a callback function to customize the way in which assertion failures
   // are reported.
@@ -141,7 +158,7 @@ class Context [no_init, no_destruct, singleton] {
   // @return The current assertion failure callback function.
   //
   // @see SetAssertionFailureCallback
-  fn GetAssertionFailureCallback() -> OnAssertFn [static, export, no_python, no_capi];
+  fn GetAssertionFailureCallback() -> OnAssertFn [static, export, no_python, no_capi, nodiscard];
 
   # Shape APIs
   // @brief Load a shape from a file of supported format.
@@ -159,7 +176,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see ShapeHandle, ReleaseShape, LoadShapeFromBytes
-  fn LoadShapeFromFile(StringView filePath) -> ShapeHandle [pure, virtual, overloaded, mochi_error];
+  fn LoadShapeFromFile(StringView filePath) -> ShapeHandle [pure, virtual, overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, and bake in some scale.
   //
@@ -190,7 +207,7 @@ class Context [no_init, no_destruct, singleton] {
   fn LoadShapeFromFile(
     StringView filePath,
     Real3 const& bakeScale,
-  ) -> ShapeHandle [overloaded, mochi_error];
+  ) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, and bake in rotation and translation.
   //
@@ -215,7 +232,7 @@ class Context [no_init, no_destruct, singleton] {
   fn LoadShapeFromFile(
     StringView filePath,
     TransformRT const& bakeTransform,
-  ) -> ShapeHandle [overloaded, mochi_error];
+  ) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, and bake in some scale, rotation, and
   // translation.
@@ -250,7 +267,7 @@ class Context [no_init, no_destruct, singleton] {
     StringView filePath,
     Real3 const& bakeScale,
     TransformRT const& bakeTransform,
-  ) -> ShapeHandle [pure, virtual, overloaded, mochi_error];
+  ) -> ShapeHandle [pure, virtual, overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory.
@@ -269,7 +286,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see ShapeHandle, ReleaseShape, LoadShapeFromFile
-  fn LoadShapeFromBytes(Span<char const> fileData) -> ShapeHandle [overloaded, mochi_error];
+  fn LoadShapeFromBytes(Span<char const> fileData) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory, and baking in some scale.
@@ -302,7 +319,7 @@ class Context [no_init, no_destruct, singleton] {
   fn LoadShapeFromBytes(
     Span<char const> fileData,
     Real3 const& bakeScale,
-  ) -> ShapeHandle [overloaded, mochi_error];
+  ) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory, and baking in rotation and translation.
@@ -329,7 +346,7 @@ class Context [no_init, no_destruct, singleton] {
   fn LoadShapeFromBytes(
     Span<char const> fileData,
     TransformRT const& bakeTransform,
-  ) -> ShapeHandle [overloaded, mochi_error];
+  ) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory, and baking in some scale, rotation, and translation.
@@ -365,7 +382,7 @@ class Context [no_init, no_destruct, singleton] {
     Span<char const> fileData,
     Real3 const& bakeScale,
     TransformRT const& bakeTransform,
-  ) -> ShapeHandle [overloaded, mochi_error];
+  ) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory, with an explicit mesh format hint.
@@ -387,7 +404,7 @@ class Context [no_init, no_destruct, singleton] {
   fn LoadShapeFromBytes(
     Span<char const> fileData,
     MeshFileType format,
-  ) -> ShapeHandle [pure, virtual, overloaded, mochi_error];
+  ) -> ShapeHandle [pure, virtual, overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory, with an explicit mesh format hint, and baking in some scale.
@@ -421,7 +438,7 @@ class Context [no_init, no_destruct, singleton] {
     Span<char const> fileData,
     MeshFileType format,
     Real3 const& bakeScale,
-  ) -> ShapeHandle [overloaded, mochi_error];
+  ) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory, with an explicit mesh format hint, and baking in rotation and translation.
@@ -449,7 +466,7 @@ class Context [no_init, no_destruct, singleton] {
     Span<char const> fileData,
     MeshFileType format,
     TransformRT const& bakeTransform,
-  ) -> ShapeHandle [overloaded, mochi_error];
+  ) -> ShapeHandle [overloaded, mochi_error, nodiscard];
 
   // @brief Load a shape from a file of supported format, where the file has already been loaded
   // into memory, with an explicit mesh format hint, and baking in some scale, rotation, and
@@ -487,7 +504,7 @@ class Context [no_init, no_destruct, singleton] {
     MeshFileType format,
     Real3 const& bakeScale,
     TransformRT const& bakeTransform,
-  ) -> ShapeHandle [pure, virtual, overloaded, mochi_error];
+  ) -> ShapeHandle [pure, virtual, overloaded, mochi_error, nodiscard];
 
   // @brief Create a shape using in-memory mesh data, so that it can be used to create actors.
   //
@@ -503,7 +520,7 @@ class Context [no_init, no_destruct, singleton] {
   // of @ref MeshData::nodesPerElement.
   //
   // @see ShapeHandle, ReleaseShape
-  fn CreateMeshShape(MeshData const& mesh) -> ShapeHandle [pure, virtual, overloaded, expand_struct_params, mochi_error, no_capi];
+  fn CreateMeshShape(MeshData const& mesh) -> ShapeHandle [pure, virtual, overloaded, expand_struct_params, mochi_error, no_capi, nodiscard];
 
   // @brief Create a shape using in-memory mesh data, so that it can be used to create actors.
   //
@@ -519,7 +536,7 @@ class Context [no_init, no_destruct, singleton] {
   // of @ref MeshDataView::nodesPerElement.
   //
   // @see ShapeHandle, ReleaseShape
-  fn CreateMeshShape(MeshDataView const& mesh) -> ShapeHandle [pure, virtual, overloaded, mochi_error, no_capi];
+  fn CreateMeshShape(MeshDataView const& mesh) -> ShapeHandle [pure, virtual, overloaded, mochi_error, no_capi, nodiscard];
 
   // @brief Create a shape using in-memory model data, so that it can be used to create actors.
   //
@@ -534,7 +551,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Can be a mesh or an implicit shape, depending on the contents.
   //
   // @see ShapeHandle, ReleaseShape
-  fn CreateModelShape(ModelData const& model) -> ShapeHandle [pure, virtual, overloaded, expand_struct_params, mochi_error, no_capi];
+  fn CreateModelShape(ModelData const& model) -> ShapeHandle [pure, virtual, overloaded, expand_struct_params, mochi_error, no_capi, nodiscard];
 
   // @brief Create a shape using in-memory model data, so that it can be used to create actors.
   //
@@ -549,7 +566,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Can be a mesh or an implicit shape, depending on the contents.
   //
   // @see ShapeHandle, ReleaseShape
-  fn CreateModelShape(ModelDataView const& model) -> ShapeHandle [pure, virtual, overloaded, mochi_error, no_capi];
+  fn CreateModelShape(ModelDataView const& model) -> ShapeHandle [pure, virtual, overloaded, mochi_error, no_capi, nodiscard];
 
   // @brief Create a tetrahedral mesh shape using in-memory data.
   //
@@ -566,9 +583,9 @@ class Context [no_init, no_destruct, singleton] {
   //
   // @see ShapeHandle, ReleaseShape
   fn CreateTetMeshShape(
-    Span<real const> coordinates [units(m)],
+    Span<real const> coordinates [units("m")],
     Span<int const> connectivity
-  ) -> ShapeHandle [pure, virtual, mochi_error];
+  ) -> ShapeHandle [pure, virtual, mochi_error, nodiscard];
 
   // @brief Create a triangle mesh shape using in-memory data.
   //
@@ -585,9 +602,9 @@ class Context [no_init, no_destruct, singleton] {
   //
   // @see ShapeHandle, ReleaseShape
   fn CreateTriMeshShape(
-    Span<real const> coordinates [units(m)],
+    Span<real const> coordinates [units("m")],
     Span<int const> connectivity,
-  )  -> ShapeHandle [pure, virtual, mochi_error];
+  )  -> ShapeHandle [pure, virtual, mochi_error, nodiscard];
   // @brief Create an implicit sphere shape.
   //
   // @param[in] center Center of the sphere [m], in the shape's local frame.
@@ -601,7 +618,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see ShapeHandle, ReleaseShape
-  fn CreateSphereShape(Real3 const& center, real radius [units(m)]) -> ShapeHandle [pure, virtual, mochi_error];
+  fn CreateSphereShape(Real3 const& center, real radius [units("m")]) -> ShapeHandle [pure, virtual, mochi_error, nodiscard];
 
   // @brief Create an implicit plane with infinite extents.
   //
@@ -618,14 +635,15 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see ShapeHandle, ReleaseShape
-  fn CreatePlaneShape(Real3 const& normal, real distance [units(m)]) -> ShapeHandle [pure, virtual, mochi_error];
+  fn CreatePlaneShape(Real3 const& normal, real distance [units("m")]) -> ShapeHandle [pure, virtual, mochi_error, nodiscard];
 
   // @brief Get a view of the shape's main mesh data.
   //
-  // @details For tetrahedral mesh shapes, returns the volume mesh (4 nodes per element).
-  // For triangular mesh shapes, returns the surface mesh (3 nodes per element).
+  // @details For tetrahedral mesh shapes, returns the tetrahedral mesh (4 nodes per element).
+  // For triangular mesh shapes, returns the triangle mesh (3 nodes per element).
   // For polyline shapes, returns the polyline mesh (2 nodes per element). For shapes without a
   // main mesh, including implicit shapes such as spheres and planes, returns an empty view.
+  // The view includes any nodes that no element references.
   //
   // @param[in] shape Handle to a valid shape.
   //
@@ -635,7 +653,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note The returned view will be invalid after the shape handle has been released.
   //
   // @see MeshDataView, GetShapeSurfaceMesh, GetShapeVisualMesh, Actor::GetMesh
-  fn GetShapeMesh(ShapeHandle shape) -> MeshDataView [pure, virtual, const, mochi_error, no_capi];
+  fn GetShapeMesh(ShapeHandle shape) -> MeshDataView [pure, virtual, const, mochi_error, no_capi, nodiscard];
 
   // @brief Get a view of the shape's surface mesh data.
   //
@@ -643,11 +661,11 @@ class Context [no_init, no_destruct, singleton] {
   // The coordinate array contains exactly the surface nodes referenced by the returned connectivity;
   // nodes present in the underlying main mesh but not referenced by any surface triangle are omitted.
   // Connectivity values are indices into this returned coordinate array. For shapes without a
-  // surface mesh, returns an empty view.
+  // surface mesh, such as polyline shapes, returns an empty view.
   //
-  // @note For triangular mesh shapes, this may differ from @ref GetShapeMesh if the main mesh
-  // contains unreferenced nodes. For tetrahedral mesh shapes, this is the boundary surface of the
-  // volume mesh, with non-boundary volume nodes omitted.
+  // @note For triangular mesh shapes, this differs from @ref GetShapeMesh only if the main mesh has
+  // nodes that no element references. For tetrahedral mesh shapes, this is the boundary surface of
+  // the volume mesh, with non-boundary volume nodes omitted.
   //
   // @param[in] shape Handle to a valid shape.
   //
@@ -657,15 +675,39 @@ class Context [no_init, no_destruct, singleton] {
   // @note Can be called on any thread.
   // @note The returned view will be invalid after the shape handle has been released.
   //
-  // @see MeshDataView, GetShapeMesh, GetShapeVisualMesh, Actor::GetSurfaceMesh
-  fn GetShapeSurfaceMesh(ShapeHandle shape) -> MeshDataView [pure, virtual, const, mochi_error, no_capi];
+  // @see MeshDataView, GetShapeMesh, GetShapeContactSkinMesh, GetShapeVisualMesh,
+  // Actor::GetSurfaceMesh
+  fn GetShapeSurfaceMesh(ShapeHandle shape) -> MeshDataView [pure, virtual, const, mochi_error, no_capi, nodiscard];
+
+  // @brief Get a view of the shape's contact-skin mesh data, including its skinning data.
+  //
+  // @details Returns a triangle mesh (3 nodes per element). Every contact-skin node is referenced
+  // by the contact-skin connectivity, so @ref Actor::GetContactSkinMesh has the same node
+  // ordering. The mesh includes the authored skinning data, in the format of
+  // @ref ModelData::contactSkinMesh. For shapes without a contact skin, returns an
+  // empty view.
+  //
+  // @param[in] shape Handle to a valid shape.
+  //
+  // @return A non-owning view of the shape's contact-skin mesh data, or an empty view if the shape
+  // has no contact skin.
+  //
+  // @note Can be called on any thread.
+  // @note The returned view will be invalid after the shape handle has been released.
+  // @note For tetrahedral and triangular mesh shapes, skinning indices refer to the node ordering
+  // returned by @ref GetShapeMesh, not to the compact surface-node ordering returned by
+  // @ref GetShapeSurfaceMesh. For polyline shapes, skinning indices refer to polyline elements.
+  //
+  // @see MeshDataView, GetShapeMesh, GetShapeSurfaceMesh, GetShapeVisualMesh,
+  // Actor::GetContactSkinMesh
+  fn GetShapeContactSkinMesh(ShapeHandle shape) -> MeshDataView [pure, virtual, const, mochi_error, no_capi, nodiscard];
 
   // @brief Get a view of the shape's visual mesh data, including skinning data if available.
   //
   // @details Returns a triangle mesh (3 nodes per element) intended for visual rendering.
-  // Coordinates and connectivity are returned in visual-mesh node-index space, including any visual
-  // mesh nodes not referenced by the visual connectivity. The mesh may include linear skinning data
-  // for deformation. For shapes without a visual mesh, returns an empty view.
+  // Coordinates and connectivity are returned in visual-mesh node-index space, including any nodes
+  // that no visual triangle references. The mesh includes the authored skinning data when
+  // available. For shapes without a visual mesh, returns an empty view.
   //
   // @param[in] shape Handle to a valid shape.
   //
@@ -674,13 +716,12 @@ class Context [no_init, no_destruct, singleton] {
   //
   // @note Can be called on any thread.
   // @note The returned view will be invalid after the shape handle has been released.
-  // @note When linear visual-mesh skinning data is present, skinning indices refer to the node
-  // ordering returned by @ref GetShapeMesh, not to the compact surface-node ordering returned by
-  // @ref GetShapeSurfaceMesh. Rod visual mesh embeddings are nonlinear and are not exposed through
-  // this linear skinning field.
+  // @note For tetrahedral and triangular mesh shapes, skinning indices refer to the node ordering
+  // returned by @ref GetShapeMesh, not to the compact surface-node ordering returned by
+  // @ref GetShapeSurfaceMesh. For polyline shapes, skinning indices refer to polyline elements.
   //
   // @see MeshDataView, GetShapeMesh, GetShapeSurfaceMesh, Actor::GetVisualMesh
-  fn GetShapeVisualMesh(ShapeHandle shape) -> MeshDataView [pure, virtual, const, mochi_error, no_capi];
+  fn GetShapeVisualMesh(ShapeHandle shape) -> MeshDataView [pure, virtual, const, mochi_error, no_capi, nodiscard];
 
   // @brief Get an axis-aligned bounding box (AABB) that contains the shape, in its local coordinate
   // frame.
@@ -692,7 +733,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   // @note Sets an error for shapes that do not have a bounding volume (e.g., articulated shapes —
   // query their link shapes individually instead).
-  fn GetShapeAabb(ShapeHandle shape) -> Aabb [pure, virtual, const, mochi_error];
+  fn GetShapeAabb(ShapeHandle shape) -> Aabb [pure, virtual, const, mochi_error, nodiscard];
 
   // @brief Get information about an articulated shape.
   //
@@ -705,7 +746,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note The returned information will be invalid after the shape handle has been released.
   //
   // @see ArticulatedShapeInfo, Actor::GetArticulatedShapeInfo
-  fn GetArticulatedShapeInfo(ShapeHandle shape) -> ArticulatedShapeInfo [pure, virtual, const, mochi_error, no_capi];
+  fn GetArticulatedShapeInfo(ShapeHandle shape) -> ArticulatedShapeInfo [pure, virtual, const, mochi_error, no_capi, nodiscard];
 
   // @brief Release a shape handle.
   //
@@ -731,7 +772,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see IsFileCacheEnabled
-  fn GetNumShapes() -> int [pure, virtual, const];
+  fn GetNumShapes() -> int [pure, virtual, const, nodiscard];
 
   # File Cache
   // @brief Enable or disable the file cache.
@@ -755,7 +796,7 @@ class Context [no_init, no_destruct, singleton] {
   // @return True if the file cache is enabled, false otherwise.
   //
   // @note Call on any thread.
-  fn IsFileCacheEnabled() -> bool [pure, virtual, const];
+  fn IsFileCacheEnabled() -> bool [pure, virtual, const, nodiscard];
 
   // @brief Release all shapes that are being preserved by the file cache (if any).
   //
@@ -773,8 +814,9 @@ class Context [no_init, no_destruct, singleton] {
   // in case the file had been modified. All entries for @ref filePath are removed, including every
   // variant produced by different bake scale/transform combinations.
   //
-  // @param[in] filePath Path to a file that may have been loaded. The match is case-sensitive and
-  // must equal the path used at load time exactly.
+  // @param[in] filePath Path to a file that may have been loaded. It is matched against the path
+  // used at load time after lexical normalization, so separator style and "." / ".." segments may
+  // differ. The match is case-sensitive.
   //
   // @note Call on any thread.
   //
@@ -797,7 +839,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see DestroyScene
-  fn CreateScene(StringView name) -> Scene* [pure, virtual];
+  fn CreateScene(StringView name) -> Scene* [pure, virtual, nodiscard];
 
   // @brief Immediately destroy a scene and all its actors and constraints.
   //
@@ -841,7 +883,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see CreateScene, DestroyScene
-  fn IsValidScene(Scene const* scene [nullable]) -> bool [pure, virtual, const];
+  fn IsValidScene(Scene const* scene [nullable]) -> bool [pure, virtual, const, nodiscard];
 
   // @brief Create a new @ref AsyncScene.
   //
@@ -866,7 +908,7 @@ class Context [no_init, no_destruct, singleton] {
   // @ref AsyncScene is created, single-threaded mode may be enabled.
   //
   // @see DestroyAsyncScene, IsValidAsyncScene, CreateAsyncScenePaused
-  fn CreateAsyncScene(StringView name) -> AsyncScene* [pure, virtual, mochi_error, no_capi, no_python, nullable];
+  fn CreateAsyncScene(StringView name) -> AsyncScene* [pure, virtual, mochi_error, no_capi, no_python, nullable, nodiscard];
 
   // @brief Create a new @ref AsyncScene that will initially be in the paused state.
   //
@@ -890,7 +932,7 @@ class Context [no_init, no_destruct, singleton] {
   // @ref AsyncScene is created, single-threaded mode may be enabled.
   //
   // @see CreateAsyncScene, DestroyAsyncScene, IsValidAsyncScene, AsyncScene::Pause, AsyncScene::IsPaused
-  fn CreateAsyncScenePaused(StringView name) -> AsyncScene* [pure, virtual, mochi_error, no_capi, no_python, nullable];
+  fn CreateAsyncScenePaused(StringView name) -> AsyncScene* [pure, virtual, mochi_error, no_capi, no_python, nullable, nodiscard];
 
   // @brief Immediately stop and destroy an @ref AsyncScene and all its actors and constraints.
   //
@@ -917,7 +959,7 @@ class Context [no_init, no_destruct, singleton] {
   // @note Call on any thread.
   //
   // @see CreateAsyncScene, DestroyAsyncScene
-  fn IsValidAsyncScene(AsyncScene const* scene [nullable]) -> bool [pure, virtual, const, no_capi, no_python];
+  fn IsValidAsyncScene(AsyncScene const* scene [nullable]) -> bool [pure, virtual, const, no_capi, no_python, nodiscard];
 
   # DebugServer APIs
   // @brief Get the debug server for this context.
@@ -951,7 +993,7 @@ class Context [no_init, no_destruct, singleton] {
 // @note Call on any thread.
 //
 // @see DestroyContext
-fn CreateContext(int numWorkerThreads = -1) -> Context* [export, no_python];
+fn CreateContext(int numWorkerThreads = -1) -> Context* [export, no_python, nodiscard];
 
 // @brief Shut down SuperDex Physics by destroying the @ref Context object.
 //

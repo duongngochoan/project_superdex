@@ -1,3 +1,17 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 // @brief Manages debug visualization features for a scene.
 //
 // @details Provides a feature-based system for visualizing various aspects of the physics
@@ -25,7 +39,7 @@ class DebugDraw [no_init, no_destruct] {
   // @note When disabled, @ref GatherData returns empty data regardless of feature settings.
   //
   // @see Enable
-  fn IsEnabled() -> bool [pure, virtual, const];
+  fn IsEnabled() -> bool [pure, virtual, const, nodiscard];
 
   // @brief Enable or disable debug drawing for the entire scene.
   //
@@ -41,7 +55,7 @@ class DebugDraw [no_init, no_destruct] {
   // @return Number of features that can be individually enabled or disabled.
   //
   // @see FindFeature, GetFeatureName
-  fn GetNumFeatures() -> int [pure, virtual, const];
+  fn GetNumFeatures() -> int [pure, virtual, const, nodiscard];
 
   // @brief Find a feature by name.
   //
@@ -50,7 +64,7 @@ class DebugDraw [no_init, no_destruct] {
   // @return Feature index if found, or -1 if not found.
   //
   // @see GetFeatureName, EnableFeature
-  fn FindFeature(StringView name) -> int [pure, virtual, const];
+  fn FindFeature(StringView name) -> int [pure, virtual, const, nodiscard];
 
   // @brief Get the name of a feature by index.
   //
@@ -59,7 +73,7 @@ class DebugDraw [no_init, no_destruct] {
   // @return Name of the feature.
   //
   // @see GetNumFeatures, FindFeature
-  fn GetFeatureName(int index) -> StringView [pure, virtual, const];
+  fn GetFeatureName(int index) -> StringView [pure, virtual, const, nodiscard];
 
   // @brief Get the description of a feature by index.
   //
@@ -68,7 +82,7 @@ class DebugDraw [no_init, no_destruct] {
   // @return Human-readable description of the feature.
   //
   // @see GetNumFeatures, GetFeatureName
-  fn GetFeatureDescription(int index) -> StringView [pure, virtual, const];
+  fn GetFeatureDescription(int index) -> StringView [pure, virtual, const, nodiscard];
 
   // @brief Check if a feature is currently enabled.
   //
@@ -77,7 +91,7 @@ class DebugDraw [no_init, no_destruct] {
   // @return True if the feature is enabled, false otherwise.
   //
   // @see EnableFeature
-  fn IsFeatureEnabled(int index) -> bool [pure, virtual, const];
+  fn IsFeatureEnabled(int index) -> bool [pure, virtual, const, nodiscard];
 
   // @brief Enable or disable a specific feature.
   //
@@ -100,7 +114,7 @@ class DebugDraw [no_init, no_destruct] {
   // @note Returns empty data if @ref IsEnabled is false.
   //
   // @see DebugDrawData
-  fn GatherData() -> DebugDrawData [pure, virtual];
+  fn GatherData() -> DebugDrawData [pure, virtual, nodiscard];
 
   // @brief Enable or disable debug drawing for a specific actor.
   //

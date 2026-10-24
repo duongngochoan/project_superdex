@@ -270,7 +270,7 @@ enum struct PreconditionerType {
   /**
    * @brief Domain decomposition preconditioner, where each actor is a subdomain.
    *
-   * @note The most appropriate preconditioner type is used for each actor.
+   * @note By default, an appropriate preconditioner type is selected for each actor.
    */
   PerActor,
 
@@ -315,9 +315,9 @@ namespace mochi {
  *
  * @note This setting only applies to @ref LinearSolverType::CG, @ref LinearSolverType::CudaCG, @ref
  * LinearSolverType::ParallelCG and @ref LinearSolverType::AsyncCG. @ref LinearSolverType::GMRES,
- * @ref LinearSolverType::CudaGMRES, @ref LinearSolverType::MINRES, and @ref
- * LinearSolverType::AugmentedCG always use the L2-norm of the residual regardless of this setting.
- * Direct solvers do not have stop criteria.
+ * @ref LinearSolverType::CudaGMRES, and @ref LinearSolverType::AugmentedCG always use the L2-norm
+ * of the residual regardless of this setting. @ref LinearSolverType::MINRES always uses the
+ * preconditioner-induced norm of the residual. Direct solvers do not have stop criteria.
  */
 enum struct LinearSolverConvergenceNorm {
   ResidualL2, ///< L2-norm of the residual: \f$\|r\|_2\f$.
@@ -370,7 +370,8 @@ struct LinearSolverParams {
   real absTol = 1e-9_r;
 
   /**
-   * @brief Relative residual norm tolerance for convergence, relative to the initial residual.
+   * @brief Relative residual norm tolerance for convergence, relative to the same norm of the
+   * right-hand side.
    *
    * @note Applies only to iterative solvers.
    * @note Ignored when using @ref LinearToleranceStrategy::EisenstatWalker1 or @ref
@@ -381,17 +382,18 @@ struct LinearSolverParams {
   real relTol = 1e-5_r;
 
   /**
-   * @brief Relative residual norm tolerance for divergence, relative to the initial residual.
+   * @brief Relative residual norm tolerance for divergence, relative to the same norm of the
+   * right-hand side.
    *
    * @note Applies only to iterative solvers.
    */
   real relDivTol = 1e10_r;
 
   /**
-   * @brief Maximum number of linear solver iterations.
+   * @brief Maximum number of iterations for iterative solvers.
    *
    * @note Applies only to iterative solvers.
-   * @note Must be non-negative or @ref kAutoLinearSolverMaxIter.
+   * @note Must be positive or @ref kAutoLinearSolverMaxIter.
    * @note @ref kAutoLinearSolverMaxIter lets Mochi select the maximum number of iterations based
    * on the problem.
    */

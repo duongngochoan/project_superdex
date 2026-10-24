@@ -162,12 +162,15 @@ TEST(ProducerConsumerBufferTest, ThreadSafety) {
       std::this_thread::yield();
     }
     while (true) {
+      // Read the flag before Consume(): if it is already set, every Produce() precedes this
+      // Consume(), so a false return means the last value was already consumed.
+      bool const done = producerDone.load(std::memory_order_acquire);
       if (buffer.Consume()) {
         int val = buffer.GetConsumerData();
         EXPECT_GE(val, lastConsumed);
         lastConsumed = val;
         ++consumeCount;
-      } else if (producerDone.load(std::memory_order_acquire)) {
+      } else if (done) {
         break;
       }
     }

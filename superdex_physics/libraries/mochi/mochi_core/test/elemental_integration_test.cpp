@@ -89,11 +89,7 @@ TEST(ElementalIntegration, SmithNeoHookeanTetMatchesStressWork) {
   std::vector<Real3> const coordinates{node(0), node(1), node(2), node(3)};
   std::vector<Int4> const connectivity{Int4{0, 1, 2, 3}};
   TetrahedralMesh const mesh{coordinates, connectivity};
-  TetElement const element{
-      0,
-      mesh.GetNodeCoordinates(),
-      mesh.GetElementConnectivity(),
-      tetrahedral::kTetrahedralQuadrature1};
+  TetElement const element{0, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity()};
 
   SmithNeoHookeanMaterialParams materialParams;
   materialParams.youngsModulus = kE;

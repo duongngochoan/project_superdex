@@ -741,13 +741,17 @@
  * @ingroup prefabs_constraints
  */
 
-/* ---- Prefabs / Contact Filters (3) ---- */
+/* ---- Prefabs / Contact Filters (4) ---- */
 /**
  * @struct superdex::prefab::ActorContactEntry
  * @ingroup prefabs_filters
  */
 /**
  * @struct superdex::prefab::ContactFilter
+ * @ingroup prefabs_filters
+ */
+/**
+ * @struct superdex::prefab::ContactPairParamsOverrideEntry
  * @ingroup prefabs_filters
  */
 /**
@@ -763,17 +767,6 @@
 /**
  * @struct superdex::prefab::PrefabParams
  * @ingroup prefabs_io
- */
-
-/**
- * @defgroup recording Recording
- * @brief Capture of per-step simulation data to an HDF5 file for offline analysis, replay and training-data generation. Driven by @ref superdex::Scene::StartRecording, @ref superdex::Scene::StopRecording and @ref superdex::Scene::IsRecording.
- */
-
-/* ---- Recording / - (1) ---- */
-/**
- * @struct superdex::RecordingParams
- * @ingroup recording
  */
 
 /**
@@ -958,4 +951,3 @@
  * @class superdex::Simd
  * @ingroup simd
  */
-

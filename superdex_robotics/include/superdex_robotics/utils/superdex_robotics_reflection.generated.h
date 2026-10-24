@@ -21,7 +21,16 @@
 #pragma once
 
 #include <mochi_core/utils/reflection.h>
+#include <superdex_robotics/actuators/actuator_base.h>
+#include <superdex_robotics/controllers/controller_basic_jsc_pd.h>
+#include <superdex_robotics/controllers/controller_basic_osc_pd.h>
+#include <superdex_robotics/controllers/controller_mochi_articulated_pose.h>
+#include <superdex_robotics/sensors/camera_sensor.h>
 #include <superdex_robotics/superdex_robotics.h>
+#include <superdex_robotics/utils/bot_utils.h>
+#include <superdex_robotics/utils/superdex_robotics_api_checks.generated.h>
+
+#include <limits>
 
 MOCHI_ENUM_BEGIN(superdex::robotics::BotFileType)
 MOCHI_ENUM_ITEM(BotPrefab)
@@ -34,14 +43,6 @@ MOCHI_ENUM_ITEM(ParentFromLink)
 MOCHI_ENUM_ITEM(RootFromParent)
 MOCHI_ENUM_COUNT(Count)
 MOCHI_ENUM_END()
-
-#include <superdex_robotics/controllers/controller_basic_jsc_pd.h>
-#include <superdex_robotics/controllers/controller_basic_osc_pd.h>
-#include <superdex_robotics/controllers/controller_mochi_articulated_pose.h>
-#include <superdex_robotics/sensors/camera_sensor.h>
-#include <superdex_robotics/actuators/actuator_base.h>
-#include <superdex_robotics/utils/bot_utils.h>
-#include <superdex_robotics/utils/superdex_robotics_api_checks.generated.h>
 
 MOCHI_STRUCT_BEGIN_EX(superdex::robotics::RoboticsHandle)
 MOCHI_FIELD(value)

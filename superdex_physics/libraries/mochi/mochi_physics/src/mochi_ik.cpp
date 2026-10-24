@@ -16,6 +16,7 @@
 
 #include "mochi_ik.h"
 #include "mochi_articulated_body.h"
+#include "mochi_contact_pair_params.h"
 #include "mochi_context.h"
 #include "mochi_scene.h"
 
@@ -24,25 +25,26 @@
 
 using namespace mochi;
 
-namespace {
-struct IKSolverHandle {
-  IKSolverImpl* handle = nullptr;
-};
-} // namespace
-
 IKSolverImpl::IKSolverImpl(Scene* scene, Error& error) {
   MOCHI_ERROR_IF(scene == nullptr, error, "Cannot create an IKSolver without a Scene");
   MOCHI_ERROR_RETURN(error);
-  _scene = assert_cast<SceneImpl*>(scene);
+  auto* const sceneImpl = assert_cast<SceneImpl*>(scene);
 
   // Check to ensure that we only have articulated or rigid actors
-  _scene->ForEachActor([&](Actor* actor) {
+  sceneImpl->ForEachActor([&](Actor* actor) {
     MOCHI_ERROR_IF(
         actor->GetType() != ActorType::Articulated && actor->GetType() != ActorType::Rigid,
         error,
         "Cannot create an IKSolver with non-articulated or non-rigid actors");
   });
   MOCHI_ERROR_RETURN(error);
+
+  // AsyncScene and IKSolver both destroy their owned Scene, so ownership must be exclusive.
+  MOCHI_ERROR_IF_NOT(sceneImpl->TryClaimOwnership(), error, "Scene is already owned.");
+  MOCHI_ERROR_RETURN(error);
+
+  // Assign _scene only after error checks. ~IKSolverImpl destroys it.
+  _scene = sceneImpl;
 
   // Use default solver params
   SetSolverParams(experimental::IKSolverParams{});
@@ -53,24 +55,25 @@ IKSolverImpl::IKSolverImpl(Scene* scene, Error& error) {
   // Force use single island, so that collisions in another island will not be missed.
   _scene->SetForceSingleIsland(true);
 
-  // Let the scene know that there is an IKSolver attached to it.
+  // Disable contact dissipation on all actors
   auto& reg = _scene->GetRegistry();
-  reg.set<IKSolverHandle>(this);
-
-  // Disable friction on all actors
   reg.view<ContactParams>().each([](ContactParams& params) {
     params.coulombFrictionCoefficient = 0_r;
     params.viscousFrictionCoefficient = 0_r;
+    params.normalViscousDampingCoefficient = 0_r;
   });
+  reg.ctx<CContactPairParamsOverrideTable>().DisableDissipation();
 
-  // Disable joint friction and inertia by zeroing them via the setters. The components are
-  // always present on articulated actors, so zeroing (rather than removing them) keeps that
-  // invariant while the assembly gates skip the now-zero forces. IK always supplies
-  // validly-sized, finite, non-negative values, so a failure here is a bug, not user error —
-  // hence ErrorAssert{}. (CActorInterface is file-local to mochi_scene.cpp, so the Actor*
-  // comes from ForEachActor rather than a reg.view here.)
-  ArticulatedJointFrictionParams zeroFriction{};
-  zeroFriction.falloffVel = 0_r; // value-init keeps the struct's 1e-3 default; zero it too
+  // Disable damping on every existing constraint, including articulated joint limits and pose
+  // controller constraints.
+  _scene->ForEachConstraint(
+      [](Constraint* constraint) { constraint->SetDamping(0_r, ErrorAssert{}); });
+
+  // Ignore pending pose-controller target velocities, whose extrapolation is rate-dependent.
+  reg.view<CControllerTargetVelocity>().each(
+      [](CControllerTargetVelocity& targetVelocity) { targetVelocity.use = false; });
+
+  // Disable joint friction forces and inertia via the setters.
   // Fixed FILO stack budget (a generous joint-count bound). The macro needs a compile-time
   // size, so it can't be numJoints; the DynamicArrays spill to heap if an actor exceeds it.
   constexpr size_t kJointStackBudget =
@@ -79,9 +82,15 @@ IKSolverImpl::IKSolverImpl(Scene* scene, Error& error) {
     if (actor->GetType() != ActorType::Articulated) {
       return;
     }
-    size_t const numJoints = actor->GetArticulatedJointFrictionParams(ErrorAssert{}).size();
+    auto const currentFriction = actor->GetArticulatedJointFrictionParams(ErrorAssert{});
+    size_t const numJoints = currentFriction.size();
     MOCHI_FILO_STACK_ALLOCATOR(allocator, kJointStackBudget);
-    DynamicArray<ArticulatedJointFrictionParams> friction(numJoints, zeroFriction, &allocator);
+    DynamicArray<ArticulatedJointFrictionParams> friction(currentFriction, &allocator);
+    for (auto& params : friction) {
+      params.viscous = 0_r;
+      params.coulomb = 0_r;
+      params.stictionExtra = 0_r;
+    }
     actor->SetArticulatedJointFrictionParams(friction, ErrorAssert{});
     DynamicArray<real> inertia(numJoints, 0_r, &allocator);
     actor->SetArticulatedJointInertiaParams(inertia, ErrorAssert{});
@@ -117,6 +126,8 @@ void IKSolverImpl::SetSolverParams(experimental::IKSolverParams const& ikParams)
   // rough gradient computation under low precisions
   params.nonLinearSolver.lineSearchType = LineSearchType::Armijo;
   params.nonLinearSolver.lineSearchMaxIter = ikParams.lineSearchMaxIter;
+  // TODO: Make IK robust near kinematic singularities, such as out-of-reach targets, where Newton
+  // steps grow huge and can push links into obstacles.
   _scene->SetSolverParams(params, ErrorAssert{});
 
   _positionErrorThres = ikParams.positionErrorThres;
@@ -148,18 +159,16 @@ Constraint* IKSolverImpl::CreatePositionTarget(
   MOCHI_ERROR_IF(weight < 0_r, error, "Weight must not be negative");
   MOCHI_ERROR_RETURN(error, {});
 
-  ClearPositionTarget(actor, error);
-  MOCHI_ERROR_RETURN(error, {});
-
-  // Recreate
   RigidPivotPositionConstraintParams conParams;
   conParams.localPosition = localPosition;
   conParams.targetPosition = targetPosition;
   conParams.actor = actor;
   conParams.stiffness = weight;
+  conParams.damping = 0_r;
   auto* con = _scene->CreateRigidPivotPositionConstraint(conParams, error);
   MOCHI_ERROR_RETURN(error, {});
 
+  ClearPositionTarget(actor, ErrorAssert{});
   _positionTargets[actor] = con;
   return con;
 }
@@ -185,18 +194,16 @@ Constraint* IKSolverImpl::CreateRotationTarget(
   MOCHI_ERROR_IF(weight < 0_r, error, "Weight must not be negative");
   MOCHI_ERROR_RETURN(error, {});
 
-  ClearRotationTarget(actor, error);
-  MOCHI_ERROR_RETURN(error, {});
-
-  // Recreate
   RigidPivotRotationConstraintParams conParams;
   conParams.localRotation = localRotation;
   conParams.targetRotation = targetRotation;
   conParams.actor = actor;
   conParams.stiffness = weight;
+  conParams.damping = 0_r;
   auto* con = _scene->CreateRigidPivotRotationConstraint(conParams, error);
   MOCHI_ERROR_RETURN(error, {});
 
+  ClearRotationTarget(actor, ErrorAssert{});
   _rotationTargets[actor] = con;
   return con;
 }

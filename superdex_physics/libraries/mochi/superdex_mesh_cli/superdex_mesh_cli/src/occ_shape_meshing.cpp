@@ -78,15 +78,21 @@ IMeshData_Status mochi::mesh::cli::occ::MeshShape(
   // falls back to under FaceMesher::Isotropic.
   Handle(BRepMesh_Context) const context = new BRepMesh_Context(IMeshTools_MeshAlgoType_Delabella);
 
+  // Referenced by the discretizers installed below, so it must outlive mesher.Perform.
+  FaceSizingField const sizing(
+      {params.targetEdgeLength, params.linearDeflection, params.angularDeflection},
+      params.faceMesher == FaceMesher::Isotropic ? params.faceSizing : FaceSizingMap(),
+      shape);
+
   if (params.faceMesher == FaceMesher::Isotropic) {
     // Only Adaptive grades the interior, because only Adaptive lets curvature refine the edges.
     // Pairing them keeps boundary and interior densities consistent; Uniform samples the interior
     // uniformly, matching its uniform boundary.
     bool const adaptive = params.edgeSampling == StepMeshBodyParams::EdgeSampling::Adaptive;
-    context->SetFaceDiscret(new BRepMesh_FaceDiscret(
-        new IsotropicFaceMesherFactory(params.targetEdgeLength, adaptive, fallbackStats)));
+    context->SetFaceDiscret(
+        new BRepMesh_FaceDiscret(new IsotropicFaceMesherFactory(sizing, adaptive, fallbackStats)));
     context->SetEdgeDiscret(new UniformEdgeDiscretizer(
-        params.targetEdgeLength, adaptive ? CurveSampling::Adaptive : CurveSampling::Uniform));
+        sizing, adaptive ? CurveSampling::Adaptive : CurveSampling::Uniform));
   }
 
   // These mutate global OCCT state; safe here because the helper is a single-shot process.

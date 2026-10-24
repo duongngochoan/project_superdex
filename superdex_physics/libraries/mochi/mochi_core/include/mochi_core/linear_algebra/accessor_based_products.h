@@ -159,6 +159,7 @@ MOCHI_ANY void DirectProductSimdAlongM(
   //--- such as scalar type, register size and cache line size. 32 rows per batch is empirically
   //--- optimal (or near-optimal) for single-precision arithmetic on several x86-64 and ARM
   //--- architectures.
+  // TODO: Make MSVC keep 32-row double batches in registers without slowing other compilers.
   constexpr int kRowsPerBatch = 32;
   int r = 0;
   if constexpr (mATC == krylov::kDynamic || mATC >= kRowsPerBatch) {
@@ -200,7 +201,7 @@ MOCHI_ANY void DirectProductSimdAlongM(
         MOCHI_CASE_DIRECT_ROW_BLOCK_PRODUCT_SIMD_ALONG_M(13);
         MOCHI_CASE_DIRECT_ROW_BLOCK_PRODUCT_SIMD_ALONG_M(14);
         MOCHI_CASE_DIRECT_ROW_BLOCK_PRODUCT_SIMD_ALONG_M(15);
-        MOCHI_UNLIKELY default : {
+        MOCHI_UNLIKELY default: {
           static_assert(
               kRowsPerBatchHalf == 16, "Please update the cases in this switch statement");
           MOCHI_ASSERT_VERBOSE(false, "Unsupported number of leftover rows.");
@@ -275,13 +276,19 @@ MOCHI_ANY inline void DirectRowBlockProductSimdAlongK(
   constexpr auto kVecSize = VType::kSize;
   MOCHI_ASSERT_VERBOSE((r0 >= 0) && (r0 + kNumRows <= m), "Out-of-range rows.");
 
+  //--- Each column vector of B is loaded once for all the rows of the batch. For a row-major B it's
+  //--- a gather, which compilers don't reliably hoist out of the row loop.
   for (int c = 0; c < n; ++c) {
     int j = 0;
-    VType s[kNumRows] = {};
+    VType s[kNumRows] MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
+    for (int rr = 0; rr < kNumRows; ++rr) {
+      s[rr] = SimdZero<VType>();
+    }
     if constexpr (kATC == krylov::kDynamic || kATC >= kVecSize) {
       for (; j + kVecSize <= k; j += kVecSize) {
+        VType const b = B.template ColVector<VType>(j, c);
         for (int rr = 0, r = r0; rr < kNumRows; ++rr, ++r) {
-          s[rr] += A.template RowVector<VType>(r, j) * B.template ColVector<VType>(j, c);
+          s[rr] += A.template RowVector<VType>(r, j) * b;
         }
       }
     }
@@ -289,24 +296,26 @@ MOCHI_ANY inline void DirectRowBlockProductSimdAlongK(
     //--- Leftover entries. Note that {Row,Col}Vector<V, N>(r, c) and {Row,Col}Vector<V>(r, c, N)
     //--- return zeros for all entries after the N-th entry.
     constexpr int kLeftoverEntries = kATC % kVecSize;
-    for (int rr = 0, r = r0; rr < kNumRows; ++rr, ++r) {
-      if constexpr (kATC > 0 && kLeftoverEntries > 0) {
-        MOCHI_ASSERT_VERBOSE(
-            kLeftoverEntries == k.iVal() - j, "Inconsistent number of leftover entries.");
-        s[rr] += A.template RowVector<VType, kLeftoverEntries>(r, j) *
-            B.template ColVector<VType, kLeftoverEntries>(j, c);
-      } else if constexpr (kATC == krylov::kDynamic) {
-        int const leftoverEntries = k.iVal() - j;
-        MOCHI_ASSERT_VERBOSE(
-            leftoverEntries >= 0 && leftoverEntries < kVecSize,
-            "Inconsistent number of leftover entries.");
-        if (leftoverEntries > 0) {
-          s[rr] += A.template RowVector<VType>(r, j, leftoverEntries) *
-              B.template ColVector<VType>(j, c, leftoverEntries);
-        }
-      } else {
-        static_assert(kATC >= 0 && kLeftoverEntries == 0, "Unsupported case");
+    if constexpr (kATC > 0 && kLeftoverEntries > 0) {
+      MOCHI_ASSERT_VERBOSE(
+          kLeftoverEntries == k.iVal() - j, "Inconsistent number of leftover entries.");
+      VType const b = B.template ColVector<VType, kLeftoverEntries>(j, c);
+      for (int rr = 0, r = r0; rr < kNumRows; ++rr, ++r) {
+        s[rr] += A.template RowVector<VType, kLeftoverEntries>(r, j) * b;
       }
+    } else if constexpr (kATC == krylov::kDynamic) {
+      int const leftoverEntries = k.iVal() - j;
+      MOCHI_ASSERT_VERBOSE(
+          leftoverEntries >= 0 && leftoverEntries < kVecSize,
+          "Inconsistent number of leftover entries.");
+      if (leftoverEntries > 0) {
+        VType const b = B.template ColVector<VType>(j, c, leftoverEntries);
+        for (int rr = 0, r = r0; rr < kNumRows; ++rr, ++r) {
+          s[rr] += A.template RowVector<VType>(r, j, leftoverEntries) * b;
+        }
+      }
+    } else {
+      static_assert(kATC >= 0 && kLeftoverEntries == 0, "Unsupported case");
     }
 
     for (int rr = 0, r = r0; rr < kNumRows; ++rr, ++r) {
@@ -378,7 +387,7 @@ MOCHI_ANY inline void DirectProductSimdAlongK(
         MOCHI_CASE_DIRECT_ROW_BLOCK_PRODUCT_SIMD_ALONG_K(5);
         MOCHI_CASE_DIRECT_ROW_BLOCK_PRODUCT_SIMD_ALONG_K(6);
         MOCHI_CASE_DIRECT_ROW_BLOCK_PRODUCT_SIMD_ALONG_K(7);
-        MOCHI_UNLIKELY default : {
+        MOCHI_UNLIKELY default: {
           static_assert(kRowsPerBatch == 8, "Please update the cases in this switch statement");
           MOCHI_ASSERT_VERBOSE(false, "Unsupported number of leftover rows.");
         }
@@ -482,7 +491,7 @@ MOCHI_ANY void PackColData(
   constexpr bool kUseSimd = VType::kIsSupported && (kCostsA.first < kCostsA.second);
   if constexpr (kUseSimd) {
     constexpr int kVecSize = VType::kSize;
-    if (row + kRowCount < m) {
+    if (row + kRowCount <= m) {
       for (int c = 0; c < k; ++c) {
         auto s1 = A.template ColVector<VType>(row, c);
         auto s2 = A.template ColVector<VType>(row + kVecSize, c);

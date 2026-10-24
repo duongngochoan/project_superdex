@@ -289,16 +289,6 @@ void MochiRenderer::SetViewSettings(SceneViewSettings const& settings) {
   }
 }
 
-void MochiRenderer::SetPresentationCameraTransform(
-    filament::math::double3 position,
-    filament::math::quat rotation) {
-  if (_presentationCamera) {
-    filament::math::mat4f model(rotation);
-    model[3] = filament::math::float4{position, 1.0f};
-    _presentationCamera->setModelMatrix(model);
-  }
-}
-
 void MochiRenderer::SetPresentationCameraLookAt(
     filament::math::double3 eye,
     filament::math::double3 target,
@@ -306,21 +296,6 @@ void MochiRenderer::SetPresentationCameraLookAt(
   if (_presentationCamera) {
     _presentationCamera->lookAt(eye, target, up);
   }
-}
-
-void MochiRenderer::SetPresentationCameraProjection(
-    float fovDegrees,
-    float nearPlane,
-    float farPlane) {
-  if (_presentationCamera && _presentationView) {
-    auto vp = _presentationView->getViewport();
-    float aspect = static_cast<float>(vp.width) / static_cast<float>(vp.height);
-    _presentationCamera->setProjection(fovDegrees, aspect, nearPlane, farPlane);
-  }
-}
-
-void MochiRenderer::SetPresentationViewport(int width, int height) {
-  ResizePresentationTarget(width, height);
 }
 
 } // namespace mochi_renderer

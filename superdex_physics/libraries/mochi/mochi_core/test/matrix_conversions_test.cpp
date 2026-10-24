@@ -800,10 +800,18 @@ TEST(StaticCast, IslandOperators) {
     SparseMatrix<float> interMat1(
         2, DynamicArray<int>{0, 1, 2}, DynamicArray<int>{0, 1}, DynamicArray<float>{1.0f, 2.0f});
     interactionMatrices.emplace_back(0, 3, AnyMatrix<float>{interMat1}, std::nullopt);
+    // Reciprocal 3x2 and 2x3 interactions without non-zeros, whose values are empty
+    interactionMatrices.emplace_back(
+        0, 3, AnyMatrix<float>{SparseMatrix<float>(2, {0, 0, 0, 0}, {}, {})}, std::nullopt);
+    interactionMatrices.emplace_back(
+        3, 0, AnyMatrix<float>{SparseMatrix<float>(3, {0, 0, 0}, {}, {})}, std::nullopt);
 
     // Create IslandOperators
     IslandOperatorsOwningLite<float> opsOwningFloat{
         std::move(actorMatrices), std::move(interactionMatrices)};
+    auto& inters = opsOwningFloat.interactionMatrices;
+    inters[1].symmetricPair.emplace(AsConstView(inters[2].matrix));
+    inters[2].symmetricPair.emplace(AsConstView(inters[1].matrix));
     IslandOperators<float> opsFloat = opsOwningFloat.AsConstView();
 
     // Cast to double
@@ -835,6 +843,14 @@ TEST(StaticCast, IslandOperators) {
       EXPECT_TRUE(NearEqualSpan(spMatFloat.Indices(), spMatDouble.Indices()));
       EXPECT_TRUE(NearEqualSpan(spMatFloat.Values(), spMatDouble.Values(), fTol));
     }
+
+    // Verify that the reciprocal interactions are each other's symmetric pair
+    auto const pointers = [](AnyMatrixView<double const> const& mat) {
+      return std::get<kSpMatIdx>(mat).Pointers().data();
+    };
+    auto const& dstInters = opsDouble.GetInteractionMatrices();
+    EXPECT_EQ(pointers(dstInters[2].matrix), pointers(dstInters[1].symmetricPair.value()));
+    EXPECT_EQ(pointers(dstInters[1].matrix), pointers(dstInters[2].symmetricPair.value()));
 
     // Verify type conversion
     static_assert(

@@ -257,15 +257,11 @@ void AssembleObjResDRes(
  * @tparam ElementT         Element type.
  * @tparam kNumFields       Number of DoF fields per node (default: ElementT::kSpaceDim).
  * @tparam kBatchSize       Batch size (default: @ref kDefaultFemBatchSize).
- * @tparam InitEleDResFn    Functor type for element dresidual initialization.
  *
  * @param[in]  l2g          Local-to-global DoF map. Must have uniform stride (ElementT::kNumDofs ×
  *                          kNumFields) for all elements.
  * @param[in]  batchedElOp  User functor composing batched element operations.
  * @param[in]  activeSubset Active element subset (empty = all elements).
- * @param[in]  initEleDResFn Functor to initialize the element dresidual matrix. Signature:
- *   (RowMatrix<real, kNumEleDofs, kNumEleDofs>&, int eleIdx) -> bool. Must return true if
- *   initialized to non-zero, false if initialized to zero.
  * @param[in]  globalSol    Global solution vector.
  * @param[in]  J            Jacobian matrix whose columns span the low-dimensional subspace.
  * @param[in,out] outObj    Objective (merit) value. Only accumulated if requested.
@@ -278,13 +274,11 @@ void AssembleObjResDRes(
 template <
     class ElementT,
     int kNumFields = ElementT::kSpaceDim,
-    int kBatchSize = kDefaultFemBatchSize,
-    typename InitEleDResFn>
+    int kBatchSize = kDefaultFemBatchSize>
 void AssembleAndProjectObjResDRes(
     Local2GlobalMap const& l2g,
     ElOpFnType<ElementT, kNumFields, kBatchSize> const& batchedElOp,
     AssemblyActiveSubset const& activeSubset,
-    InitEleDResFn const& initEleDResFn,
     ColumnVectorView<real const> globalSol,
     RowMatrixView<real const> J,
     double& outObj,
@@ -299,13 +293,11 @@ void AssembleAndProjectObjResDRes(
 template <
     class ElementT,
     int kNumFields = ElementT::kSpaceDim,
-    int kBatchSize = kDefaultFemBatchSize,
-    typename InitEleDResFn>
+    int kBatchSize = kDefaultFemBatchSize>
 void AssembleAndProjectObjResDRes(
     Local2GlobalMap const& l2g,
     NoDispElOpFnType<ElementT, kNumFields, kBatchSize> const& batchedElOp,
     AssemblyActiveSubset const& activeSubset,
-    InitEleDResFn const& initEleDResFn,
     RowMatrixView<real const> J,
     double& outObj,
     ColumnVectorView<real> outRes,

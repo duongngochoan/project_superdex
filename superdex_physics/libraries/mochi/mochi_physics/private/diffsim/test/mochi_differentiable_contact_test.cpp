@@ -87,12 +87,12 @@ TEST_IF_F(MOCHI_INTERNAL, MochiDifferentiableContactPrepare, InitializesContactF
         };
 
         auto const& activeCollisionsAsync =
-            reg.get<CActiveCollisions<ContactType::Async, TimeStep::Current> const>(e);
+            reg.get<CActiveCollisions</*kIsSync*/ false, TimeStep::Current> const>(e);
         for (auto const& collision : activeCollisionsAsync) {
           verifyCollisionResult(collision.collisionResult);
         }
         auto const& activeCollisionsSync =
-            reg.get<CActiveCollisions<ContactType::Sync, TimeStep::Current> const>(e);
+            reg.get<CActiveCollisions</*kIsSync*/ true, TimeStep::Current> const>(e);
         for (auto const& collision : activeCollisionsSync) {
           verifyCollisionResult(collision.collisionResult);
         }
@@ -130,16 +130,16 @@ class MochiDifferentiableContact : public MochiSceneTestBase {
   }
 
  protected:
-  template <ContactType kContactType>
+  template <bool kIsSync>
   void ForEachCollisionResult(auto const& fn) {
     entt::registry& reg = test::GetRegistry(_scene);
     if (auto* collisions =
-            reg.try_get<CActiveCollisions<kContactType, TimeStep::Current>>(_queryEntity)) {
+            reg.try_get<CActiveCollisions<kIsSync, TimeStep::Current>>(_queryEntity)) {
       for (auto& collision : *collisions) {
         fn(collision.collisionResult);
       }
     }
-    if constexpr (kContactType == ContactType::Sync) {
+    if constexpr (kIsSync) {
       if (auto* colliderJacs = reg.try_get<CCollJacs<CollRole::Collider>>(_queryEntity)) {
         for (auto& jac : *colliderJacs) {
           fn(*jac.query);
@@ -148,28 +148,28 @@ class MochiDifferentiableContact : public MochiSceneTestBase {
     }
   }
 
-  template <ContactType kContactType>
+  template <bool kIsSync>
   int CountContacts() {
     int count = 0;
-    ForEachCollisionResult<kContactType>(
+    ForEachCollisionResult<kIsSync>(
         [&](ContactDetectionResult const& result) { count += isize(result.forcePerUnitArea); });
     return count;
   }
 
-  template <ContactType kContactType>
+  template <bool kIsSync>
   void SetUnitContactForceAdjoints() {
-    ForEachCollisionResult<kContactType>([&](ContactDetectionResult& result) {
+    ForEachCollisionResult<kIsSync>([&](ContactDetectionResult& result) {
       for (Real3& adjoint : result.forcePerUnitArea) {
         adjoint = Real3{1_r, 1_r, 1_r};
       }
     });
   }
 
-  template <ContactType kContactType>
+  template <bool kIsSync>
   real EvaluateLoss() {
     _scene->Step(kDt);
     real loss = 0_r;
-    ForEachCollisionResult<kContactType>([&](ContactDetectionResult const& result) {
+    ForEachCollisionResult<kIsSync>([&](ContactDetectionResult const& result) {
       for (auto const& force : result.forcePerUnitArea) {
         loss += Sum(force);
       }
@@ -177,7 +177,7 @@ class MochiDifferentiableContact : public MochiSceneTestBase {
     return loss;
   }
 
-  template <ContactType kContactType>
+  template <bool kIsSync>
   void RunTest(
       std::string_view prefabName,
       std::string_view queryActorName,
@@ -205,9 +205,9 @@ class MochiDifferentiableContact : public MochiSceneTestBase {
     StateHandle postState = _scene->CaptureState(test::ExpectOK{});
     ResetBackPropagation(_scene, test::ExpectOK{});
     PrepareBackPropagate(_scene, postState, preState, test::ExpectOK{});
-    int const numContacts = CountContacts<kContactType>();
+    int const numContacts = CountContacts<kIsSync>();
     EXPECT_GT(numContacts, 0);
-    SetUnitContactForceAdjoints<kContactType>();
+    SetUnitContactForceAdjoints<kIsSync>();
     BackPropagate(_scene, test::ExpectOK{});
     ColumnVector<real> analyticalInternal = reg.get<CDiffStateGrad const>(_gradEntity).value;
     ColumnVector<real> analytical =
@@ -218,14 +218,14 @@ class MochiDifferentiableContact : public MochiSceneTestBase {
     for (int dim = 0; dim < analytical.Rows(); ++dim) {
       _scene->RestoreState(preState, /*releaseImmediately*/ false, test::ExpectOK{});
       actorAddEpsFn(_gradActor, dim, kEps);
-      real const lossPlus = EvaluateLoss<kContactType>();
-      int numContactsTest = CountContacts<kContactType>();
+      real const lossPlus = EvaluateLoss<kIsSync>();
+      int numContactsTest = CountContacts<kIsSync>();
       EXPECT_EQ(numContactsTest, numContacts); // The test is fragile if #contacts varies
 
       _scene->RestoreState(preState, /*releaseImmediately*/ false, test::ExpectOK{});
       actorAddEpsFn(_gradActor, dim, -kEps);
-      real const lossMinus = EvaluateLoss<kContactType>();
-      numContactsTest = CountContacts<kContactType>();
+      real const lossMinus = EvaluateLoss<kIsSync>();
+      numContactsTest = CountContacts<kIsSync>();
       EXPECT_EQ(numContactsTest, numContacts); // The test is fragile if #contacts varies
 
       finiteDiff(dim) = (lossPlus - lossMinus) / (2_r * kEps);
@@ -247,11 +247,11 @@ class MochiDifferentiableContact : public MochiSceneTestBase {
 } // namespace
 
 TEST_IF_F(MOCHI_USE_DOUBLE_AND_INTERNAL, MochiDifferentiableContact, ConsistencyTestRigidAsync) {
-  RunTest<ContactType::Async>("rigid_cube_on_plane_frictionless.mochi_scene", "Cube", "Cube");
+  RunTest</*kIsSync*/ false>("rigid_cube_on_plane_frictionless.mochi_scene", "Cube", "Cube");
 }
 
 TEST_IF_F(MOCHI_USE_DOUBLE_AND_INTERNAL, MochiDifferentiableContact, ConsistencyTestRigidSync) {
-  RunTest<ContactType::Sync>(
+  RunTest</*kIsSync*/ true>(
       "two_rigid_cubes_on_plane_frictionless.mochi_scene", "TopCube", "TopCube");
 }
 
@@ -259,7 +259,7 @@ TEST_IF_F(
     MOCHI_USE_DOUBLE_AND_INTERNAL,
     MochiDifferentiableContact,
     ConsistencyTestArticulatedAsync) {
-  RunTest<ContactType::Async>(
+  RunTest</*kIsSync*/ false>(
       "articulated_actor_on_plane.mochi_scene", "ArticulatedActor/Link0_Root", "ArticulatedActor");
 }
 
@@ -267,7 +267,7 @@ TEST_IF_F(
     MOCHI_USE_DOUBLE_AND_INTERNAL,
     MochiDifferentiableContact,
     ConsistencyTestArticulatedSync) {
-  RunTest<ContactType::Sync>(
+  RunTest</*kIsSync*/ true>(
       "articulated_and_rigid_actor_contact.mochi_scene",
       "ArticulatedActor/Link2_Horizontal",
       "ArticulatedActor");
@@ -297,8 +297,8 @@ TEST_IF_F(MOCHI_INTERNAL, MochiDifferentiableContact, ContactForceBackwardNoCont
     result.Clear();
     ++numCleared;
   };
-  ForEachCollisionResult<ContactType::Async>(clearResult);
-  ForEachCollisionResult<ContactType::Sync>(clearResult);
+  ForEachCollisionResult</*kIsSync*/ false>(clearResult);
+  ForEachCollisionResult</*kIsSync*/ true>(clearResult);
   ASSERT_GT(numCleared, 0)
       << "Expected at least one active collision to exercise the backward pass.";
 

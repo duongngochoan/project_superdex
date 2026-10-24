@@ -40,9 +40,9 @@ class Simd<float, 4> {
     return vgetq_lane_f32(v.raw, i);
   }
 
-  [[nodiscard]] MOCHI_FORCE_INLINE static Scalar Get(Simd v, int i) {
+  [[nodiscard]] MOCHI_FORCE_INLINE Scalar operator[](int i) const {
     MOCHI_ASSERT_VERBOSE(i >= 0 && i < kSize, "Index out of range");
-    return v.raw[i];
+    return raw[i];
   }
 
   [[nodiscard]] MOCHI_FORCE_INLINE static Simd Set(Simd v, int i, Scalar value) {
@@ -192,6 +192,20 @@ class Simd<float, 4> {
     }
   }
 
+  // Branchless: each lane loads one tuple from a selected address, inactive lanes from zeros.
+  MOCHI_FORCE_INLINE static void
+  LoadTransposed(Scalar const* ptr, Simd& out0, Simd& out1, Simd& out2, int count) {
+    MOCHI_ASSERT_VERBOSE(count >= 0 && count <= kSize, "Invalid tuple count");
+    float const* const zero = arm_simd::kZeroTuple<float>;
+    float32x4x3_t r = vld3q_dup_f32(count > 0 ? ptr : zero);
+    r = vld3q_lane_f32(count > 1 ? ptr + 3 : zero, r, 1);
+    r = vld3q_lane_f32(count > 2 ? ptr + 6 : zero, r, 2);
+    r = vld3q_lane_f32(count > 3 ? ptr + 9 : zero, r, 3);
+    out0.raw = r.val[0];
+    out1.raw = r.val[1];
+    out2.raw = r.val[2];
+  }
+
   [[nodiscard]] MOCHI_FORCE_INLINE static Simd Select(Simd mask, Simd a, Simd b) {
     return vbslq_f32(vreinterpretq_u32_f32(mask.raw), a.raw, b.raw);
   }
@@ -272,6 +286,19 @@ class Simd<float, 4> {
     } else {
       vst3q_f32(ptr, float32x4x3_t({a.raw, b.raw, c.raw}));
     }
+  }
+
+  // Inactive lanes write tuple 0, which lane 0 stores last.
+  MOCHI_FORCE_INLINE static void StoreTransposed(Scalar* ptr, Simd a, Simd b, Simd c, int count) {
+    MOCHI_ASSERT_VERBOSE(count >= 0 && count <= kSize, "Invalid tuple count");
+    if (count == 0) {
+      return;
+    }
+    float32x4x3_t const v = {a.raw, b.raw, c.raw};
+    vst3q_lane_f32(count > 3 ? ptr + 9 : ptr, v, 3);
+    vst3q_lane_f32(count > 2 ? ptr + 6 : ptr, v, 2);
+    vst3q_lane_f32(count > 1 ? ptr + 3 : ptr, v, 1);
+    vst3q_lane_f32(ptr, v, 0);
   }
 
   [[nodiscard]] MOCHI_FORCE_INLINE static Simd Sqrt(Simd v) {
@@ -357,6 +384,10 @@ class Simd<float, 4> {
     } else if constexpr (N == 4) {
       return vaddvq_f32(a.raw);
     }
+  }
+
+  [[nodiscard]] MOCHI_FORCE_INLINE static Simd HSumEach(Simd a, Simd b, Simd c, Simd d) {
+    return vpaddq_f32(vpaddq_f32(a.raw, b.raw), vpaddq_f32(c.raw, d.raw));
   }
 
   template <int N>

@@ -16,7 +16,7 @@
 
 #include "meshing/processing_modifiers/refine_mesh.h"
 
-#include <imguios/imguios.h>
+#include <imgui.h>
 
 #include <mochi_mesh/step_mesh_stages.h> // CleanupMesh / CloseMesh / EdgeSwapMesh / DecimateMesh
 #include <mochi_mesh/surface_remeshing.h> // RemeshSurface / SurfaceRemeshingParams

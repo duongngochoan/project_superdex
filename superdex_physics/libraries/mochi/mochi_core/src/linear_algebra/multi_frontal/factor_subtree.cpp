@@ -109,7 +109,7 @@ void ForwardElimination(
       using namespace blocking;
       PartDown<kSubBlockSize>(
           block.Cols(),
-          [](auto&& X, auto&& L) {
+          [](auto&& X, auto&& L) MOCHI_FORCE_INLINE_LAMBDA {
             auto currentX = X(DiagRows);
             auto prevX = X(Above);
             if (prevX.Rows() > 0) {
@@ -192,7 +192,7 @@ void BackSubstitution(
       // Apply diagonal L^-T
       PartUp<kSubBlockSize>(
           block.Cols(),
-          [](auto&& X, auto&& L) {
+          [](auto&& X, auto&& L) MOCHI_FORCE_INLINE_LAMBDA {
             auto currentX = X(DiagRows);
             auto prevX = X(Below);
             if (prevX.Rows() > 0) {

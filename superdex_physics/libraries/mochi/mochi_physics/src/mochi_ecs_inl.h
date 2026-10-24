@@ -21,8 +21,10 @@
 #include <mochi_core/utils/debug.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -244,7 +246,7 @@ struct SystemParamFetchSingleFromRegistry {
 // trait.
 template <typename T, typename ViewT>
 struct SystemParamFetchSingleFromView {
-  static T Get(ViewT /*view*/, entt::entity /*e*/) {
+  static T Get(ViewT const& /*view*/, entt::entity /*e*/) {
     static_assert(
         std::is_void_v<T>, "No Matching specialization of SystemParamFetchSingleFromView!");
   }
@@ -324,7 +326,7 @@ SystemInfo GetSystemInfo(void (* /*system*/)(ArgsT...)) {
 // is treated as optional.
 template <typename T>
 struct SystemParamFetchSingleFromRegistry<T const*> {
-  static T const* Get(entt::registry const& reg, entt::entity e) {
+  MOCHI_FORCE_INLINE static T const* Get(entt::registry const& reg, entt::entity e) {
     return reg.try_get<T const>(e);
   }
 };
@@ -350,7 +352,7 @@ struct ParamViewExcludeDependencies<T const*> : entt::type_list<> {};
 // is not optional
 template <typename T>
 struct SystemParamFetchSingleFromRegistry<T const&> {
-  static T const& Get(entt::registry const& reg, entt::entity e) {
+  MOCHI_FORCE_INLINE static T const& Get(entt::registry const& reg, entt::entity e) {
     return reg.template get<T const>(e);
   }
 };
@@ -359,7 +361,9 @@ template <typename T, typename... IncludeT, typename... ExcludeT>
 struct SystemParamFetchSingleFromView<
     T const&,
     ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>> {
-  static T const& Get(ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>> view, entt::entity e) {
+  MOCHI_FORCE_INLINE static T const& Get(
+      ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>> const& view,
+      entt::entity e) {
     return view.template get<T const>(e);
   }
 };
@@ -386,7 +390,7 @@ struct ParamViewExcludeDependencies<T const&> : entt::type_list<> {};
 // is optional
 template <typename T>
 struct SystemParamFetchSingleFromRegistry<T*> {
-  static T* Get(entt::registry& reg, entt::entity e) {
+  MOCHI_FORCE_INLINE static T* Get(entt::registry& reg, entt::entity e) {
     return reg.template try_get<T>(e);
   }
 };
@@ -413,14 +417,16 @@ struct ParamViewExcludeDependencies<T*> : entt::type_list<> {};
 // is not optional
 template <typename T>
 struct SystemParamFetchSingleFromRegistry<T&> {
-  static T& Get(entt::registry& reg, entt::entity e) {
+  MOCHI_FORCE_INLINE static T& Get(entt::registry& reg, entt::entity e) {
     return reg.template get<T>(e);
   }
 };
 
 template <typename T, typename... IncludeT, typename... ExcludeT>
 struct SystemParamFetchSingleFromView<T&, ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>> {
-  static T& Get(ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>> view, entt::entity e) {
+  MOCHI_FORCE_INLINE static T& Get(
+      ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>> const& view,
+      entt::entity e) {
     return view.template get<T>(e);
   }
 };
@@ -448,7 +454,7 @@ struct ParamViewExcludeDependencies<T&> : entt::type_list<> {};
 // the entity has a tag of type T.
 template <typename T>
 struct SystemParamFetchSingleFromRegistry<OptionalTag<T>> {
-  static OptionalTag<T> Get(entt::registry const& reg, entt::entity e) {
+  MOCHI_FORCE_INLINE static OptionalTag<T> Get(entt::registry const& reg, entt::entity e) {
     return OptionalTag<T>(reg.all_of<T>(e));
   }
 };
@@ -463,14 +469,14 @@ struct ParamDependencies<OptionalTag<T>> : entt::type_list<std::add_const_t<T>> 
 // For an Required, the access mode is read and an empty structure is returned
 template <typename... T>
 struct SystemParamFetchSingleFromRegistry<Included<T...>> {
-  static Included<T...> Get(entt::registry const& /*reg*/, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static Included<T...> Get(entt::registry const& /*reg*/, entt::entity /*e*/) {
     return Included<T...>{};
   }
 };
 
 template <typename ViewT, typename... T>
 struct SystemParamFetchSingleFromView<Included<T...>, ViewT> {
-  static Included<T...> Get(ViewT /*view*/, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static Included<T...> Get(ViewT const& /*view*/, entt::entity /*e*/) {
     return Included<T...>{};
   }
 };
@@ -489,7 +495,7 @@ struct ParamViewExcludeDependencies<Included<T...>> : entt::type_list<> {};
 // For an Excluded, the access mode is read and an empty structure is returned
 template <typename... T>
 struct SystemParamFetchSingleFromRegistry<Excluded<T...>> {
-  static Excluded<T...> Get(entt::registry const& /*reg*/, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static Excluded<T...> Get(entt::registry const& /*reg*/, entt::entity /*e*/) {
     return Excluded<T...>{};
   }
 };
@@ -510,7 +516,7 @@ struct ParamViewExcludeDependencies<Excluded<T...>> : entt::type_list<T...> {};
 template <>
 struct SystemParamFetchSingleFromRegistry<entt::registry&> {
   template <typename RegistryT>
-  static inline entt::registry& Get(RegistryT& reg, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static entt::registry& Get(RegistryT& reg, entt::entity /*e*/) {
     return reg;
   }
 };
@@ -540,7 +546,7 @@ struct ParamViewExcludeDependencies<entt::registry&> : entt::type_list<> {};
 // Same as above, except access is read-only.
 template <>
 struct SystemParamFetchSingleFromRegistry<entt::registry const&> {
-  static inline entt::registry const& Get(entt::registry& reg, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static entt::registry const& Get(entt::registry& reg, entt::entity /*e*/) {
     return reg;
   }
 };
@@ -571,7 +577,7 @@ struct ParamViewExcludeDependencies<entt::registry const&> : entt::type_list<> {
 // entity.
 template <>
 struct SystemParamFetchSingleFromRegistry<entt::entity> {
-  static inline entt::entity Get(entt::registry& /*reg*/, entt::entity e) {
+  MOCHI_FORCE_INLINE static entt::entity Get(entt::registry& /*reg*/, entt::entity e) {
     return e;
   }
 };
@@ -593,7 +599,7 @@ struct ParamGetType<entt::entity>
 // this access is read-only.
 template <typename T>
 struct SystemParamFetchSingleFromRegistry<CtxGlobal<T const>> {
-  static inline CtxGlobal<T const> Get(entt::registry& reg, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static CtxGlobal<T const> Get(entt::registry& reg, entt::entity /*e*/) {
     return CtxGlobal<T const>(reg.ctx<T const>());
   }
 };
@@ -620,7 +626,9 @@ struct ParamViewExcludeDependencies<CtxGlobal<T const>> : entt::type_list<> {};
 // this access is read-only.
 template <typename T>
 struct SystemParamFetchSingleFromRegistry<OptionalCtxGlobal<T const>> {
-  static inline OptionalCtxGlobal<T const> Get(entt::registry& reg, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static OptionalCtxGlobal<T const> Get(
+      entt::registry& reg,
+      entt::entity /*e*/) {
     return OptionalCtxGlobal<T const>(reg.try_ctx<T const>());
   }
 };
@@ -1174,7 +1182,9 @@ constexpr bool IsNoWrite_v = IsNoWrite<AccessT...>::value;
 // System parameters and fetching for partial registries
 template <typename... AccessT>
 struct SystemParamFetchSingleFromRegistry<PartialRegistryRead<AccessT...>> {
-  static inline PartialRegistryRead<AccessT...> Get(entt::registry& reg, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static PartialRegistryRead<AccessT...> Get(
+      entt::registry& reg,
+      entt::entity /*e*/) {
     static_assert(
         ParamWildcardType<PartialRegistryRead<AccessT...>>::value == AccessWildcard::None,
         "Per-entity sytems are not allowed to use WildCardRead nor WildcardWrite");
@@ -1215,7 +1225,9 @@ struct ParamWildcardType<PartialRegistryRead<AccessT...>>
 
 template <typename... AccessT>
 struct SystemParamFetchSingleFromRegistry<PartialRegistryWrite<AccessT...>> {
-  static inline PartialRegistryWrite<AccessT...> Get(entt::registry& reg, entt::entity /*e*/) {
+  MOCHI_FORCE_INLINE static PartialRegistryWrite<AccessT...> Get(
+      entt::registry& reg,
+      entt::entity /*e*/) {
     static_assert(
         IsAccessConst_v<AccessT...>,
         "Per-entity systems are not allowed to write to components via PartialRegistry. Please add const. Example: PartialRegistry<ComponentName const>");
@@ -1260,7 +1272,7 @@ struct ParamWildcardType<PartialRegistryWrite<AccessT...>>
 template <typename... AccessT, typename... ExcludeT>
 struct SystemParamFetchSingleFromRegistry<
     entt::basic_view<entt::entity, entt::get_t<AccessT...>, entt::exclude_t<ExcludeT...>>> {
-  static inline entt::
+  MOCHI_FORCE_INLINE static entt::
       basic_view<entt::entity, entt::get_t<AccessT...>, entt::exclude_t<ExcludeT...>>
       Get(entt::registry& reg, entt::entity /*e*/) {
     static_assert(
@@ -1326,6 +1338,28 @@ struct ExcludeFromViewFilter<entt::type_list<typesT...>>
 template <typename T>
 using ExcludeFromViewFilter_t = typename ExcludeFromViewFilter<T>::type;
 
+// The type of the registry's pool of component T
+template <typename T>
+using PoolT = typename entt::storage_traits<entt::entity, std::remove_const_t<T>>::storage_type;
+
+// Finds the registry's pool of component T through the const registry, which is faster than the
+// mutable one because it never tries to insert the pool. For a missing pool, it returns EnTT's
+// empty placeholder, a static shared by all registries, which callers must only read, as views do.
+template <typename T>
+MOCHI_FORCE_INLINE PoolT<T>& FindPool(entt::registry& reg) {
+  return const_cast<PoolT<T>&>(std::as_const(reg).storage<std::remove_const_t<T>>());
+}
+
+// In debug builds, warns by name if one of the given components isn't registered. The views below
+// call it for all of their components before they look up any pool, so it doesn't depend on which
+// pools exist or on where a check stops.
+template <typename... T>
+MOCHI_FORCE_INLINE void WarnIfUnregistered([[maybe_unused]] entt::registry const& reg) {
+#if MOCHI_DEBUG
+  (DetectUnregisteredComponent<T>(reg), ...);
+#endif // MOCHI_DEBUG
+}
+
 // Converts an inclusion type list and exclusion type list into an ENTT view
 template <typename includeListT, typename excludeListT>
 struct ViewFromTypeLists;
@@ -1335,8 +1369,11 @@ struct ViewFromTypeLists<entt::type_list<IncludeT...>, entt::type_list<ExcludeT.
   static_assert(sizeof...(IncludeT) != 0, "A view must always include at least one type");
   using type = ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>;
 
-  static auto Get(entt::registry& reg) {
-    return reg.view<IncludeT...>(entt::exclude_t<ExcludeT...>{});
+  MOCHI_FORCE_INLINE static auto Get(entt::registry& reg) {
+    WarnIfUnregistered<IncludeT..., ExcludeT...>(reg);
+    // Excluded pools come from the mutable registry, which creates a missing one, so that a
+    // component added during the invocation still excludes its entity.
+    return type{FindPool<IncludeT>(reg)..., reg.storage<std::remove_const_t<ExcludeT>>()...};
   }
 };
 
@@ -1358,7 +1395,7 @@ struct InvokerUnwrap<std::reference_wrapper<T>> {
 // Converts a fetch call with a view and registry into a fetch call with only a registry
 template <typename T, typename ViewT>
 struct FetchWithViewWrapperRegistry {
-  static inline auto Get(entt::registry& reg, ViewT /*view*/, entt::entity e)
+  MOCHI_FORCE_INLINE static auto Get(entt::registry& reg, ViewT const& /*view*/, entt::entity e)
       -> decltype(SystemParamFetchSingleFromRegistry<T>::Get(reg, e)) {
     return SystemParamFetchSingleFromRegistry<T>::Get(reg, e);
   }
@@ -1367,7 +1404,7 @@ struct FetchWithViewWrapperRegistry {
 // Converts a fetch call with a view and registry into a fetch call with only a view
 template <typename T, typename ViewT>
 struct FetchWithViewWrapperView {
-  static inline auto Get(entt::registry& /*reg*/, ViewT view, entt::entity e)
+  MOCHI_FORCE_INLINE static auto Get(entt::registry& /*reg*/, ViewT const& view, entt::entity e)
       -> decltype(SystemParamFetchSingleFromView<T, ViewT>::Get(view, e)) {
     return SystemParamFetchSingleFromView<T, ViewT>::Get(view, e);
   }
@@ -1392,9 +1429,83 @@ struct IsEntityInView;
 template <typename... IncludeT, typename... ExcludeT>
 struct IsEntityInView<ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>> {
   static bool Test(entt::registry& reg, entt::entity e) {
+    WarnIfUnregistered<IncludeT..., ExcludeT...>(reg);
     // Entity must have all of the component types in IncludeT and none in ExcludeT
     return reg.all_of<std::remove_const_t<IncludeT>...>(e) &&
         !reg.any_of<std::remove_const_t<ExcludeT>...>(e);
+  }
+};
+
+// Builds a view of the given type for a single entity, if the entity is in it. Like IsEntityInView,
+// it stops at the first pool that rules the entity out, and the view it returns holds the pools it
+// looked up, so fetching the entity's components through it looks up no pool again.
+template <typename ViewT>
+struct ViewOfEntity;
+
+template <typename... IncludeT, typename... ExcludeT>
+struct ViewOfEntity<ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>> {
+  using ViewT = ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>;
+
+  MOCHI_FORCE_INLINE static std::optional<ViewT> Get(entt::registry& reg, entt::entity e) {
+    WarnIfUnregistered<IncludeT..., ExcludeT...>(reg);
+    return Get(
+        reg, e, std::index_sequence_for<IncludeT...>{}, std::index_sequence_for<ExcludeT...>{});
+  }
+
+ private:
+  // Keeps the pools by position: several of the view's types can share a pool type, like C and
+  // C const, or a type excluded twice.
+  template <std::size_t... I, std::size_t... J>
+  MOCHI_FORCE_INLINE static std::optional<ViewT>
+  Get(entt::registry& reg, entt::entity e, std::index_sequence<I...>, std::index_sequence<J...>) {
+    MOCHI_ASSERT_VERBOSE(reg.valid(e), "Invalid entity.");
+    std::tuple<PoolT<IncludeT>*...> includes{};
+    std::tuple<PoolT<ExcludeT>*...> excludes{};
+    bool const isInView =
+        ((std::get<I>(includes) = &FindPool<IncludeT>(reg))->contains(e) && ...) &&
+        (!(std::get<J>(excludes) = &FindPool<ExcludeT>(reg))->contains(e) && ...);
+    if (!isInView) {
+      return std::nullopt;
+    }
+    return ViewT{*std::get<I>(includes)..., *std::get<J>(excludes)...};
+  }
+};
+
+// Builds a view of the given type, unless an included pool is empty, which leaves the view empty.
+// It stops at the first empty pool, such as a missing pool's placeholder.
+template <typename ViewT>
+struct NonEmptyView;
+
+template <typename... IncludeT, typename... ExcludeT>
+struct NonEmptyView<ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>> {
+  // EnTT's view iterator skips every included pool equal to the leading one, the smallest, so two
+  // types that share a pool, like C and C const, leave the iterator a null pool when it leads.
+  static_assert(
+      entt::type_list_unique_t<entt::type_list<std::remove_const_t<IncludeT>...>>::size ==
+          sizeof...(IncludeT),
+      "Per-entity systems invoked globally cannot take a component both as C& and as C const& or "
+      "Included<C>, because iterating their view can crash. Please take the component once, for "
+      "example as C& alone, or invoke the system on a list of entities or a single entity instead.");
+
+  using ViewT = ViewEx<Included<IncludeT...>, Excluded<ExcludeT...>>;
+
+  MOCHI_FORCE_INLINE static std::optional<ViewT> Get(entt::registry& reg) {
+    WarnIfUnregistered<IncludeT..., ExcludeT...>(reg);
+    return Get(reg, std::index_sequence_for<IncludeT...>{});
+  }
+
+ private:
+  // Keeps the pools by position, like ViewOfEntity.
+  template <std::size_t... I>
+  MOCHI_FORCE_INLINE static std::optional<ViewT> Get(
+      entt::registry& reg,
+      std::index_sequence<I...>) {
+    std::tuple<PoolT<IncludeT>*...> includes{};
+    if (((std::get<I>(includes) = &FindPool<IncludeT>(reg))->empty() || ...)) {
+      return std::nullopt;
+    }
+    // Excluded pools come from the mutable registry, as in ViewFromTypeLists.
+    return ViewT{*std::get<I>(includes)..., reg.storage<std::remove_const_t<ExcludeT>>()...};
   }
 };
 
@@ -1439,10 +1550,12 @@ struct InvokerImpl {
   };
 
   template <typename... LookupT>
-  static auto GetViewFromSystem(
+  MOCHI_FORCE_INLINE static auto GetViewFromSystem(
       void (* /*system*/)(typename InvokerUnwrap<ExternalT>::result..., LookupT...),
       entt::registry& reg) {
-    using IncludeList = IncludeInViewFilter_t<entt::type_list<LookupT...>>;
+    // A view looks its pools up by type, so each required type may appear only once.
+    using IncludeList =
+        entt::type_list_unique_t<IncludeInViewFilter_t<entt::type_list<LookupT...>>>;
     static_assert(
         IncludeList::size,
         "Per-entity systems must lookup at least one argument which depends on the entity. "
@@ -1460,6 +1573,18 @@ struct InvokerImpl {
     return IsEntityInView<ViewType>::Test(reg, entity);
   }
 
+  template <typename SystemT>
+  MOCHI_FORCE_INLINE static auto
+  GetViewFromSystemIfContains(SystemT system, entt::registry& reg, entt::entity entity) {
+    return ViewOfEntity<decltype(GetViewFromSystem(system, reg))>::Get(reg, entity);
+  }
+
+  // Returns nothing if an included pool is empty. The view it returns may still be empty.
+  template <typename SystemT>
+  MOCHI_FORCE_INLINE static auto GetViewFromSystemIfNotEmpty(SystemT system, entt::registry& reg) {
+    return NonEmptyView<decltype(GetViewFromSystem(system, reg))>::Get(reg);
+  }
+
   // Invokes the system as a global system
   template <typename... LookupT>
   inline void InvokeGlobal(
@@ -1475,13 +1600,13 @@ struct InvokerImpl {
 
   // Invokes the system as a single-entity system using a view
   template <typename ViewT, typename... LookupT>
-  inline void InvokeOnEntityInView(
+  MOCHI_FORCE_INLINE void InvokeOnEntityInView(
       void (*system)(typename InvokerUnwrap<ExternalT>::result..., LookupT...),
       entt::registry& reg,
-      ViewT view,
+      ViewT const& view,
       entt::entity entity) const {
-    // This code is used when you invoke a per-entity system using the global registry (all matching
-    // entities). Such invocations should be order-independent and parallelizable.
+    // This code is used when you invoke a per-entity system for each matching entity in the
+    // registry or in a subset. Such invocations should be order-independent and parallelizable.
     static_assert(EnforcePerEntitySystemPolicies(decltype(system){}));
 
     // Lookup system parameters from the registry
@@ -1496,7 +1621,7 @@ struct InvokerImpl {
   // Invokes the system as a single-entity system.
   // Entity must have all expected types emplaced upon it or this will throw an exception.
   template <typename... LookupT>
-  inline void InvokeOnEntity(
+  MOCHI_FORCE_INLINE void InvokeOnEntity(
       void (*system)(typename InvokerUnwrap<ExternalT>::result..., LookupT...),
       entt::registry& reg,
       entt::entity entity) const {
@@ -1522,9 +1647,12 @@ struct ForEachInvokerImpl : InvokerImpl<PolicyList, ExternalT...> {
   template <typename SystemT>
   void InvokeForEachEntityInView(SystemT system, entt::registry& reg) const {
     static_assert(BaseClass::EnforcePerEntitySystemPolicies(SystemT{}));
-    auto view = BaseClass::GetViewFromSystem(system, reg);
-    for (entt::entity e : view) {
-      BaseClass::InvokeOnEntityInView(system, reg, view, e);
+    auto const view = BaseClass::GetViewFromSystemIfNotEmpty(system, reg);
+    if (!view) {
+      return;
+    }
+    for (entt::entity e : *view) {
+      BaseClass::InvokeOnEntityInView(system, reg, *view, e);
     }
   }
 
@@ -1533,9 +1661,20 @@ struct ForEachInvokerImpl : InvokerImpl<PolicyList, ExternalT...> {
   void InvokeForEachEntityInSet(SystemT system, entt::registry& reg, EntitySetT const& entitySet)
       const {
     static_assert(BaseClass::EnforcePerEntitySystemPolicies(SystemT{}));
+    // A view looks up all of the system's pools up front, which only pays off across entities. A
+    // single entity stops at the first pool that rules it out.
+    if (std::size(entitySet) == 1) {
+      entt::entity const e = *std::begin(entitySet);
+      if (auto const view = BaseClass::GetViewFromSystemIfContains(system, reg, e)) {
+        BaseClass::InvokeOnEntityInView(system, reg, *view, e);
+      }
+      return;
+    }
+    auto view = BaseClass::GetViewFromSystem(system, reg);
     for (entt::entity e : entitySet) {
-      if (BaseClass::CanInvokeOnEntity(system, reg, e)) {
-        BaseClass::InvokeOnEntity(system, reg, e);
+      MOCHI_ASSERT_VERBOSE(reg.valid(e), "Invalid entity in entity set.");
+      if (view.contains(e)) {
+        BaseClass::InvokeOnEntityInView(system, reg, view, e);
       }
     }
   }
@@ -1546,10 +1685,14 @@ struct ForEachInvokerImpl : InvokerImpl<PolicyList, ExternalT...> {
 */
 
 template <typename... Policies, typename SystemT, typename... ExternalT>
-inline void
+MOCHI_FORCE_INLINE void
 InvokeOnEntity(SystemT system, entt::registry& reg, entt::entity e, ExternalT... extParams) {
   auto invoker = InvokerImpl<entt::type_list<Policies...>, ExternalT...>{extParams...};
-  MOCHI_ASSERT_VERBOSE(invoker.CanInvokeOnEntity(system, reg, e));
+#if MOCHI_DEBUG || MOCHI_ASSERT_VERBOSE_ENABLED
+  // Outside the assert since, in debug builds, the check also warns about unregistered components.
+  [[maybe_unused]] bool const canInvoke = invoker.CanInvokeOnEntity(system, reg, e);
+  MOCHI_ASSERT_VERBOSE(canInvoke);
+#endif // MOCHI_DEBUG || MOCHI_ASSERT_VERBOSE_ENABLED
   invoker.InvokeOnEntity(system, reg, e);
 }
 
@@ -1561,30 +1704,34 @@ CanInvokeOnEntity(SystemT system, entt::registry& reg, entt::entity e, ExternalT
 }
 
 template <typename... Policies, typename SystemT, typename... ExternalT>
-inline bool
+MOCHI_FORCE_INLINE bool
 TryInvokeOnEntity(SystemT system, entt::registry& reg, entt::entity e, ExternalT... extParams) {
   using InvokerT = InvokerImpl<entt::type_list<Policies...>, ExternalT...>;
-  if (InvokerT::CanInvokeOnEntity(system, reg, e)) {
+  if (auto const view = InvokerT::GetViewFromSystemIfContains(system, reg, e)) {
     auto invoker = InvokerT{extParams...};
-    invoker.InvokeOnEntity(system, reg, e);
+    invoker.InvokeOnEntityInView(system, reg, *view, e);
     return true;
   }
   return false;
 }
 
 template <typename... Policies, typename SystemT, typename... ExternalT>
-inline bool TryScheduleInvokeOnEntity(
-    TaskSemaphore sem,
+MOCHI_FORCE_INLINE bool TryScheduleInvokeOnEntity(
+    TaskSemaphore const& sem,
     std::string_view debugLabel,
     SystemT system,
     entt::registry& reg,
     entt::entity e,
     ExternalT... extParams) {
   using InvokerT = InvokerImpl<entt::type_list<Policies...>, ExternalT...>;
+  // The task fetches through the registry: holding a view would make it outgrow std::function's
+  // small buffer in some standard libraries, which costs an allocation per task.
   if (InvokerT::CanInvokeOnEntity(system, reg, e)) {
-    Schedule(sem, debugLabel, [system, &reg, e, invoker = InvokerT{extParams...}]() {
-      invoker.InvokeOnEntity(system, reg, e);
-    });
+    Schedule(
+        sem,
+        debugLabel,
+        [system, &reg, e, invoker = InvokerT{extParams...}]()
+            MOCHI_FORCE_INLINE_LAMBDA { invoker.InvokeOnEntity(system, reg, e); });
     return true;
   }
   return false;
@@ -1610,9 +1757,12 @@ inline void ScheduleInvokeForEachGlobal(
     entt::registry& reg,
     ExternalT... extParams) {
   auto invoker = InvokerImpl<entt::type_list<Policies...>, ExternalT...>{extParams...};
-  auto view = invoker.GetViewFromSystem(system, reg);
-  for (entt::entity e : view) {
-    Schedule(sem, debugLabel, [invoker, system, &reg, view, e]() {
+  auto const view = invoker.GetViewFromSystemIfNotEmpty(system, reg);
+  if (!view) {
+    return;
+  }
+  for (entt::entity e : *view) {
+    Schedule(sem, debugLabel, [invoker, system, &reg, view = *view, e]() {
       invoker.InvokeOnEntityInView(system, reg, view, e);
     });
   }
@@ -1662,10 +1812,24 @@ inline void ScheduleInvokeForEachImpl(
       std::unique(sorted.begin(), sorted.end()) == sorted.end(),
       "Repeat entities detected in list!");
 #endif // MOCHI_ASSERT_VERBOSE_ENABLED
-  for (auto e : entitySet) {
+  // A view looks up all of the system's pools up front, which only pays off across entities.
+  if (std::size(entitySet) == 1) {
+    entt::entity const e = *std::begin(entitySet);
+    MOCHI_ASSERT_VERBOSE(reg.valid(e), "Invalid entity in entity set.");
+    // The task fetches through the registry, as in TryScheduleInvokeOnEntity.
     if (invoker.CanInvokeOnEntity(system, reg, e)) {
-      Schedule(sem, debugLabel, [invoker, system, &reg, e]() {
+      Schedule(sem, debugLabel, [invoker, system, &reg, e]() MOCHI_FORCE_INLINE_LAMBDA {
         invoker.InvokeOnEntity(system, reg, e);
+      });
+    }
+    return;
+  }
+  auto view = invoker.GetViewFromSystem(system, reg);
+  for (auto e : entitySet) {
+    MOCHI_ASSERT_VERBOSE(reg.valid(e), "Invalid entity in entity set.");
+    if (view.contains(e)) {
+      Schedule(sem, debugLabel, [invoker, system, &reg, view, e]() MOCHI_FORCE_INLINE_LAMBDA {
+        invoker.InvokeOnEntityInView(system, reg, view, e);
       });
     }
   }

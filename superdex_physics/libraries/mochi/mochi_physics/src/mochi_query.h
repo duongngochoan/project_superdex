@@ -21,31 +21,19 @@
 
 #include <mochi_core/contact/contact_utils.h>
 #include <mochi_core/linear_algebra/matrix.h>
+#include <mochi_core/utils/dynamic_array.h>
 #include <mochi_physics/mochi_physics.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstddef>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
 
 namespace mochi {
 
 /**********************************************************************
   ECS Components
 */
-
-// Global to the mochi::Scene. Used to allocate QueryHandles.
-struct CQueryHandleAllocator : NoCopy {
-  // Combine the QueryType with a new ID to form a new QueryHandle
-  QueryHandle NewHandleThreadSafe(QueryType type);
-
-  // Next unique ID to return to the user as a QueryHandle.
-  // std::atomic is used so that AsyncScene can pre-allocate handles from another thread.
-  // std::unique_ptr is used so that the ECS component can be move constructed/assigned.
-  std::unique_ptr<std::atomic<uint32_t>> nextId = std::make_unique<std::atomic<uint32_t>>(0);
-};
 
 // Stores the QueryHandles currently registered with an actor
 struct CActiveQuerySet : NoCopy {
@@ -60,43 +48,56 @@ struct CActiveQuerySet : NoCopy {
 // nth element (all assumed having nQuads quadrature point) will be store at
 // n*nQuads*spaceDim + j*spaceDim + i with i=0,1,2 for the spatial dims.
 struct CQueryQuadraturePointsPosition : RefCounted {
-  std::vector<real> quadraturePointsReferencePosition;
-  std::vector<real> quadraturePointsWorldPosition;
+  DynamicArray<real> quadraturePointsReferencePosition;
+  DynamicArray<real> quadraturePointsWorldPosition;
 };
 
 // Indicates that node positions should be calculated and stored for Actor::GetNodePositionsLocal().
 struct CQueryNodePositions : RefCounted {
-  std::vector<real> nodePositions; // 3 per node
+  DynamicArray<real> nodePositions; // 3 per node
 };
 
 // Indicates that element deformation gradients should be calculated and stored for
 //  Actor::GetElementDeformationGradient().
 struct CQueryElementsDeformationGradient : RefCounted {
-  std::vector<real> elementsDeformationGradient; // 9 per element ordered as F11, F12, F13, F21, ...
+  DynamicArray<real>
+      elementsDeformationGradient; // 9 per element ordered as F11, F12, F13, F21, ...
 };
 
 // Indicates that node positions should be calculated and stored for
 // Actor::GetSurfaceMeshNodePositionsLocal().
 struct CQuerySurfaceNodePositions : RefCounted {
-  std::vector<real> nodePositions; // 3 per node
+  DynamicArray<real> nodePositions; // 3 per node
 };
 
 // Indicates that node positions should be calculated and stored for Actor::GetSurfaceNodeNormals().
 struct CQuerySurfaceNodeNormals : RefCounted {
-  std::vector<real> nodeNormals; // 3 per node
-  std::vector<Vec4r> faceCrossProducts; // Used to calculate nodeNormals.
+  DynamicArray<real> nodeNormals; // 3 per node
+  DynamicArray<Vec4r> faceCrossProducts; // Used to calculate nodeNormals.
 };
 
 // Indicates that the visual node positions should be calculated and stored for
 // Actor::GetVisualMeshNodePositionsLocal()
 struct CQueryVisualNodePositions : RefCounted {
-  std::vector<real> nodePositions;
+  DynamicArray<real> nodePositions;
 };
 
 // Indicates that the visual node normals should be calculated and stored for
 // Actor::GetVisualMeshNodeNormalsLocal()
 struct CQueryVisualNodeNormals : RefCounted {
-  std::vector<real> nodeNormals;
+  DynamicArray<real> nodeNormals;
+};
+
+// Indicates that the contact skin node positions should be calculated and stored for
+// Actor::GetContactSkinMeshNodePositionsLocal()
+struct CQueryContactSkinNodePositions : RefCounted {
+  DynamicArray<real> nodePositions;
+};
+
+// Indicates that the contact skin node normals should be calculated and stored for
+// Actor::GetContactSkinMeshNodeNormalsLocal()
+struct CQueryContactSkinNodeNormals : RefCounted {
+  DynamicArray<real> nodeNormals;
 };
 
 // Indicates that we should calculate the total elastic energy of a soft actor. Enabling this
@@ -110,13 +111,13 @@ struct CQueryElasticEnergy : RefCounted {
 // Indicates that the actor's SDF should be sampled to produce an arbitrary distribution of
 // of positions and normals along the SDF surface (~zero distance).
 struct CQuerySdfSurface : RefCounted {
-  std::vector<Real3> positions; // local-space
-  std::vector<Real3> normals;
+  DynamicArray<Real3> positions; // local-space
+  DynamicArray<Real3> normals;
 };
 
 // Indicates that actor's potential contact samples should be computed and stored.
 struct CQueryContactSamples : RefCounted {
-  std::vector<real> contactSamples; // 3 * num contact samples
+  DynamicArray<real> contactSamples; // 3 * num contact samples
 };
 
 // Helper component to handle alternatively CQueryContactPoints, CQueryNodeContactForces and/or
@@ -125,7 +126,7 @@ struct TagQueryActiveContacts : RefCounted {};
 
 // Indicates that actor's current active collision points should be computed and stored.
 struct CQueryContactPoints : RefCounted {
-  std::vector<ContactPoint> contactPoints;
+  DynamicArray<ContactPoint> contactPoints;
   bool isInitialized = false; // Set to true when query data is populated
 };
 
@@ -135,11 +136,11 @@ struct CQueryContactPoints : RefCounted {
 // The frontend API equivalent for this component is SdfDistances
 struct CQuerySdfDistances : RefCounted {
   bool isInitialized = false; // Set to true when query data is populated
-  std::vector<int> sampleIndices;
-  std::vector<real> distances;
-  std::vector<Real3> worldPositions;
+  DynamicArray<int> sampleIndices;
+  DynamicArray<real> distances;
+  DynamicArray<Real3> worldPositions;
   // Gradients in world space. Same size as worldPositions.
-  std::vector<Real3> distanceGrads;
+  DynamicArray<Real3> distanceGrads;
   // Only used if the actor has far SDF evaluation enabled.
   // Holds the extra padding added to the SDF evaluation distance.
   // Same units as distances.
@@ -162,7 +163,7 @@ struct CQuerySdfDistances : RefCounted {
 
 // Indicates that actor's node contact forces should be computed and stored.
 struct CQueryNodeContactForces : RefCounted {
-  std::vector<NodeContactForce> nodeContactForces;
+  DynamicArray<NodeContactForce> nodeContactForces;
   // This could be local to UpdateQueryActiveContactsWorldSpace(), but it's made
   // a member to minimize memory reallocation.
   std::unordered_map<int, Real3> nodeContactForcesMap;
@@ -180,11 +181,10 @@ struct CQueryNodeContactForces : RefCounted {
 
   void AddContactForce(Real3 force, Int3 nodeIndices, Real3 nodeWeights) {
     for (int i = 0; i < 3; i++) {
-      auto nodeForce = nodeWeights[i] * force;
-      auto nodeTotalForce = nodeContactForcesMap.find(nodeIndices[i]);
-      if (nodeTotalForce == nodeContactForcesMap.end()) {
-        nodeContactForcesMap[nodeIndices[i]] = nodeForce;
-      } else {
+      auto const nodeForce = nodeWeights[i] * force;
+      auto const [nodeTotalForce, wasInserted] =
+          nodeContactForcesMap.try_emplace(nodeIndices[i], nodeForce);
+      if (!wasInserted) {
         nodeTotalForce->second += nodeForce;
       }
     }
@@ -299,16 +299,7 @@ void SetErrorIfQueryNotSupported(
     QueryType type,
     Error& error);
 
-// Register a new query by QueryType
-QueryHandle RegisterQuery(
-    entt::registry& reg,
-    entt::entity e,
-    QueryType type,
-    bool computeImmediately,
-    Error& error);
-
 // Register a new query using a QueryHandle that was already allocated.
-// Used to support registration via AsyncScene.
 void RegisterQuery(
     entt::registry& reg,
     entt::entity e,

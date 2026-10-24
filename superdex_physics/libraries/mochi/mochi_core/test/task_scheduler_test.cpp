@@ -39,6 +39,10 @@
 #include <utility>
 #include <vector>
 
+#if MOCHI_PLATFORM_LINUX
+#include <sched.h>
+#endif
+
 using namespace mochi;
 
 static void TestSingleTask(TaskScheduler& scheduler) {
@@ -492,7 +496,7 @@ static void TestUtil_ParallelForRange() {
     auto const callingThreadId = std::this_thread::get_id();
     bool const shouldRunOnCallingThread = !scheduler || (scheduler->GetNumThreads() == 0);
     ParallelForRange("Test", rangeBegin, rangeEnd, minPerTask, maxPerTask, [&](int begin, int end) {
-      if (shouldRunOnCallingThread) {
+      if (shouldRunOnCallingThread || end == rangeEnd) {
         EXPECT_EQ(callingThreadId, std::this_thread::get_id());
       }
       for (int i = begin; i < end; ++i) {
@@ -866,3 +870,27 @@ TEST(TaskScheduler, ParallelBarrier) {
   TestParallelBarrier(true, true);
   TestParallelBarrier(false, true);
 }
+
+#if MOCHI_PLATFORM_LINUX
+TEST(TaskScheduler, WorkersInheritAffinity) {
+  cpu_set_t mask;
+  ASSERT_EQ(0, sched_getaffinity(0, sizeof(mask), &mask));
+  // Exclude CPU 0, so that the mask is never CPUs 0 to CPU_COUNT - 1.
+  CPU_CLR(0, &mask);
+  if (CPU_COUNT(&mask) == 0) {
+    GTEST_SKIP() << "Needs an allowed CPU other than CPU 0";
+  }
+
+  std::thread([&mask]() {
+    ASSERT_EQ(0, sched_setaffinity(0, sizeof(mask), &mask));
+    TaskScheduler scheduler(1);
+    TaskSemaphore sem;
+    scheduler.AddTask(sem, "WorkersInheritAffinity", [&mask]() {
+      cpu_set_t workerMask;
+      EXPECT_EQ(0, sched_getaffinity(0, sizeof(workerMask), &workerMask));
+      EXPECT_TRUE(CPU_EQUAL(&mask, &workerMask));
+    });
+    sem.Wait();
+  }).join();
+}
+#endif

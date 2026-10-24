@@ -19,6 +19,8 @@
 #include <superdex_robotics/utils/file_utils.h>
 #include "mochi_core/linear_algebra/matrix_operations.h"
 
+#include <array>
+
 using namespace mochi;
 using namespace superdex::robotics;
 
@@ -26,6 +28,8 @@ namespace {
 // Error deadband thresholds to filter out sensor noise and numerical errors
 constexpr real kPositionErrorDeadband = 1e-4_r; // [m] - Position tracking noise floor
 constexpr real kRotationErrorDeadband = 5e-3_r; // [rad] - Rotation tracking noise floor
+constexpr std::string_view kOutputStreamName = "output";
+constexpr std::string_view kTargetStreamName = "target";
 
 // A Free root joint contributes this many actor DOFs (3 translation + 3 rotation). Bot space
 // always excludes them, so it is the offset between an actor-space and a bot-space DOF index.
@@ -232,7 +236,33 @@ void ControllerBasicOscPd::ConfigureFromSceneEntry(
   }
 }
 
-void ControllerBasicOscPd::Reset() {}
+void ControllerBasicOscPd::Reset() {
+  _hasLastOutput = false;
+}
+
+void ControllerBasicOscPd::ConfigureRecording(ControllerRecordingSink& sink, Error& error) const {
+  std::array<real, 4> const gains{_params.Kp_p, _params.Kd_p, _params.Kp_r, _params.Kd_r};
+  std::array<real, 1> const normalizeError{
+      _params.bApplyMaxErrorMagnitudeNormalization ? 1_r : 0_r};
+  std::array<real, 1> const normalizeEffort{_params.bApplyMaxOSCTorqueNormalization ? 1_r : 0_r};
+  std::array<real, 2> const limits{_params.maxTranslationError, _params.maxRotationError};
+  sink.WriteConstantScalars("osc_gains", gains, error);
+  sink.WriteConstantScalars("osc_normalize_error", normalizeError, error);
+  sink.WriteConstantScalars("osc_normalize_effort", normalizeEffort, error);
+  sink.WriteConstantScalars("osc_limits", limits, error);
+  sink.WriteConstantTransform("ee_link_from_ee", _params.EELinkFromEE, error);
+}
+
+void ControllerBasicOscPd::Record(ControllerRecordingSink& sink, Error& error) const {
+  if (!_hasLastOutput) {
+    return;
+  }
+  sink.WriteTransform(kTargetStreamName, _lastTarget.rootFromTargetEE, error);
+  std::array<ControllerScalarValues, 1> const fields{{
+      {"joint_effort_output", _efforts},
+  }};
+  sink.WriteScalars(kOutputStreamName, fields, error);
+}
 
 Span<int const> ControllerBasicOscPd::GetControlledDofs() {
   return _dofIndices;
@@ -417,6 +447,8 @@ Span<real const> ControllerBasicOscPd::ComputeOutput(
   for (int iDof = 0; iDof < isize(_dofIndices); ++iDof) {
     _efforts(_dofIndices[iDof]) = _effortsArm(iDof);
   }
+  _lastTarget = target;
+  _hasLastOutput = true;
   return _efforts;
 }
 

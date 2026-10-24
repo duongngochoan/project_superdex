@@ -48,6 +48,10 @@ if (MOCHI_BUILD_TESTS)
         mochi_mesh_protocol_test
         PRIVATE mochi_mesh_protocol_private GTest::gtest_main)
     mochi_set_output_directories(mochi_mesh_protocol_test)
+    add_test(
+        NAME mochi_mesh_protocol_test
+        COMMAND mochi_mesh_protocol_test
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:mochi_mesh_protocol_test>")
 endif ()
 
 mochi_add_library(mochi_mesh)
@@ -68,7 +72,10 @@ target_include_directories(mochi_mesh PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 # mochi_mesh has no DLL export annotations, so export all symbols when built as a shared library.
 if (MOCHI_BUILD_SHARED)
-    set_target_properties(mochi_mesh PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    set_target_properties(mochi_mesh PROPERTIES
+        C_VISIBILITY_PRESET default
+        CXX_VISIBILITY_PRESET default
+        WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif ()
 
 # The auto-generated test (added by mochi_add_library when MOCHI_BUILD_TESTS is on) includes the
@@ -84,6 +91,9 @@ if (MOCHI_BUILD_TESTS AND TARGET mochi_mesh_test)
         "${CMAKE_CURRENT_SOURCE_DIR}/test"
     )
     target_link_libraries(mochi_mesh_test PRIVATE mochi_mesh_protocol_private)
+    target_compile_definitions(
+        mochi_mesh_test
+        PRIVATE "MOCHI_MESH_TEST_ASSETS_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/test/assets/\"")
 endif ()
 
 if (MOCHI_BUILD_TESTS)

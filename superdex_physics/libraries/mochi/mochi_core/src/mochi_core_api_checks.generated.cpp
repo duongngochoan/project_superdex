@@ -18,7 +18,6 @@
 
 // clang-format off
 
-#include <limits>
 #include <mochi_core/articulated_body/articulated_body_params.h>
 #include <mochi_core/contact/contact_params.h>
 #include <mochi_core/geometry/model_data.h>
@@ -30,9 +29,10 @@
 #include <mochi_core/utils/coordinate_space.h>
 #include <mochi_core/utils/eval_params.h>
 #include <mochi_core/utils/log.h>
-#include <mochi_core/utils/verbosity_params.h>
-#include <limits>
 #include <mochi_core/utils/mochi_core_api_checks.generated.h>
+#include <mochi_core/utils/verbosity_params.h>
+
+#include <limits>
 
 #if MOCHI_COMPILER_MSVC
 #define MOCHI_ASSERT_EQ(a, b, message) MOCHI_ASSERT(mochi::NearEqual((a), (b), std::numeric_limits<decltype(b)>::epsilon()), message)
@@ -368,6 +368,7 @@ static_assert(std::is_same_v<decltype(&mochi::Sphere::radius), mochi::real mochi
 // struct mochi::ModelData
 static_assert(std::is_same_v<decltype(&mochi::ModelData::mesh), std::optional<mochi::MeshData> mochi::ModelData::*>, "\n  ERROR: Field mochi::ModelData::mesh is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelData::visualMesh), std::optional<mochi::MeshData> mochi::ModelData::*>, "\n  ERROR: Field mochi::ModelData::visualMesh is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::ModelData::contactSkinMesh), std::optional<mochi::MeshData> mochi::ModelData::*>, "\n  ERROR: Field mochi::ModelData::contactSkinMesh is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelData::blending), std::optional<mochi::DynamicArray<mochi::BlendingData>> mochi::ModelData::*>, "\n  ERROR: Field mochi::ModelData::blending is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelData::constrainedNodes), std::optional<mochi::DynamicArray<int>> mochi::ModelData::*>, "\n  ERROR: Field mochi::ModelData::constrainedNodes is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelData::elementFrameAxes), std::optional<mochi::DynamicArray<mochi::real>> mochi::ModelData::*>, "\n  ERROR: Field mochi::ModelData::elementFrameAxes is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -382,6 +383,7 @@ static_assert(std::is_constructible_v<mochi::ModelData, mochi::ModelDataView con
 // struct mochi::ModelDataView
 static_assert(std::is_same_v<decltype(&mochi::ModelDataView::mesh), std::optional<mochi::MeshDataView> mochi::ModelDataView::*>, "\n  ERROR: Field mochi::ModelDataView::mesh is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelDataView::visualMesh), std::optional<mochi::MeshDataView> mochi::ModelDataView::*>, "\n  ERROR: Field mochi::ModelDataView::visualMesh is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::ModelDataView::contactSkinMesh), std::optional<mochi::MeshDataView> mochi::ModelDataView::*>, "\n  ERROR: Field mochi::ModelDataView::contactSkinMesh is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelDataView::blending), std::optional<mochi::DynamicArray<mochi::BlendingDataView>> mochi::ModelDataView::*>, "\n  ERROR: Field mochi::ModelDataView::blending is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelDataView::constrainedNodes), std::optional<mochi::Span<int const>> mochi::ModelDataView::*>, "\n  ERROR: Field mochi::ModelDataView::constrainedNodes is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ModelDataView::elementFrameAxes), std::optional<mochi::Span<mochi::real const>> mochi::ModelDataView::*>, "\n  ERROR: Field mochi::ModelDataView::elementFrameAxes is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -534,7 +536,6 @@ static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::relTol), mo
 static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::relStepTol), mochi::real mochi::NonLinearSolverParams::*>, "\n  ERROR: Field mochi::NonLinearSolverParams::relStepTol is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::stopIfNoImprovement), bool mochi::NonLinearSolverParams::*>, "\n  ERROR: Field mochi::NonLinearSolverParams::stopIfNoImprovement is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::psdProjMode), mochi::PsdProjectionMode mochi::NonLinearSolverParams::*>, "\n  ERROR: Field mochi::NonLinearSolverParams::psdProjMode is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::gradientDescentFallback), bool mochi::NonLinearSolverParams::*>, "\n  ERROR: Field mochi::NonLinearSolverParams::gradientDescentFallback is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::explosionControl), bool mochi::NonLinearSolverParams::*>, "\n  ERROR: Field mochi::NonLinearSolverParams::explosionControl is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::absDivTol), mochi::real mochi::NonLinearSolverParams::*>, "\n  ERROR: Field mochi::NonLinearSolverParams::absDivTol is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::NonLinearSolverParams::relDivTol), mochi::real mochi::NonLinearSolverParams::*>, "\n  ERROR: Field mochi::NonLinearSolverParams::relDivTol is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -586,7 +587,7 @@ void mochi::CheckCoreDslDefaultValues() {
   }
   {
     mochi::RoutingElement params{};
-    MOCHI_ASSERT((params.type == mochi::RoutingElementType::Waypoint), "DSL default value for RoutingElement::type doesn't match C++ default. DSL says Waypoint, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.type == mochi::RoutingElementType::Waypoint), "DSL default value for RoutingElement::type doesn't match C++ default. DSL says RoutingElementType::Waypoint, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.index == int(0)), "DSL default value for RoutingElement::index doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.localPosition == mochi::Real3{}), "DSL default value for RoutingElement::localPosition doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.coefficient, 0.0_r, "DSL default value for RoutingElement::coefficient doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -617,9 +618,9 @@ void mochi::CheckCoreDslDefaultValues() {
   }
   {
     mochi::GridSdfParams params{};
-    MOCHI_ASSERT((params.resolutionMode == mochi::GridSdfResolutionMode::MeanEdge), "DSL default value for GridSdfParams::resolutionMode doesn't match C++ default. DSL says MeanEdge, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.resolutionMode == mochi::GridSdfResolutionMode::MeanEdge), "DSL default value for GridSdfParams::resolutionMode doesn't match C++ default. DSL says GridSdfResolutionMode::MeanEdge, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.resolutionDelta == mochi::Real3{0.25_r, 0.25_r, 0.25_r}), "DSL default value for GridSdfParams::resolutionDelta doesn't match C++ default. DSL says {0.25, 0.25, 0.25}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT_EQ(params.boundaryPaddingDist, mochi::kGridSdfDefaultBoundaryPadding, "DSL default value for GridSdfParams::boundaryPaddingDist doesn't match C++ default. DSL says kGridSdfDefaultBoundaryPadding, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.boundaryPaddingDist == mochi::kGridSdfDefaultBoundaryPadding), "DSL default value for GridSdfParams::boundaryPaddingDist doesn't match C++ default. DSL says kGridSdfDefaultBoundaryPadding, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.minGridResolution == mochi::Int3{int(6), int(6), int(6)}), "DSL default value for GridSdfParams::minGridResolution doesn't match C++ default. DSL says {6, 6, 6}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
@@ -631,34 +632,34 @@ void mochi::CheckCoreDslDefaultValues() {
     mochi::StVenantKirchhoffMaterialParams params{};
     MOCHI_ASSERT_EQ(params.youngsModulus, 100000.0_r, "DSL default value for StVenantKirchhoffMaterialParams::youngsModulus doesn't match C++ default. DSL says 100000.0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.poissonRatio, 0.45_r, "DSL default value for StVenantKirchhoffMaterialParams::poissonRatio doesn't match C++ default. DSL says 0.45, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for StVenantKirchhoffMaterialParams::psdStrategy doesn't match C++ default. DSL says Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for StVenantKirchhoffMaterialParams::psdStrategy doesn't match C++ default. DSL says MaterialPsdStrategy::Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::NeoHookeanMaterialParams params{};
     MOCHI_ASSERT_EQ(params.youngsModulus, 100000.0_r, "DSL default value for NeoHookeanMaterialParams::youngsModulus doesn't match C++ default. DSL says 100000.0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.poissonRatio, 0.45_r, "DSL default value for NeoHookeanMaterialParams::poissonRatio doesn't match C++ default. DSL says 0.45, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for NeoHookeanMaterialParams::psdStrategy doesn't match C++ default. DSL says Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for NeoHookeanMaterialParams::psdStrategy doesn't match C++ default. DSL says MaterialPsdStrategy::Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ActiveAnisoArapMaterialParams params{};
     MOCHI_ASSERT_EQ(params.alpha, 1000.0_r, "DSL default value for ActiveAnisoArapMaterialParams::alpha doesn't match C++ default. DSL says 1000, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.length, 1.0_r, "DSL default value for ActiveAnisoArapMaterialParams::length doesn't match C++ default. DSL says 1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.anisoDir == mochi::Real3{1.0_r, 0.0_r, 0.0_r}), "DSL default value for ActiveAnisoArapMaterialParams::anisoDir doesn't match C++ default. DSL says kReal3XAxis, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for ActiveAnisoArapMaterialParams::psdStrategy doesn't match C++ default. DSL says Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for ActiveAnisoArapMaterialParams::psdStrategy doesn't match C++ default. DSL says MaterialPsdStrategy::Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ArapMaterialParams params{};
     MOCHI_ASSERT_EQ(params.stiffness, 1000.0_r, "DSL default value for ArapMaterialParams::stiffness doesn't match C++ default. DSL says 1000, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for ArapMaterialParams::psdStrategy doesn't match C++ default. DSL says Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for ArapMaterialParams::psdStrategy doesn't match C++ default. DSL says MaterialPsdStrategy::Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ActiveShapeTargetingArapMaterialParams params{};
     MOCHI_ASSERT_EQ(params.stiffness, 1000.0_r, "DSL default value for ActiveShapeTargetingArapMaterialParams::stiffness doesn't match C++ default. DSL says 1000, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for ActiveShapeTargetingArapMaterialParams::psdStrategy doesn't match C++ default. DSL says Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::Projection), "DSL default value for ActiveShapeTargetingArapMaterialParams::psdStrategy doesn't match C++ default. DSL says MaterialPsdStrategy::Projection, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::SoftMaterialParams params{};
-    MOCHI_ASSERT((params.type == mochi::SoftMaterialType::NeoHookean), "DSL default value for SoftMaterialParams::type doesn't match C++ default. DSL says NeoHookean, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.type == mochi::SoftMaterialType::NeoHookean), "DSL default value for SoftMaterialParams::type doesn't match C++ default. DSL says SoftMaterialType::NeoHookean, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.density, 1000.0_r, "DSL default value for SoftMaterialParams::density doesn't match C++ default. DSL says 1000, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.massDampingCoefficient, 0.0_r, "DSL default value for SoftMaterialParams::massDampingCoefficient doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.stiffnessDampingCoefficient, 0.0_r, "DSL default value for SoftMaterialParams::stiffnessDampingCoefficient doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -666,13 +667,13 @@ void mochi::CheckCoreDslDefaultValues() {
   }
   {
     mochi::PerElementSoftMaterialData params{};
-    MOCHI_ASSERT((params.type == mochi::SoftMaterialType::NeoHookean), "DSL default value for PerElementSoftMaterialData::type doesn't match C++ default. DSL says NeoHookean, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::MaterialDefault), "DSL default value for PerElementSoftMaterialData::psdStrategy doesn't match C++ default. DSL says MaterialDefault, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.type == mochi::SoftMaterialType::NeoHookean), "DSL default value for PerElementSoftMaterialData::type doesn't match C++ default. DSL says SoftMaterialType::NeoHookean, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::MaterialDefault), "DSL default value for PerElementSoftMaterialData::psdStrategy doesn't match C++ default. DSL says MaterialPsdStrategy::MaterialDefault, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::PerElementSoftMaterialDataView params{};
-    MOCHI_ASSERT((params.type == mochi::SoftMaterialType::NeoHookean), "DSL default value for PerElementSoftMaterialDataView::type doesn't match C++ default. DSL says NeoHookean, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::MaterialDefault), "DSL default value for PerElementSoftMaterialDataView::psdStrategy doesn't match C++ default. DSL says MaterialDefault, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.type == mochi::SoftMaterialType::NeoHookean), "DSL default value for PerElementSoftMaterialDataView::type doesn't match C++ default. DSL says SoftMaterialType::NeoHookean, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdStrategy == mochi::MaterialPsdStrategy::MaterialDefault), "DSL default value for PerElementSoftMaterialDataView::psdStrategy doesn't match C++ default. DSL says MaterialPsdStrategy::MaterialDefault, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ContactParams params{};
@@ -715,23 +716,22 @@ void mochi::CheckCoreDslDefaultValues() {
     MOCHI_ASSERT((params.explicitNormals == bool(false)), "DSL default value for ExperimentalEvalParams::explicitNormals doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.fadeFriction == bool(true)), "DSL default value for ExperimentalEvalParams::fadeFriction doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.implicitNormalForceForDissipation == bool(false)), "DSL default value for ExperimentalEvalParams::implicitNormalForceForDissipation doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.frictionModel == mochi::CoulombFrictionModel::Default), "DSL default value for ExperimentalEvalParams::frictionModel doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.frictionModel == mochi::CoulombFrictionModel::Default), "DSL default value for ExperimentalEvalParams::frictionModel doesn't match C++ default. DSL says CoulombFrictionModel::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.consistencyResNorm == bool(false)), "DSL default value for ExperimentalEvalParams::consistencyResNorm doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.consistencyResNormStep, 0.0001_r, "DSL default value for ExperimentalEvalParams::consistencyResNormStep doesn't match C++ default. DSL says 0.0001, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::NonLinearSolverParams params{};
-    MOCHI_ASSERT((params.solverType == mochi::NonLinearSolverType::Default), "DSL default value for NonLinearSolverParams::solverType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.solverType == mochi::NonLinearSolverType::Default), "DSL default value for NonLinearSolverParams::solverType doesn't match C++ default. DSL says NonLinearSolverType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.dResidualAssemblyPeriod == int(1)), "DSL default value for NonLinearSolverParams::dResidualAssemblyPeriod doesn't match C++ default. DSL says 1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.maxIter == int(4)), "DSL default value for NonLinearSolverParams::maxIter doesn't match C++ default. DSL says 4, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.maxElapsedTimeSeconds, 0.0, "DSL default value for NonLinearSolverParams::maxElapsedTimeSeconds doesn't match C++ default. DSL says 0.0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.convergenceMode == mochi::NonLinearSolverConvergenceMode::Default), "DSL default value for NonLinearSolverParams::convergenceMode doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.convergenceMode == mochi::NonLinearSolverConvergenceMode::Default), "DSL default value for NonLinearSolverParams::convergenceMode doesn't match C++ default. DSL says NonLinearSolverConvergenceMode::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.absTol, 0.001_r, "DSL default value for NonLinearSolverParams::absTol doesn't match C++ default. DSL says 0.001, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.relTol, 1e-6_r, "DSL default value for NonLinearSolverParams::relTol doesn't match C++ default. DSL says 1e-6, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT_EQ(params.relStepTol, mochi::kDefaultRelStepTol, "DSL default value for NonLinearSolverParams::relStepTol doesn't match C++ default. DSL says kDefaultRelStepTol, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.relStepTol == mochi::kDefaultRelStepTol), "DSL default value for NonLinearSolverParams::relStepTol doesn't match C++ default. DSL says kDefaultRelStepTol, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.stopIfNoImprovement == bool(false)), "DSL default value for NonLinearSolverParams::stopIfNoImprovement doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.psdProjMode == mochi::PsdProjectionMode::Default), "DSL default value for NonLinearSolverParams::psdProjMode doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.gradientDescentFallback == bool(false)), "DSL default value for NonLinearSolverParams::gradientDescentFallback doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.psdProjMode == mochi::PsdProjectionMode::Default), "DSL default value for NonLinearSolverParams::psdProjMode doesn't match C++ default. DSL says PsdProjectionMode::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.explosionControl == bool(true)), "DSL default value for NonLinearSolverParams::explosionControl doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.absDivTol, 1e9_r, "DSL default value for NonLinearSolverParams::absDivTol doesn't match C++ default. DSL says 1e9, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.relDivTol, 10000.0_r, "DSL default value for NonLinearSolverParams::relDivTol doesn't match C++ default. DSL says 10000.0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -740,26 +740,26 @@ void mochi::CheckCoreDslDefaultValues() {
     MOCHI_ASSERT_EQ(params.lineSearchWolfe1, 0.0001_r, "DSL default value for NonLinearSolverParams::lineSearchWolfe1 doesn't match C++ default. DSL says 0.0001, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.lineSearchWolfe2, 0.9_r, "DSL default value for NonLinearSolverParams::lineSearchWolfe2 doesn't match C++ default. DSL says 0.9, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.lineSearchMaxRelIncrease, 0.0_r, "DSL default value for NonLinearSolverParams::lineSearchMaxRelIncrease doesn't match C++ default. DSL says 0.0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.lineSearchType == mochi::LineSearchType::Default), "DSL default value for NonLinearSolverParams::lineSearchType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.linearToleranceStrategy == mochi::LinearToleranceStrategy::Default), "DSL default value for NonLinearSolverParams::linearToleranceStrategy doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for NonLinearSolverParams::verbosity doesn't match C++ default. DSL says Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.lineSearchType == mochi::LineSearchType::Default), "DSL default value for NonLinearSolverParams::lineSearchType doesn't match C++ default. DSL says LineSearchType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.linearToleranceStrategy == mochi::LinearToleranceStrategy::Default), "DSL default value for NonLinearSolverParams::linearToleranceStrategy doesn't match C++ default. DSL says LinearToleranceStrategy::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for NonLinearSolverParams::verbosity doesn't match C++ default. DSL says VerbosityLevel::Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::LinearSolverParams params{};
-    MOCHI_ASSERT((params.solverType == mochi::LinearSolverType::Default), "DSL default value for LinearSolverParams::solverType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.preconditionerType == mochi::PreconditionerType::Default), "DSL default value for LinearSolverParams::preconditionerType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.normType == mochi::LinearSolverConvergenceNorm::Default), "DSL default value for LinearSolverParams::normType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.solverType == mochi::LinearSolverType::Default), "DSL default value for LinearSolverParams::solverType doesn't match C++ default. DSL says LinearSolverType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.preconditionerType == mochi::PreconditionerType::Default), "DSL default value for LinearSolverParams::preconditionerType doesn't match C++ default. DSL says PreconditionerType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.normType == mochi::LinearSolverConvergenceNorm::Default), "DSL default value for LinearSolverParams::normType doesn't match C++ default. DSL says LinearSolverConvergenceNorm::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.absTol, 1e-9_r, "DSL default value for LinearSolverParams::absTol doesn't match C++ default. DSL says 1e-9, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.relTol, 1e-5_r, "DSL default value for LinearSolverParams::relTol doesn't match C++ default. DSL says 1e-5, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.relDivTol, 1e10_r, "DSL default value for LinearSolverParams::relDivTol doesn't match C++ default. DSL says 1e10, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.maxIter == int(-1)), "DSL default value for LinearSolverParams::maxIter doesn't match C++ default. DSL says kAutoLinearSolverMaxIter, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.restartSize == int(1000)), "DSL default value for LinearSolverParams::restartSize doesn't match C++ default. DSL says 1000, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.abortIfNotSpd == bool(false)), "DSL default value for LinearSolverParams::abortIfNotSpd doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for LinearSolverParams::verbosity doesn't match C++ default. DSL says Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for LinearSolverParams::verbosity doesn't match C++ default. DSL says VerbosityLevel::Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::CoordinateSpace params{};
-    MOCHI_ASSERT((params.axes == mochi::CoordinateSpaceAxes::Default), "DSL default value for CoordinateSpace::axes doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.axes == mochi::CoordinateSpaceAxes::Default), "DSL default value for CoordinateSpace::axes doesn't match C++ default. DSL says CoordinateSpaceAxes::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.unitsPerMeter, 1.0, "DSL default value for CoordinateSpace::unitsPerMeter doesn't match C++ default. DSL says 1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
 }

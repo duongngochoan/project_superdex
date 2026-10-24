@@ -36,13 +36,10 @@ using namespace mochi;
 
 // Utilities to create finite element discretizations
 using LowVolEleT = tetrahedral::Pk3DElement<1, 1>;
-constexpr auto kLowVolQuad = tetrahedral::kTetrahedralQuadrature1;
 
 using HighVolEleT = tetrahedral::Pk3DElement<1, 4>;
-constexpr auto kHighVolQuad = tetrahedral::kTetrahedralQuadrature4;
 
 using BoundaryEleT = tetrahedral::Pk3DElementTrace<tetrahedral::Pk3DElement<1, 1>, 6>;
-constexpr auto kBoundaryQuad = tetrahedral::kTetrahedralTraceQuadrature6;
 
 // Minimal assembler "shape" type: every discretization in these tests assembles into the parent
 // tet's 4 nodes x 3 fields (L2G stride 12), so a single 4-node/3-field shape drives the batched
@@ -55,25 +52,24 @@ struct Q1ShapeElement {
 
 constexpr int kBatchSize = kDefaultFemBatchSize;
 
-template <typename ElementT, typename QuadratureT>
-std::vector<ElementT> MakeElements(TetrahedralMesh const& mesh, QuadratureT const& quadrature) {
+template <typename ElementT>
+std::vector<ElementT> MakeElements(TetrahedralMesh const& mesh) {
   std::vector<ElementT> elements;
   elements.reserve(mesh.GetNumElements());
   for (int i = 0; i < mesh.GetNumElements(); ++i) {
-    elements.emplace_back(i, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity(), quadrature);
+    elements.emplace_back(i, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity());
   }
   return elements;
 }
 
-template <typename ElementT, typename BaseElementT, typename QuadratureT>
+template <typename ElementT, typename BaseElementT>
 std::vector<ElementT> MakeBoundaryElements(
     TetrahedralMesh const& mesh,
-    Span<BaseElementT const> baseElements,
-    QuadratureT const& faceQuadrature) {
+    Span<BaseElementT const> baseElements) {
   std::vector<ElementT> elements;
   for (int i = 0; i < mesh.GetNumBoundaryFaces(); ++i) {
     auto const& info = mesh.GetBoundaryFaces()[i];
-    elements.emplace_back(baseElements[info.element], info.faceNum, faceQuadrature[info.faceNum]);
+    elements.emplace_back(baseElements[info.element], info.faceNum);
   }
   return elements;
 }
@@ -129,19 +125,15 @@ static void TestSubsamplingWeightConsistency(std::string const& meshSrc) {
   auto sampleMeshData = rom::hyper::CreateSampleMeshAndWeights(*mesh, params, ErrorAssert{});
 
   // Create finite elements
-  auto volLowFull = MakeElements<LowVolEleT>(*mesh, kLowVolQuad);
+  auto volLowFull = MakeElements<LowVolEleT>(*mesh);
   auto volLowSample = ModifyQuadratureWeights(
-      MakeElements<LowVolEleT>(*sampleMeshData.mesh, kLowVolQuad),
-      sampleMeshData.weighting.volumeElements);
-  auto volHighFull = MakeElements<HighVolEleT>(*mesh, kHighVolQuad);
+      MakeElements<LowVolEleT>(*sampleMeshData.mesh), sampleMeshData.weighting.volumeElements);
+  auto volHighFull = MakeElements<HighVolEleT>(*mesh);
   auto volHighSample = ModifyQuadratureWeights(
-      MakeElements<HighVolEleT>(*sampleMeshData.mesh, kHighVolQuad),
-      sampleMeshData.weighting.volumeElements);
-  auto boundaryFull =
-      MakeBoundaryElements<BoundaryEleT, LowVolEleT>(*mesh, volLowFull, kBoundaryQuad);
+      MakeElements<HighVolEleT>(*sampleMeshData.mesh), sampleMeshData.weighting.volumeElements);
+  auto boundaryFull = MakeBoundaryElements<BoundaryEleT, LowVolEleT>(*mesh, volLowFull);
   auto boundarySample = ModifyQuadratureWeights(
-      MakeBoundaryElements<BoundaryEleT, LowVolEleT>(
-          *sampleMeshData.mesh, volLowSample, kBoundaryQuad),
+      MakeBoundaryElements<BoundaryEleT, LowVolEleT>(*sampleMeshData.mesh, volLowSample),
       sampleMeshData.weighting.boundaryFaceElements);
 
   // Create batched element operations for integrating the constant one
@@ -365,9 +357,8 @@ TEST(HyperReduction, SubsamplingWeightConsistencyCube) {
   double resultB2 = 0.0;
   AssemblyParams params{.assemObj = true, .assemRes = false, .assemDRes = false};
   {
-    auto volLowElems = MakeElements<LowVolEleT>(mesh, kLowVolQuad);
-    auto bdTraces =
-        MakeBoundaryElements<BoundaryEleT, LowVolEleT>(mesh, volLowElems, kBoundaryQuad);
+    auto volLowElems = MakeElements<LowVolEleT>(mesh);
+    auto bdTraces = MakeBoundaryElements<BoundaryEleT, LowVolEleT>(mesh, volLowElems);
 
     // Build boundary-face L2G and NBS
     BoundaryAssemblyData bdData(
@@ -395,9 +386,8 @@ TEST(HyperReduction, SubsamplingWeightConsistencyCube) {
   }
 
   {
-    auto volLowElems = MakeElements<LowVolEleT>(mesh, kLowVolQuad);
-    auto bdTraces =
-        MakeBoundaryElements<BoundaryEleT, LowVolEleT>(mesh, volLowElems, kBoundaryQuad);
+    auto volLowElems = MakeElements<LowVolEleT>(mesh);
+    auto bdTraces = MakeBoundaryElements<BoundaryEleT, LowVolEleT>(mesh, volLowElems);
 
     std::vector<int> activeTraceIndex{1};
 

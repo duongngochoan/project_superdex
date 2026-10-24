@@ -34,7 +34,15 @@ namespace mochi {
   Performs the analytical eigendecomposition 𝐐𝚲𝐐ᵀ of a symmetric matrix 𝐀. As the matrix is
   symmetric, only the upper-right entries (◹) are used for the decomposition. Eigenvectors are
   normalized and stored as columns of 𝐐. If transpose is set to true, 𝐐ᵀ will be returned instead of
-  𝐐.
+  𝐐. The SIMD and batched overloads always return 𝐐ᵀ.
+
+  The eigenvalues are in descending order and 𝐐 is a rotation.
+  - With eigenvectors, the decomposition is accurate for every spectrum, including repeated
+    eigenvalues (whose eigenvectors are not unique): ‖𝐀 − 𝐐𝚲𝐐ᵀ‖ = O(ε‖𝐀‖), ‖𝐐ᵀ𝐐 − 𝐈‖ = O(ε), and
+    the eigenvalue errors are O(ε‖𝐀‖).
+  - Without eigenvectors, the two closest 3x3 eigenvalues may be inaccurate: their error grows to
+    O(√ε‖𝐀‖) as their gap goes to zero. Request eigenvectors if they must be accurate. The 2x2
+    eigenvalues and the 3x3 one farthest from the other two stay accurate to O(ε‖𝐀‖).
 */
 
 inline void AnalyticalEigendecompSym(
@@ -44,7 +52,7 @@ inline void AnalyticalEigendecompSym(
     bool transpose = false);
 
 inline void AnalyticalEigendecompSym(
-    Matrix3x3r mat,
+    Matrix3x3r const& mat,
     Real3& eigvalues,
     Matrix3x3r* eigvecs = nullptr,
     bool transpose = false);
@@ -52,8 +60,10 @@ inline void AnalyticalEigendecompSym(
 inline void
 AnalyticalEigendecompSym2x2(VSymMatrix2x2r mat, Vec4r& eigvalues, VMatrix2x2r* eigvecs = nullptr);
 
-inline void
-AnalyticalEigendecompSym3x3(VSymMatrix3x3r mat, Vec4r& eigvalues, VMatrix3x3r* eigvecs = nullptr);
+inline void AnalyticalEigendecompSym3x3(
+    VSymMatrix3x3r const& mat,
+    Vec4r& eigvalues,
+    VMatrix3x3r* eigvecs = nullptr);
 
 /**************************************************************************************************
   Singular-Value Decomposition
@@ -61,30 +71,19 @@ AnalyticalEigendecompSym3x3(VSymMatrix3x3r mat, Vec4r& eigvalues, VMatrix3x3r* e
   Performs the rotation-variant singular value decomposition 𝐔𝚺𝐕ᵀ of a matrix 𝐅. Inversions i.e.
   when det(𝐅) < 0) are encoded as negative singular values on the smallest entry of 𝚺. 𝐔 and 𝐕 are
   guaranteed to be reflection-free rotations (i.e. det(𝐔) = det(𝐕) = 1). For the sake of efficiency,
-  the function outputs 𝐕ᵀ instead of 𝐕.
+  the function outputs 𝐕ᵀ instead of 𝐕. The *Vals functions compute 𝚺 from the eigenvalues of 𝐅ᵀ𝐅
+  without eigenvectors, so the squares of the two closest singular values are accurate only to
+  O(√ε‖𝐅‖²), and a pair near zero, as for a rank-1 𝐅, only to O(ε^¼‖𝐅‖). RotationVariantSvd and
+  RotationVariantSvd3x3 compute them accurately.
 
   WARNING: May be inaccurate if the matrix entries are several orders of magnitude above or below 1.
 */
 
-inline void RotationVariantSvdVals(Matrix3x3r const& F, Real3& Sg, Int3& order);
-
-inline void RotationVariantSvdVecs(
-    Matrix3x3r const& F,
-    Int3 const& order,
-    Real3& Sg,
-    Matrix3x3r& U,
-    Matrix3x3r& VT);
+inline void RotationVariantSvdVals(Matrix3x3r const& F, Real3& Sg);
 
 inline void RotationVariantSvd(Matrix3x3r const& F, Matrix3x3r& U, Real3& Sg, Matrix3x3r& VT);
 
-inline void RotationVariantSvdVals3x3(VMatrix3x3r const& F, Vec4r& Sg, Int3& order);
-
-inline void RotationVariantSvdVecs3x3(
-    VMatrix3x3r const& F,
-    Int3 const& order,
-    Vec4r const& Sg,
-    VMatrix3x3r& U,
-    VMatrix3x3r& VT);
+inline void RotationVariantSvdVals3x3(VMatrix3x3r const& F, Vec4r& Sg);
 
 inline void RotationVariantSvd3x3(
     NdArray<Vec4r, 3> const& F,
@@ -167,52 +166,20 @@ inline void ProjectSymPsd(VMatrix3x3r& A, real eps = std::numeric_limits<real>::
 
 template <int kBatchSize>
 inline void BatchedAnalyticalEigendecompSym3x3(
-    BatchReal6<kBatchSize> sym,
+    BatchSymMatrix3x3<kBatchSize> const& sym,
     BatchReal3<kBatchSize>& eigvalues,
     BatchReal3x3<kBatchSize>* eigvecs);
 
-/// @brief Cached normalized eigensystem of F^T * F for split batched rotation-variant SVD.
-///
-/// Treat this as an opaque cache. It is only valid for the same F used to populate it with @ref
-/// BatchedRotationVariantSvdVals3x3.
-///
-/// @see BatchedRotationVariantSvdVals3x3
-template <int kBatchSize>
-struct BatchedRotationVariantSvdNormalEigensystem3x3 {
-  BatchReal6<kBatchSize> normalizedGsym;
-  BatchReal3<kBatchSize> normalizedEigvals;
-};
-
 /// @brief Computes the rotation-variant singular values Sg of F, ordered by descending magnitude
 /// (|Sg[0]| >= |Sg[1]| >= |Sg[2]|). The smallest entry Sg[2] is negated iff det(F) < 0.
+///
+/// @note Without singular vectors, the squares of the two closest singular values are accurate
+/// only to O(√ε‖F‖²), and a pair near zero, as for a rank-1 F, only to O(ε^¼‖F‖).
+/// @ref BatchedRotationVariantSvd3x3 computes them accurately.
 template <int kBatchSize>
 inline void BatchedRotationVariantSvdVals3x3(
     BatchReal3x3<kBatchSize> const& F,
     BatchReal3<kBatchSize>& Sg);
-
-/// @brief Computes the rotation-variant singular values Sg of F and stores the normalized normal
-/// eigensystem needed by @ref BatchedRotationVariantSvdVecs3x3.
-///
-/// This overload normalizes F^T * F before eigendecomposition and rescales Sg back to F units.
-/// The singular values follow the same ordering and sign convention as the 2-argument overload.
-/// Pass normalEigensystem unchanged to @ref BatchedRotationVariantSvdVecs3x3 with the same F to
-/// compute the corresponding singular vectors.
-template <int kBatchSize>
-inline void BatchedRotationVariantSvdVals3x3(
-    BatchReal3x3<kBatchSize> const& F,
-    BatchReal3<kBatchSize>& Sg,
-    BatchedRotationVariantSvdNormalEigensystem3x3<kBatchSize>& normalEigensystem);
-
-/// @brief Computes rotation-variant singular vectors from a cached normalized normal eigensystem.
-///
-/// @warning normalEigensystem must be produced by the matching @ref
-/// BatchedRotationVariantSvdVals3x3 call for the same F.
-template <int kBatchSize>
-inline void BatchedRotationVariantSvdVecs3x3(
-    BatchReal3x3<kBatchSize> const& F,
-    BatchedRotationVariantSvdNormalEigensystem3x3<kBatchSize> const& normalEigensystem,
-    BatchReal3x3<kBatchSize>& U,
-    BatchReal3x3<kBatchSize>& VT);
 
 template <int kBatchSize>
 inline void BatchedRotationVariantSvdValsAndVT3x3(

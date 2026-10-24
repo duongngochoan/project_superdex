@@ -40,24 +40,18 @@ class Pk3DElementTrace final {
   static constexpr int kNumQuadPoints = kNumQuadPoints_;
   static constexpr int kNumNodes = 3;
   using ElementT = ElementT_;
-  using BasisEvaluatedT =
-      tetrahedral::BasisFunctionsEvaluated<ElementT::kPolyOrder, kNumQuadPoints>;
 
-  Pk3DElementTrace(
-      ElementT const& baseElement,
-      int faceNum,
-      TetrahedralQuadrature<kNumQuadPoints> const& quad)
+  Pk3DElementTrace(ElementT const& baseElement, int faceNum)
       : baseElement(baseElement),
         faceNum(faceNum),
-        quadrature(quad),
-        basisEvaluatedParametric(quadrature),
         nodesCrdsPhys(baseElement.nodesCrdsPhys),
-        basisEvaluated(basisEvaluatedParametric.basisEvaluated) {
-    // Tabulate the isoparametric map and its derivative at the quad points
+        basisEvaluated(kBasisEvaluatedPerFace[faceNum]),
+        _nodes{
+            baseElement.Nodes()[TetFaces::kIndices[faceNum][0]],
+            baseElement.Nodes()[TetFaces::kIndices[faceNum][1]],
+            baseElement.Nodes()[TetFaces::kIndices[faceNum][2]]} {
+    // Tabulate the isoparametric map, quadrature weights and normals at the quad points
     QuadratureEvaluateMap();
-
-    // Tabulate basis functions
-    QuadratureEvaluateBasis();
   }
 
   inline ElementT const& GetBaseElement() const {
@@ -70,11 +64,7 @@ class Pk3DElementTrace final {
 
   /// @brief Get the node indices of the element.
   Int3 Nodes() const {
-    return {
-        baseElement.connectivity[baseElement.elementIndex][TetFaces::kIndices[faceNum][0]],
-        baseElement.connectivity[baseElement.elementIndex][TetFaces::kIndices[faceNum][1]],
-        baseElement.connectivity[baseElement.elementIndex][TetFaces::kIndices[faceNum][2]],
-    };
+    return _nodes;
   }
 
   inline Int3 LocalNodes() const {
@@ -95,10 +85,10 @@ class Pk3DElementTrace final {
 
     for (int f = 0; f < kNumDofs; ++f) {
       // Get the map of the quadrature point
-      outMap += basisEvaluatedParametric.basisEvaluated[qpoint][f] * nodesCrds[f];
+      outMap += basisEvaluated[qpoint][f] * nodesCrds[f];
 
       // Get the tangent map at the quadrature point
-      outDMap += Outer(nodesCrds[f], basisEvaluatedParametric.dBasisEvaluated[qpoint][f]);
+      outDMap += Outer(nodesCrds[f], kDBasisEvaluatedPerFace[faceNum][qpoint][f]);
     }
   }
 
@@ -112,14 +102,15 @@ class Pk3DElementTrace final {
 
     // clang-format off
     // Get the map of the quadrature point
-    Vec4r basisEval = Load<Vec4r>(basisEvaluatedParametric.basisEvaluated[qpoint].data());
+    Vec4r basisEval = Load<Vec4r>(basisEvaluated[qpoint].data());
     outMap = Broadcast<0>(basisEval) * nodesCrds[0] + Broadcast<1>(basisEval) * nodesCrds[1] + Broadcast<2>(basisEval) * nodesCrds[2] + Broadcast<3>(basisEval) * nodesCrds[3];
 
     // Get the tangent map at the quadrature point
-    outDMap = Outer3(nodesCrds[0], Load<Vec4r>(basisEvaluatedParametric.dBasisEvaluated[qpoint][0].data()));
-    outDMap += Outer3(nodesCrds[1], Load<Vec4r>(basisEvaluatedParametric.dBasisEvaluated[qpoint][1].data()));
-    outDMap += Outer3(nodesCrds[2], Load<Vec4r>(basisEvaluatedParametric.dBasisEvaluated[qpoint][2].data()));
-    outDMap += Outer3(nodesCrds[3], Load<3, Vec4r>(basisEvaluatedParametric.dBasisEvaluated[qpoint][3].data()));
+    auto const& dBasis = kDBasisEvaluatedPerFace[faceNum][qpoint];
+    outDMap = Outer3(nodesCrds[0], Load<Vec4r>(dBasis[0].data()));
+    outDMap += Outer3(nodesCrds[1], Load<Vec4r>(dBasis[1].data()));
+    outDMap += Outer3(nodesCrds[2], Load<Vec4r>(dBasis[2].data()));
+    outDMap += Outer3(nodesCrds[3], Load<3, Vec4r>(dBasis[3].data()));
     // clang-format on
   }
 
@@ -147,7 +138,7 @@ class Pk3DElementTrace final {
     for (int i = 0; i < kSpaceDim; ++i) {
       outNormal[i] /= outWeight;
     }
-    outWeight *= quadrature.weights[qpoint]; // scale by the area of the face
+    outWeight *= kQuadratures[faceNum].weights[qpoint]; // scale by the area of the face
   }
 
   // SIMD overload (see scalar version above)
@@ -169,54 +160,44 @@ class Pk3DElementTrace final {
     outNormal /= weight;
 
     outWeight = Get0(weight);
-    outWeight *= quadrature.weights[qpoint]; // scale by the area of the face
+    outWeight *= kQuadratures[faceNum].weights[qpoint]; // scale by the area of the face
   }
 
  private:
   /**
-    Evaluate basis, derivatives, metric changes, map and dmap at quadrature points and caches them
+    Evaluate the map, the quadrature weights and the normals at the quadrature points and cache them
   */
   void QuadratureEvaluateMap() {
     for (int q = 0; q < kNumQuadPoints; ++q) {
       // Get the map and the tangent map at the quadrature point
-      QuadraturePointEvaluateMap(q, nodesCrdsPhys, mapEvaluated[q], dMapEvaluated[q]);
-
-      // Get the jacobian
-      dMapEvaluatedDet[q] = Det(dMapEvaluated[q]);
-
-      // Store the inverse
-      dMapEvaluatedInv[q] = Invert(dMapEvaluated[q], dMapEvaluatedDet[q]);
+      NdArray<real, kSpaceDim, kSpaceDimParam> dMap;
+      QuadraturePointEvaluateMap(q, nodesCrdsPhys, mapEvaluated[q], dMap);
 
       // Get the quadrature weight and the normal at the quadrature point
+      real const dMapDet = Det(dMap);
       QuadraturePointEvaluateWeightNormal(
-          q, dMapEvaluatedDet[q], dMapEvaluatedInv[q], quadWeights[q], normals[q]);
-    }
-  }
-
-  /**
-    Evaluate basis derivatives at quadrature points
-  */
-  void QuadratureEvaluateBasis() {
-    for (int q = 0; q < kNumQuadPoints; ++q) {
-      for (int f = 0; f < kNumDofs; ++f) {
-        // Compute gradient with respect to physical coordinates
-        dBasisEvaluated[q][f] = DotMatVec(
-            Transpose(dMapEvaluatedInv[q]), basisEvaluatedParametric.dBasisEvaluated[q][f]);
-      }
+          q, dMapDet, Invert(dMap, dMapDet), quadWeights[q], normals[q]);
     }
   }
 
  public:
   ElementT const& baseElement;
   int const faceNum;
-  TetrahedralQuadrature<kNumQuadPoints> const& quadrature;
-  BasisEvaluatedT const basisEvaluatedParametric;
 
   // Static constants
   static constexpr int kSpaceDim = 3;
   static constexpr int kSpaceDimParam = 3;
-  static constexpr int kNumDofs = BasisEvaluatedT::kBasis.kNumDofs;
+  static constexpr int kNumDofs = ElementT::kNumDofs;
   static_assert(kNumDofs == 4, "Unexpected number of DoFs");
+
+  // The quadrature of each face, and the basis functions and their gradients with respect to
+  // parametric coordinates evaluated at its points. They depend only on the face.
+  static constexpr NdArray<TetrahedralQuadrature<kNumQuadPoints>, 4> kQuadratures =
+      GetTetrahedralTraceQuadratures<kNumQuadPoints>();
+  static constexpr NdArray<NdArray<real, kNumQuadPoints, kNumDofs>, 4> kBasisEvaluatedPerFace =
+      EvaluateBasis<ElementT::kPolyOrder>(kQuadratures);
+  static constexpr NdArray<NdArray<real, kNumQuadPoints, kNumDofs, kSpaceDimParam>, 4>
+      kDBasisEvaluatedPerFace = EvaluateBasisGradients<ElementT::kPolyOrder>(kQuadratures);
 
   // The normals to the parametric element faces (for each of the 4 face we have a 3 dimensional
   // normal)
@@ -240,28 +221,18 @@ class Pk3DElementTrace final {
   // The array of mapped quadrature points into physical space
   NdArray<real, kNumQuadPoints, kSpaceDim> mapEvaluated;
 
-  // The array of the tangent map from parametric to physical evaluated at the quadrature points
-  NdArray<real, kNumQuadPoints, kSpaceDim, kSpaceDimParam> dMapEvaluated;
-
-  // The array of the inverse of the tangent map from parametric to physical evaluated at the
-  // quadrature points
-  NdArray<real, kNumQuadPoints, kSpaceDimParam, kSpaceDim> dMapEvaluatedInv;
-
-  // The array of the determinant of the tangent map from parametric to physical evaluated at the
-  // quadrature points
-  NdArray<real, kNumQuadPoints> dMapEvaluatedDet;
-
-  // Basis evaluate at quadrature points
-  NdArray<real, kNumQuadPoints, kNumDofs> basisEvaluated;
-
-  // dbasis evaluated at quad pts
-  NdArray<real, kNumQuadPoints, kNumDofs, kSpaceDim> dBasisEvaluated;
+  // Basis evaluated at the quadrature points of this face, in the static kBasisEvaluatedPerFace
+  NdArray<real, kNumQuadPoints, kNumDofs> const& basisEvaluated;
 
   // The quadrature weights for surface integration
   NdArray<real, kNumQuadPoints> quadWeights = {};
 
   // The face normal
   NdArray<real, kNumQuadPoints, kSpaceDim> normals = {};
+
+ private:
+  // Cached: reading them through baseElement costs two dependent cache misses per face.
+  Int3 const _nodes;
 };
 
 } // namespace mochi::tetrahedral

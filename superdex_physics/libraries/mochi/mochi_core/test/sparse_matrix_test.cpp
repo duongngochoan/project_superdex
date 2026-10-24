@@ -863,6 +863,7 @@ TEST(SparseMatrix, Empty) {
     EXPECT_FALSE(mat.empty());
     EXPECT_TRUE(mat); // operator bool
     EXPECT_EQ(0, mat.NumNonZeros());
+    mat.SetZero();
   }
 
   // Non-Zero non-zeros

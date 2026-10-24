@@ -208,6 +208,9 @@ class MOCHI_API ControllerBasicOscPd : public ControllerBase {
    * This controller is stateless between steps, so this is a no-op. */
   void Reset() override;
 
+  void ConfigureRecording(ControllerRecordingSink& sink, superdex::Error& error) const override;
+  void Record(ControllerRecordingSink& sink, superdex::Error& error) const override;
+
  protected:
   static void CheckParams(Params const& params, superdex::Error& error);
 
@@ -241,6 +244,8 @@ class MOCHI_API ControllerBasicOscPd : public ControllerBase {
   Matrix<real> _jArm;
   /* The efforts to be applied (all DOFs; uncontrolled DOFs are 0) */
   ColumnVector<real> _efforts;
+  Target _lastTarget;
+  bool _hasLastOutput = false;
 
   /* The robot DOFs for the controlled links only */
   ColumnVector<real> _positionsArm;

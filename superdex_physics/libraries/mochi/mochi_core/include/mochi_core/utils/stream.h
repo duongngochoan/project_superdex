@@ -195,12 +195,11 @@ class SpanStreamReader final : public StreamReader {
   void Read(void* dst, size_t numBytes, Error& error) final {
     MOCHI_ERROR_IF(numBytes > GetNumBytesRemaining(), error, "End of stream");
     MOCHI_ERROR_RETURN(error);
-    if (numBytes)
-      MOCHI_LIKELY {
-        MOCHI_ASSERT_VERBOSE(dst != nullptr);
-        std::memcpy(dst, &_src[_pos], numBytes);
-        _pos += numBytes;
-      }
+    if (numBytes) MOCHI_LIKELY {
+      MOCHI_ASSERT_VERBOSE(dst != nullptr);
+      std::memcpy(dst, &_src[_pos], numBytes);
+      _pos += numBytes;
+    }
   }
   [[nodiscard]] size_t GetPosition() const final {
     return _pos;
@@ -243,10 +242,9 @@ class DynamicArrayStreamWriter final : public StreamWriter {
   void WriteAt(size_t position, void const* src, size_t numBytes, Error& error) final {
     MOCHI_ASSERT_VERBOSE(src || !numBytes, "Null pointer");
     MOCHI_ERROR_IF(position + numBytes > _dst.size(), error, "Write position out-of-bounds");
-    if (error.IsOK() && numBytes)
-      MOCHI_LIKELY {
-        std::memcpy(&_dst[position], src, numBytes);
-      }
+    if (error.IsOK() && numBytes) MOCHI_LIKELY {
+      std::memcpy(&_dst[position], src, numBytes);
+    }
   }
   [[nodiscard]] size_t GetPosition() const final {
     return _dst.size();

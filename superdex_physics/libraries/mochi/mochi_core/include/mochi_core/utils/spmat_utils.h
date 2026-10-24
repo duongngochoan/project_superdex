@@ -30,7 +30,6 @@
 #include <mochi_core/utils/task_scheduler.h>
 
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <vector>
 
@@ -47,25 +46,6 @@ struct IndexGroup {
 
 struct IndexGroups : public DynamicArray<IndexGroup> {
   using DynamicArray::DynamicArray;
-
-  int GetNumDofs() const {
-    int count = 0;
-    for (auto const& indGroup : *this) {
-      count += indGroup.count;
-    }
-    return count;
-  }
-
-  DynamicArray<int> GetAllDofs(Allocator* allocator = GetDefaultAllocator()) const {
-    DynamicArray<int> dofs(allocator);
-    dofs.reserve(GetNumDofs());
-    for (auto const& indGroup : *this) {
-      for (int ind = indGroup.dst, i = 0; i < indGroup.count; ind++, i++) {
-        dofs.push_back(ind);
-      }
-    }
-    return dofs;
-  }
 };
 
 /**
@@ -78,72 +58,6 @@ IndexGroups CreateIndexGroups(
     Span<int const> inds,
     bool forceTriplets,
     Allocator* allocator = GetDefaultAllocator());
-
-/*
-  hash, equal_to and less functions to build unordered maps and sets with index groups.
-*/
-struct IndexGroupHash {
-  size_t operator()(IndexGroup const& indGroup) const {
-    return std::hash<int>{}(indGroup.dst) ^ std::hash<int>{}(indGroup.count);
-  }
-};
-
-struct IndexGroupsHash {
-  size_t operator()(IndexGroups const& indGroups) const {
-    size_t result = 0;
-    IndexGroupHash hash;
-    for (auto const& indGroup : indGroups) {
-      result ^= hash(indGroup);
-    }
-    return result;
-  }
-};
-
-struct IndexGroupEqual {
-  bool operator()(IndexGroup const& a, IndexGroup const& b) const {
-    return (a.dst == b.dst) && (a.count == b.count);
-  }
-};
-
-struct IndexGroupsEqual {
-  bool operator()(IndexGroups const& a, IndexGroups const& b) const {
-    if (a.size() != b.size()) {
-      return false;
-    }
-    IndexGroupEqual equal_to;
-    for (int i = 0; i < a.size(); i++) {
-      if (!equal_to(a[i], b[i])) {
-        return false;
-      }
-    }
-    return true;
-  }
-};
-
-struct IndexGroupLess {
-  bool operator()(IndexGroup const& a, IndexGroup const& b) const {
-    if (a.dst != b.dst) {
-      return a.dst < b.dst;
-    }
-    return a.count < b.count;
-  }
-};
-
-struct IndexGroupsLess {
-  bool operator()(IndexGroups const& a, IndexGroups const& b) const {
-    if (a.size() != b.size()) {
-      return a.size() < b.size();
-    }
-    IndexGroupEqual equal_to;
-    IndexGroupLess less;
-    for (int i = 0; i < a.size(); i++) {
-      if (!equal_to(a[i], b[i])) {
-        return less(a[i], b[i]);
-      }
-    }
-    return false;
-  }
-};
 
 /**
   MatAddSubBlocks: Add a collection of rectangular dense blocks to a sparse, block sparse, or dense

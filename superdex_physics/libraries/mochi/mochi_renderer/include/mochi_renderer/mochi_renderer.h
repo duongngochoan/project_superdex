@@ -143,17 +143,19 @@ class MochiRenderer {
     return _viewSettings;
   }
 
-  // --- Presentation camera control ---
-  // These control the camera used for window presentation.
-  void SetPresentationCameraTransform(
-      filament::math::double3 position,
-      filament::math::quat rotation);
+  // --- Presentation (window) camera ---
+  // Drive the interactive window's camera, called by the windowed app from its
+  // orbit manipulator. The window uses its own non-flipped projection, so this
+  // takes the world up directly (no readback-flip compensation).
   void SetPresentationCameraLookAt(
       filament::math::double3 eye,
       filament::math::double3 target,
       filament::math::double3 up = {0, 0, 1});
-  void SetPresentationCameraProjection(float fovDegrees, float nearPlane, float farPlane);
-  void SetPresentationViewport(int width, int height);
+  // Name of the observation camera the window presents; a client look-at on this
+  // camera also steers the window via the presented-camera-moved hook.
+  std::string const& GetPresentedCameraName() const {
+    return _presentedCameraName;
+  }
 
  private:
   MochiRenderer() = default;
@@ -169,6 +171,9 @@ class MochiRenderer {
 
   PipelineMode _pipelineMode = PipelineMode::Synchronized;
   SceneViewSettings _viewSettings;
+
+  // Name of the observation camera the window presents (used to gate the hook).
+  std::string _presentedCameraName = "default";
 
   // For presentation camera
   utils::Entity _presentationCameraEntity;

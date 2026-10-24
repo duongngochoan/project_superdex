@@ -98,7 +98,10 @@ static DynamicArray<uint8_t> MakePayload(size_t size, uint32_t seed = 0) {
 // as soon as the predicate holds, false if the timeout elapses first.
 template <typename Predicate>
 static bool PollUntil(Predicate&& pred, float timeoutSec = 60.0f) {
-  auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<float>(timeoutSec);
+  // Keep the deadline in clock ticks, as test::WaitUntil explains.
+  auto const timeout = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<float>(timeoutSec));
+  std::chrono::steady_clock::time_point const deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (pred()) {
       return true;

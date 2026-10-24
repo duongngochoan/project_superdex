@@ -66,7 +66,13 @@ class ObservationCamera {
 
   // --- Transform ---
   void SetTransform(filament::math::double3 position, filament::math::quat rotation);
-  void LookAt(filament::math::double3 eye, filament::math::double3 target);
+  // Orient the camera to look from `eye` at `target`. `up` is the world direction that
+  // should point up in the rendered image; it only fixes the roll about the view axis,
+  // and must be non-zero and not parallel to the view direction.
+  void LookAt(
+      filament::math::double3 eye,
+      filament::math::double3 target,
+      filament::math::double3 up = {0, 0, 1});
   filament::math::double3 GetPosition() const;
   filament::math::quat GetRotation() const;
 

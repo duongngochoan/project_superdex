@@ -21,14 +21,11 @@
 #include <mochi_core/linear_algebra/matrix.h>
 #include <mochi_core/linear_algebra/sparse_matrix.h>
 #include <mochi_core/mochi_config.h>
-#include <mochi_core/utils/basic_utils.h>
 #include <mochi_core/utils/debug.h>
 #include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/graph.h>
 #include <mochi_core/utils/graph_views.h>
-#include <mochi_core/utils/local_to_global_map.h>
 #include <mochi_core/utils/nd_array.h>
-#include <mochi_core/utils/profile.h>
 #include <mochi_core/utils/span.h>
 
 #include <optional>
@@ -127,13 +124,6 @@ void ConvertToFillLevel(
 
 } // namespace details
 
-// Use a Local2GlobalMap to build a sparsity graph using M as auxiliary/scratch storage.
-// The method can take an optional number of rows to support empty rows.
-Graph<int, int> MakeSparsityGraph(
-    Local2GlobalMap const& map,
-    std::vector<std::vector<int>>& M,
-    std::optional<int> numRowsOpt = {});
-
 // Build a sparsity pattern from an associative collection of non-zero coordinates,
 // represented as a vector of vectors: each entry in the vector contains all
 // column indices of a given row.
@@ -142,33 +132,11 @@ Graph<int, int> MakeSparsityGraph(
     std::vector<std::vector<int>>&& M,
     std::optional<int> numRowsOpt = {});
 
-// Use a Local2GlobalMap to build a sparsity graph, which can in turn be used to
-// initialize a SparseMatrix. The method can take an optional number of rows to support empty rows.
-Graph<int, int> MakeSparsityGraph(Local2GlobalMap const& map, std::optional<int> numRowsOpt = {});
-
 // Build a sparsity pattern from a collection non-zero coordinates, represented as (row, col) pairs.
 // The method can take an optional number of rows to support empty rows.
 Graph<int, int> MakeSparsityGraph(
     std::vector<Int2> coordinates,
     std::optional<int> numRowsOpt = {});
-
-// Build the sparsity pattern for a matrix where all values can be non-zero.
-Graph<int, int> MakeDenseSparsityGraph(int numRows, int numCols);
-
-// Use a Local2GlobalMap to build a square SparseMatrix.
-template <typename T = real>
-SparseMatrix<T, int, int> MakeSparseMatrix(Local2GlobalMap const& map) {
-  Graph<int, int> sparsity = MakeSparsityGraph(map);
-  int numCols = sparsity.size(); // Assumes a square matrix
-  return SparseMatrix<T, int, int>{numCols, std::move(sparsity)};
-}
-
-// Enumerate the non-zero coordinates in an existing sparsity pattern, and append them to an output
-// vector. Does NOT clear the output vector.
-void AppendNonZeroCoordinates(
-    std::vector<Int2>& outCoordinates,
-    Graph<int, int> const& sparsity,
-    int dofOffset = 0);
 
 // Set the values on the specified rows of a matrix to zero, except for the diagonal, which will be
 // set the specified value (usually 1). The rowOffset is added to each of the rowIndices and may be
@@ -253,60 +221,22 @@ void SetZeroOnCols(
     Span<int const> valueIndicesCache = {});
 
 /**
- * @brief For each column index in newColIndices, computes which indices in the sparse matrix's
- * value array correspond to non-zeros in that column, and appends them to valueIndicesCache.
+ * @brief For each column index in newColIndices, computes which indices in the matrix's value array
+ * correspond to non-zeros in that column, and appends them to valueIndicesCache. No-op for dense
+ * matrices.
  *
- * @param[in] sparsityGraph The sparsity graph (must be square with symmetric pattern).
+ * @param[in] mat The square matrix, whose (block) sparsity pattern must be symmetric (i.e., if (r,
+ * c) is in the pattern, then (c, r) must also be). Results are undefined otherwise.
  * @param[in] newColIndices The column indices whose value array indices should be appended to the
  * cache.
  * @param[in,out] valueIndicesCache The cache to append to (new indices are added at the end).
  *
- * @warning The sparsity graph must be symmetric (i.e., if (r, c) is in the graph, then (c, r) must
- * also be in the graph). Results are undefined if this requirement is not met.
  * @note The appended indices are sorted to improve memory efficiency when the cache is used.
  */
-template <typename CRIdx, typename Ptr, template <typename, typename...> typename Storage>
 void AppendColValueIndexCache(
-    Graph<CRIdx, Ptr, Storage> const& sparsityGraph,
+    AnyMatrixView<real const> mat,
     Span<int const> newColIndices,
-    DynamicArray<int>& valueIndicesCache) {
-  MOCHI_PROFILE_SCOPE();
-  if (newColIndices.empty()) {
-    return;
-  }
-
-  [[maybe_unused]] int const numRows = isize(sparsityGraph.GetPointers()) - 1;
-  MOCHI_ASSERT_VERBOSE(numRows > 0, "Sparsity graph must not be empty.");
-
-  auto const& pointers = sparsityGraph.GetPointers();
-  auto const& targets = sparsityGraph.GetTargets();
-
-  // For a symmetric sparsity pattern, if column c has a non-zero in row r, then row r
-  // must also have a non-zero in column c. We use this to find value indices:
-  // 1. For each column c, get the rows with non-zeros from targets[pointers[c]:pointers[c+1]]
-  // 2. For each such row r, search row r's targets to find the value index for (r, c)
-  auto const initialSize = valueIndicesCache.size();
-  for (int c : newColIndices) {
-    MOCHI_ASSERT_VERBOSE(c >= 0 && c < numRows, "Column index out of range.");
-    // Get all rows that have non-zeros in column c (using symmetry: these are the targets of c)
-    for (int ptr = pointers[c]; ptr < pointers[c + 1]; ++ptr) {
-      int r = targets[ptr];
-      // Now find the value index for (r, c) by searching row r's targets for column c
-      [[maybe_unused]] bool found = false;
-      for (int rPtr = pointers[r]; rPtr < pointers[r + 1]; ++rPtr) {
-        if (targets[rPtr] == c) {
-          valueIndicesCache.push_back(rPtr); // This is the value index for (r, c)
-          found = true;
-          break;
-        }
-      }
-      MOCHI_ASSERT_VERBOSE(found, "Sparsity pattern is not symmetric.");
-    }
-  }
-
-  // Sort new indices for better memory access during lookup.
-  ParallelSort(valueIndicesCache.begin() + initialSize, valueIndicesCache.end());
-}
+    DynamicArray<int>& valueIndicesCache);
 
 // Build a SparseMatrix which is a copy of the original, except that all zeros have been pruned from
 // the sparsity pattern. If (blockSize > 1) then we will only blocks if all values within the block

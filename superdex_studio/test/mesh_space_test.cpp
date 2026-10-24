@@ -31,6 +31,8 @@
 
 #include "meshing/processing_modifiers/processing_mesh_utils.h"
 
+#include <mochi_core/utils/file_utils.h>
+
 #include <mochi_mesh/step_tessellation.h>
 
 #include <mochi_renderer/utils.h>
@@ -144,6 +146,40 @@ TEST(MeshFileSpace, StepTessellatesIntoRenderSpaceAlready) {
   EXPECT_LT(bounds[5], kStubLimit) << "nothing should run to renderer +Z";
 }
 
+// The CAD preview's colored tessellation goes through TessellateStepByColor instead, so it must
+// land in the same orientation as TessellateStep AND keep each arm's color on that arm. Colors are
+// identified by their dominant channel, which holds for linear and sRGB factors alike.
+TEST(MeshFileSpace, StepPreviewSectionsKeepColorsInRenderSpace) {
+  mochi::ErrorAssert error;
+  mochi::mesh::StepTessellationParams params;
+  params.linearDeflection = 0.05; // mm, the Model Editor's CAD-preview default
+  params.angularDeflection = 0.25; // rad
+  std::vector<MeshSection> const sections =
+      TessellateStepSections(AssetPath("axis_gizmo.stp"), params, error);
+  ASSERT_GT(sections.size(), 1u) << "expected one section per CAD color";
+
+  auto dominatedBy = [](MeshSection const& section, int channel) {
+    auto const& c = section.baseColor;
+    return c[channel] > 2.0f * c[(channel + 1) % 3] && c[channel] > 2.0f * c[(channel + 2) % 3];
+  };
+  auto boundsOfColor = [&](int channel) {
+    std::vector<MeshSection> matching;
+    for (MeshSection const& section : sections) {
+      if (dominatedBy(section, channel)) {
+        matching.push_back(section);
+      }
+    }
+    EXPECT_FALSE(matching.empty()) << "no section dominated by channel " << channel;
+    return SectionBounds(matching);
+  };
+
+  constexpr float kArmLength = 0.1f;
+  constexpr float kArmTolerance = 1e-3f;
+  EXPECT_NEAR(boundsOfColor(0)[3], kArmLength, kArmTolerance) << "red arm -> renderer +X";
+  EXPECT_NEAR(boundsOfColor(2)[4], kArmLength, kArmTolerance) << "blue arm -> renderer +Y";
+  EXPECT_NEAR(boundsOfColor(1)[2], -kArmLength, kArmTolerance) << "green arm -> renderer -Z";
+}
+
 // --- Materials ----------------------------------------------------------------------------------
 
 // An .obj's colors live in the .mtl its `mtllib` line names, resolved relative to the .obj. When
@@ -179,14 +215,13 @@ TEST(MeshFileSpace, ObjExportRoundTripsThroughRenderSpace) {
   mochi::MeshData const loaded = LoadRenderMesh(AssetPath("axis_gizmo.obj"), error);
   ASSERT_GT(loaded.GetNumElements(), 0);
 
-  std::filesystem::path const out =
-      std::filesystem::temp_directory_path() / "superdex_axis_gizmo_roundtrip.obj";
+  mochi::TempDirCleanup const folder = mochi::CreateTempDirectory("mesh_space_test", error);
+  std::filesystem::path const out = folder.Path() / "axis_gizmo_roundtrip.obj";
   WriteObjFile(out.string(), loaded, error);
 
   std::vector<MeshSection> const reread = ReadSectionsInRenderSpace(out.string());
   ASSERT_FALSE(reread.empty());
   ExpectBoundsNear(SectionBounds(reread), kGizmoInRenderSpace);
-  std::filesystem::remove(out);
 }
 
 } // namespace

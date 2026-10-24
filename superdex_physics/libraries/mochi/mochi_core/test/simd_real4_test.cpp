@@ -567,6 +567,7 @@ MOCHI_SIMD_TEST_BINARY_OP_NEAR(Vec4r, Div, /, kEps);
 TEST(Vec4r, VDot) {
   auto a = Vec4r{1_r, 2_r, 3_r, 4_r};
   auto b = Vec4r{5_r, 6_r, 7_r, 8_r};
+  EXPECT_VEC4R(5_r, 5_r, 5_r, 5_r, (VDot<1>(a, b))); // 1 component
   EXPECT_VEC4R(17_r, 17_r, 17_r, 17_r, (VDot<2>(a, b))); // 2 component
   EXPECT_VEC4R(38_r, 38_r, 38_r, 38_r, (VDot<3>(a, b))); // 3 component
   EXPECT_VEC4R(70_r, 70_r, 70_r, 70_r, (VDot<4>(a, b))); // 4 component
@@ -600,13 +601,7 @@ TEST(Vec4r, Get) {
   EXPECT_EQ(3_r, Get<2>(a));
   EXPECT_EQ(4_r, Get<3>(a));
 
-  // Slower runtime version
-  EXPECT_EQ(1_r, Get(a, 0));
-  EXPECT_EQ(2_r, Get(a, 1));
-  EXPECT_EQ(3_r, Get(a, 2));
-  EXPECT_EQ(4_r, Get(a, 3));
-
-  // Same but with operator[] (read only)
+  // Runtime version
   EXPECT_EQ(1_r, a[0]);
   EXPECT_EQ(2_r, a[1]);
   EXPECT_EQ(3_r, a[2]);
@@ -665,6 +660,7 @@ TEST(Vec4r, GreaterEqual) {
 
 TEST(Vec4r, HMax) {
   auto a = Vec4r{1_r, 2_r, 3_r, 4_r};
+  EXPECT_NEAR_EQ(1_r, HMax<1>(a));
   EXPECT_NEAR_EQ(2_r, HMax<2>(a));
   EXPECT_NEAR_EQ(3_r, HMax<3>(a));
   EXPECT_NEAR_EQ(4_r, HMax(a));
@@ -672,6 +668,7 @@ TEST(Vec4r, HMax) {
 
 TEST(Vec4r, HMin) {
   auto a = Vec4r{4_r, 3_r, 2_r, 1_r};
+  EXPECT_NEAR_EQ(4_r, HMin<1>(a));
   EXPECT_NEAR_EQ(3_r, HMin<2>(a));
   EXPECT_NEAR_EQ(2_r, HMin<3>(a));
   EXPECT_NEAR_EQ(1_r, HMin(a));
@@ -679,6 +676,7 @@ TEST(Vec4r, HMin) {
 
 TEST(Vec4r, HProd) {
   auto a = Vec4r{2_r, 3_r, 4_r, 5_r};
+  EXPECT_NEAR_EQ(2_r, HProd<1>(a));
   EXPECT_NEAR_EQ(6_r, HProd<2>(a));
   EXPECT_NEAR_EQ(24_r, HProd<3>(a));
   EXPECT_NEAR_EQ(120_r, HProd(a));
@@ -698,9 +696,15 @@ TEST(Vec4r, Lerp) {
 
 TEST(Vec4r, HSum) {
   auto a = Vec4r{1_r, 2_r, 3_r, 4_r};
+  EXPECT_NEAR_EQ(1_r, HSum<1>(a));
   EXPECT_NEAR_EQ(3_r, HSum<2>(a));
   EXPECT_NEAR_EQ(6_r, HSum<3>(a));
   EXPECT_NEAR_EQ(10_r, HSum(a));
+}
+
+TEST(Vec4r, HSumEach) {
+  auto const a = Vec4r{1_r, 2_r, 3_r, 4_r};
+  EXPECT_VEC4R(10_r, 100_r, 1000_r, 10000_r, HSumEach(a, 10_r * a, 100_r * a, 1000_r * a));
 }
 
 TEST(Vec4r, Less) {
@@ -736,6 +740,7 @@ TEST(Vec4r, Load) {
   EXPECT_VEC4R(1_r, 2_r, 3_r, 4_r, (Load<4, Vec4r>(values + 1)));
   EXPECT_VEC4R(1_r, 2_r, 3_r, 4_r, (Load<Vec4r>(values + 1)));
 
+  EXPECT_VEC4R(0_r, 0_r, 0_r, 0_r, (Load<Vec4r>(values + 1, 0)));
   EXPECT_VEC4R(1_r, 0_r, 0_r, 0_r, (Load<Vec4r>(values + 1, 1)));
   EXPECT_VEC4R(1_r, 2_r, 0_r, 0_r, (Load<Vec4r>(values + 1, 2)));
   EXPECT_VEC4R(1_r, 2_r, 3_r, 0_r, (Load<Vec4r>(values + 1, 3)));
@@ -920,37 +925,7 @@ MOCHI_SIMD_TEST_LIMIT_RANGE_UNARY_FN_NEAR(Vec4r, Sqrt, ([](auto a) { return std:
 // clang-format on
 
 TEST(Vec4r, Store) {
-  std::vector<real> result(
-      5); // NOTE: Changed from an array on the stack to work around an MSVC optimizer bug.
-  auto const v = Vec4r{1_r, 2_r, 3_r, 4_r};
-  Store<0>((real*)nullptr, v);
-  Store<0>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<real, 4>{0_r, 0_r, 0_r, 0_r}), Span(&result[1], 4));
-  Store<1>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 0_r, 0_r, 0_r}), Span(&result[1], 4));
-  Store<2>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 2_r, 0_r, 0_r}), Span(&result[1], 4));
-  Store<3>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 2_r, 3_r, 0_r}), Span(&result[1], 4));
-  Store<4>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 2_r, 3_r, 4_r}), Span(&result[1], 4));
-  result.clear();
-  result.resize(5);
-  Store(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 2_r, 3_r, 4_r}), Span(&result[1], 4));
-
-  result.clear();
-  result.resize(5);
-  Store(&result[1], v, 0);
-  EXPECT_SPAN_EQ((std::array<real, 4>{0_r, 0_r, 0_r, 0_r}), Span(&result[1], 4));
-  Store(&result[1], v, 1);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 0_r, 0_r, 0_r}), Span(&result[1], 4));
-  Store(&result[1], v, 2);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 2_r, 0_r, 0_r}), Span(&result[1], 4));
-  Store(&result[1], v, 3);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 2_r, 3_r, 0_r}), Span(&result[1], 4));
-  Store(&result[1], v, 4);
-  EXPECT_SPAN_EQ((std::array<real, 4>{1_r, 2_r, 3_r, 4_r}), Span(&result[1], 4));
+  TestStore(Vec4r{1_r, 2_r, 3_r, 4_r});
 }
 
 TEST(Vec4r, StoreSelected) {
@@ -1155,9 +1130,7 @@ TEST(Vec4r, ExpExtreme) {
   auto expv = Exp(v), expmv = Exp(-v);
   auto tol = real(2.0) * std::numeric_limits<real>::epsilon();
   for (int i = 0; i < 4; ++i) {
-    EXPECT_NEAR_RTOL(Vec4r::Get(expv, i), std::exp(x[i]), tol);
-    EXPECT_LE(
-        Abs(Vec4r::Get(expmv, i) - std::exp(-x[i])),
-        Max(Vec4r::Get(expmv, i), std::exp(-x[i])) * tol);
+    EXPECT_NEAR_RTOL(expv[i], std::exp(x[i]), tol);
+    EXPECT_LE(Abs(expmv[i] - std::exp(-x[i])), Max(expmv[i], std::exp(-x[i])) * tol);
   }
 }

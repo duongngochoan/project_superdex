@@ -37,10 +37,9 @@ namespace mochi {
  */
 template <typename Scalar, size_t kDofsPerNode, size_t kBlockCols>
 void CompactRight(StairNodalIterator<Scalar, kDofsPerNode, kBlockCols>& iterator) {
-  if (iterator.currentNRows == iterator.fullNRows)
-    MOCHI_UNLIKELY {
-      return;
-    }
+  if (iterator.currentNRows == iterator.fullNRows) MOCHI_UNLIKELY {
+    return;
+  }
   // Compute the pointers for the last block to be moved.
   auto destinationEnd = iterator.blockEnd - iterator.currentNRows;
   auto sourceEnd = iterator.blockEnd - iterator.fullNRows;

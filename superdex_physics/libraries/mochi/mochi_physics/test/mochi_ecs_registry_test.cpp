@@ -16,6 +16,8 @@
 
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/defer.h>
+#include <mochi_core/utils/log.h>
+#include <mochi_physics/src/mochi_ecs.h>
 #include <mochi_physics/src/mochi_ecs_registry.h>
 
 #include <mochi_physics/mochi_physics.h>
@@ -307,6 +309,62 @@ TEST(EcsRegistry, TryGetComponentTypeInfo) {
   info = ecs::TryGetComponentTypeInfo(reg, entt::type_id<CCompB>().hash());
   ASSERT_NE((ecs::ComponentTypeInfo const*)nullptr, info);
   ExpectComponentInfo<CCompB>(reg, *info, "ecs_registry_test::CCompB", false);
+}
+
+TEST(EcsRegistry, DetectUnregisteredComponent) {
+  // In debug builds, every way of invoking a system that requires or excludes the unregistered
+  // CCompC warns once, naming it, whether or not a check stops early and whatever CCompC's pool
+  // holds.
+  std::string warnings;
+  auto const prevLogFn = GetLogCallback();
+  MOCHI_DEFER(SetLogCallback(prevLogFn));
+  SetLogCallback([&](LogChannel channel, char const* message, char const* file, int line) {
+    if (channel == LogChannel::Warning) {
+      warnings += message;
+    } else {
+      prevLogFn(channel, message, file, line);
+    }
+  });
+
+  // Each case gets its own registry, since a registry warns at most once. Without entitiesHaveA,
+  // every check stops early at CCompA. With it, none does, and another entity has CCompC.
+  auto const expectWarning = [&](auto const& invoke) {
+    for (bool const entitiesHaveA : {false, true}) {
+      entt::registry reg;
+      ecs::InitializeComponentRegistryOnce(reg);
+      ecs::RegisterComponent<CCompA>(reg);
+      ecs::FinalizeComponentRegistration(reg);
+      DynamicArray<entt::entity> const entities{reg.create(), reg.create()};
+      if (entitiesHaveA) {
+        reg.insert<CCompA>(entities.begin(), entities.end());
+        reg.emplace<CCompC>(reg.create());
+      }
+
+      warnings.clear();
+      invoke(reg, entities);
+      EXPECT_EQ(MOCHI_DEBUG != 0, warnings.find("ecs_registry_test::CCompC") != std::string::npos);
+
+      // Invoking again doesn't warn again. Nor does the pool count of DetectUnregisteredComponents
+      // in debug builds, but it does in release builds, where the named check compiles out.
+      std::string const firstWarnings = warnings;
+      invoke(reg, entities);
+      EXPECT_EQ(firstWarnings, warnings);
+      reg.emplace<CCompC>(reg.create());
+      ecs::DetectUnregisteredComponents(reg);
+      EXPECT_EQ(MOCHI_DEBUG == 0, warnings != firstWarnings);
+    }
+  };
+
+  // Global, list and single-entity invocations, and CanInvokeOnEntity, which build or test the
+  // system's view in each of its four ways.
+  auto const expectWarningFromEveryInvocation = [&](auto system) {
+    expectWarning([&](auto& r, auto const&) { ecs::InvokeForEachGlobal(system, r); });
+    expectWarning([&](auto& r, auto const& es) { ecs::InvokeForEach(system, r, es); });
+    expectWarning([&](auto& r, auto const& es) { ecs::TryInvokeOnEntity(system, r, es[0]); });
+    expectWarning([&](auto& r, auto const& es) { ecs::CanInvokeOnEntity(system, r, es[0]); });
+  };
+  expectWarningFromEveryInvocation(+[](CCompA const&, CCompC const&) {});
+  expectWarningFromEveryInvocation(+[](CCompA const&, ecs::Excluded<CCompC>) {});
 }
 
 TEST(EcsRegistry, TryGet) {

@@ -35,7 +35,7 @@
 namespace mochi::krylov {
 
 /* Class to perform a series of matrix-vector products in parallel in the context of an iterative
- * linear solver. It creates a pool of parallel workers at construction, and then ensures each
+ * linear solver. It creates a pool of parallel workers at the first product, and then ensures each
  * worker performs the same subset of the product in every iteration. This reduces parallelization
  * overhead and increases per-core cache efficiency. Neither the master thread nor the worker
  * threads yield to other tasks until the pool is shut down, except perhaps as part of the shutdown
@@ -72,7 +72,7 @@ namespace mochi::krylov {
  * opA.ReleaseWorkers(); // Release the workers so that they can be used for other purposes
  * ```
  *
- * TODO:
+ * TODO(T290274539):
  * [P2] A range of rows may be sub-optimal to characterize the division of work for some operators.
  */
 template <typename MatrixType>

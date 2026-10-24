@@ -132,6 +132,7 @@ static void BenchmarkRodWork(benchmark::State& state, BenchmarkMode mode) {
     }
     batchedDisp[d] = Load<V>(staging);
   }
+  NdArray<V, kDofs> const batchedStageStartDisp{};
 
   Vd energy{};
   NdArray<V, kDofs> batchRes{};
@@ -145,6 +146,7 @@ static void BenchmarkRodWork(benchmark::State& state, BenchmarkMode mode) {
     RodGravity<kBatchSize>(
         MakeConstSpan(data.nodalMasses),
         batchedDisp,
+        batchedStageStartDisp,
         data.elementIndices,
         MakeConstSpan(data.l2gFlat),
         evalObj ? &energy : nullptr,

@@ -167,6 +167,15 @@ std::optional<std::filesystem::path> superdex::robotics::FindBotsRoot(
   return std::nullopt;
 }
 
+std::string superdex::robotics::GetBotSceneBaseRoot(
+    std::string_view sceneFilePath,
+    std::string_view baseScenePath) {
+  if (auto botsRoot = FindBotsRoot(std::filesystem::path(std::string(sceneFilePath)))) {
+    return botsRoot->string();
+  }
+  return std::filesystem::path(std::string(baseScenePath)).parent_path().string();
+}
+
 // Returns true if `name` is a valid tag identifier (the part after the leading '@').
 // Identifier rules: every character must be a letter, digit, or underscore.
 static bool IsValidTagIdentifier(std::string_view name) {
@@ -562,6 +571,11 @@ void superdex::robotics::MakePathsRelative(
   for (auto& link : botPrefab.links) {
     MakeLinkPathsRelative(link, basePath, error);
   }
+  MOCHI_ERROR_RETURN(error);
+  if (botPrefab.skin.has_value()) {
+    MakePathRelative(botPrefab.skin->shapeFile, basePath, kBotPathMaxParentDepth, error);
+    MakePathRelative(botPrefab.skin->renderModelFile, basePath, kBotPathMaxParentDepth, error);
+  }
 }
 
 void superdex::robotics::MakePathsAbsolute(
@@ -571,6 +585,15 @@ void superdex::robotics::MakePathsAbsolute(
   MOCHI_ERROR_RETURN(error);
   for (auto& link : botPrefab.links) {
     MakeLinkPathsAbsolute(link, basePath, error);
+  }
+  MOCHI_ERROR_RETURN(error);
+  if (botPrefab.skin.has_value()) {
+    if (!botPrefab.skin->shapeFile.empty()) {
+      MakePathAbsolute(botPrefab.skin->shapeFile, basePath, kBotPathMaxParentDepth, error);
+    }
+    if (!botPrefab.skin->renderModelFile.empty()) {
+      MakePathAbsolute(botPrefab.skin->renderModelFile, basePath, kBotPathMaxParentDepth, error);
+    }
   }
 }
 
@@ -591,6 +614,10 @@ void superdex::robotics::MakePathsRelative(
             },
             [&](AttachLink& m) { MakeLinkPathsRelative(m.link, basePath, error); },
             [&](ReplaceLink& m) { MakeLinkPathsRelative(m.link, basePath, error); },
+            [&](AttachSkin& m) {
+              MakePathRelative(m.skin.shapeFile, basePath, kBotPathMaxParentDepth, error);
+              MakePathRelative(m.skin.renderModelFile, basePath, kBotPathMaxParentDepth, error);
+            },
         },
         mod);
   }
@@ -614,6 +641,14 @@ void superdex::robotics::MakePathsAbsolute(
             },
             [&](AttachLink& m) { MakeLinkPathsAbsolute(m.link, basePath, error); },
             [&](ReplaceLink& m) { MakeLinkPathsAbsolute(m.link, basePath, error); },
+            [&](AttachSkin& m) {
+              if (!m.skin.shapeFile.empty()) {
+                MakePathAbsolute(m.skin.shapeFile, basePath, kBotPathMaxParentDepth, error);
+              }
+              if (!m.skin.renderModelFile.empty()) {
+                MakePathAbsolute(m.skin.renderModelFile, basePath, kBotPathMaxParentDepth, error);
+              }
+            },
         },
         mod);
     MOCHI_ERROR_RETURN(error);
@@ -785,7 +820,7 @@ void superdex::robotics::SaveToFile(
   }
 }
 
-#if MOCHI_INTERNAL
+#if SUPERDEXROBOTICS_WITH_BOT_SCENE
 void superdex::robotics::SaveToFile(
     BotScenePrefab const& scenePrefab,
     std::string_view path,
@@ -814,13 +849,16 @@ void superdex::robotics::SaveToFile(
       MakeParamsPathRelative(ctrl.params, basePath, error);
     }
   }
+  for (auto& sensor : temp.sensors) {
+    MakeParamsPathRelative(sensor.params, basePath, error);
+  }
   MOCHI_ERROR_RETURN(error);
   // Each controller's initArgs is a JsonString-tagged field, so plain SReflect serialization emits
   // it as a nested "initArgs" object (empty ones omitted via NoSerializeDefaults). No bespoke
   // splicing needed.
   SaveParamsToFile(temp, path, error);
 }
-#endif // MOCHI_INTERNAL
+#endif // SUPERDEXROBOTICS_WITH_BOT_SCENE
 
 static void HashFileIntoState(XXH3_state_t* state, std::string_view path, Error& error) {
   MOCHI_ERROR_RETURN(error);
@@ -873,7 +911,7 @@ DynamicString superdex::robotics::HashBotFile(std::string_view path, Error& erro
           "HashBotFile: '%s' does not exist; hashing without its contents", file.c_str());
       return;
     }
-    HashFileIntoState(state, file.c_str(), error);
+    HashFileIntoState(state, file, error);
   };
   for (auto const& link : botPrefab.links) {
     hashFileIfPresent(link.renderModelFile);

@@ -628,7 +628,9 @@ void mochi::compound::OnGlobalDofsChanged(
     CDerivedStateOffset const* derivedStateOffset,
     CDiffInputOffset const* diffInputOffset) {
   if (isArticulated.hasTag) {
-    articulated::compound::InitFullDofProblem(reg, compound);
+    // The links of an articulated actor keep their offsets relative to it, but its constraints may
+    // have changed.
+    articulated::compound::UpdateFullDofInfo(reg, compound);
   } else {
     UpdateDofInfo(
         reg,

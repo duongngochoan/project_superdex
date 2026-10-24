@@ -15,7 +15,6 @@
  */
 
 #include <mochi_core/geometry/triangular_mesh.h>
-#include <mochi_core/utils/array_utils.h>
 #include <mochi_core/utils/basic_utils.h>
 #include <mochi_core/utils/debug.h>
 #include <mochi_core/utils/dynamic_array.h>
@@ -108,12 +107,8 @@ static void CalcTriangleNormalsAndArea(
     // By adding the smallest possible floating-point value, we avoid
     // divide-by-zero and the result is unchanged, except for degenerate cases.
     // See mochi::Normalize.
-    if (outElementNormals) {
-      outElementNormals[e] = norm / (area + std::numeric_limits<real>::min());
-    }
-    if (outElementArea) {
-      outElementArea[e] = area;
-    }
+    outElementNormals[e] = norm / (area + std::numeric_limits<real>::min());
+    outElementArea[e] = area;
   }
 }
 
@@ -289,21 +284,6 @@ TriangularMesh::TriangularMesh(Span<Real3 const> coordinatesIn, Span<Int3 const>
     // also produces non-zero flux.
     CheckMeshFlux();
   }
-}
-
-void TriangularMesh::ComputeNodeCoordinates(
-    Span<Real3 const> nodeDisplacements,
-    Span<Real3> outNodeCoordinates) const {
-  auto nodeCoordinates = GetNodeCoordinates();
-  ArrayAdd(Flatten(outNodeCoordinates), Flatten(nodeDisplacements), Flatten(nodeCoordinates));
-}
-
-void TriangularMesh::ComputeElementNormals(
-    Span<Real3 const> nodeCoordinates,
-    Span<Real3> outElementNormals) const {
-  MOCHI_ASSERT_VERBOSE(nodeCoordinates.size() == GetNumNodes(), "Invalid coordinates span");
-  MOCHI_ASSERT_VERBOSE(outElementNormals.size() == GetNumElements(), "Invalid output normals span");
-  CalcTriangleNormalsAndArea(nodeCoordinates, GetElementConnectivity(), outElementNormals, {});
 }
 
 void TriangularMesh::ComputeNodeNormals(Span<Real3> outNodeNormals) const {

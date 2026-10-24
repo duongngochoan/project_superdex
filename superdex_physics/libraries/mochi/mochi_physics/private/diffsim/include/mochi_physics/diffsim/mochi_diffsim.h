@@ -44,15 +44,6 @@ PrepareBackPropagate(Scene* scene, StateHandle stateNew, StateHandle stateOld, E
 
 MOCHI_API void BackPropagate(Scene* scene, Error& error);
 
-MOCHI_API void GetStepJacobian(
-    Scene* scene,
-    StateHandle stateNew,
-    StateHandle stateCurr,
-    StateHandle stateOld,
-    Span<real> outJacCurr,
-    Span<real> outJacOld,
-    Error& error);
-
 MOCHI_API void
 ConvertRigidGradientLieToRotationVector(TransformRT const& state, Span<real> outGrad, Error& error);
 

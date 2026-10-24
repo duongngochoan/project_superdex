@@ -44,13 +44,11 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CTriangularMesh>(reg);
   ecs::RegisterComponent<CSurfaceMesh>(reg);
   ecs::RegisterComponent<CVisualMesh>(reg);
+  ecs::RegisterComponent<CContactSkinMesh>(reg);
   ecs::RegisterComponent<CLocal2GlobalMap>(reg);
   ecs::RegisterComponent<CBoundaryLocal2GlobalMap>(reg);
   ecs::RegisterComponent<CContactLocal2GlobalMap>(reg);
-  ecs::RegisterComponent<CFullSparsityPattern>(reg);
-  ecs::RegisterComponent<CReducedSparsityPattern>(reg);
   ecs::RegisterComponent<CFemVolumeDiscretizationP1Q1>(reg);
-  ecs::RegisterComponent<CFemVolumeDiscretizationP1Q4>(reg);
   ecs::RegisterComponent<CFemBoundaryDiscretizationP1Q1_1>(reg);
   ecs::RegisterComponent<CFemBoundaryDiscretizationP1Q1_3>(reg);
   ecs::RegisterComponent<CFemBoundaryDiscretizationP1Q1_6>(reg);
@@ -94,6 +92,39 @@ void mochi::UpdateQueryNodePositions(
 
   // Compute reference positions + displacements.
   ArrayAdd(MakeSpan(outQuery.nodePositions), referencePositions, displacements);
+}
+void mochi::UpdateLinearEmbeddedNodePositionsFromDisplacements(
+    LinearMeshEmbedding const& embedding,
+    Span<Real3 const> embeddedReferencePositions,
+    Span<Real3 const> displacements,
+    Span<int const> outputNodeIndices,
+    Span<Real3> outPositions) {
+  MOCHI_PROFILE_SCOPE();
+
+  int const weightsPerNode = static_cast<int>(embedding.GetNumSkinningWeightsPerEntry());
+  Span<int const> const indices = embedding.GetIndices();
+  Span<real const> const weights = embedding.GetWeights();
+  int const numEmbeddedNodes = isize(indices) / weightsPerNode;
+  int const numOutputNodes =
+      outputNodeIndices.empty() ? numEmbeddedNodes : isize(outputNodeIndices);
+  MOCHI_ASSERT_VERBOSE(isize(outPositions) == numOutputNodes);
+  MOCHI_ASSERT_VERBOSE(isize(embeddedReferencePositions) == numEmbeddedNodes);
+
+  int constexpr kMinPerTask = 128;
+  ParallelForN(
+      "UpdateLinearEmbeddedNodePositions", numOutputNodes, kMinPerTask, [&](int outputNode) {
+        int const embeddedNode =
+            outputNodeIndices.empty() ? outputNode : outputNodeIndices[outputNode];
+        MOCHI_ASSERT_VERBOSE(embeddedNode >= 0 && embeddedNode < numEmbeddedNodes);
+        Real3 position = embeddedReferencePositions[embeddedNode];
+        for (int influence = 0; influence < weightsPerNode; ++influence) {
+          int const embeddingIndex = embeddedNode * weightsPerNode + influence;
+          int const sourceNode = indices[embeddingIndex];
+          MOCHI_ASSERT_VERBOSE(sourceNode >= 0 && sourceNode < isize(displacements));
+          position += weights[embeddingIndex] * displacements[sourceNode];
+        }
+        outPositions[outputNode] = position;
+      });
 }
 
 void mochi::UpdateQuerySurfaceNodePositions(
@@ -191,72 +222,70 @@ void mochi::UpdateQuerySurfaceNodeNormals(
   outQuery.nodeNormals.resize(kSpaceDim3 * numNodes); // trim SIMD padding
 }
 
-static void UpdateQueryVisualNodePositions(
+// Compute the local-space node positions of an auxiliary (visual or contact skin) mesh. Rigid
+// actors use the reference positions, computed once. Deformable actors map posQuery through the
+// mesh embedding.
+static void UpdateAuxiliaryMeshNodePositions(
     bool isRigid,
-    CVisualMesh const& visualMesh,
-    CQueryNodePositions const* positionQuery,
-    CQueryVisualNodePositions& outQuery) {
+    TriangularMesh const& mesh,
+    MeshEmbedding const* embedding,
+    CQueryNodePositions const* posQuery,
+    DynamicArray<real>& outPositions) {
   MOCHI_PROFILE_SCOPE();
 
   // Rigid actors don't deform: use reference positions, computed once.
   if (isRigid) {
-    if (outQuery.nodePositions.empty()) {
-      Span<real const> coordinates = Flatten(visualMesh.mesh->GetNodeCoordinates());
-      outQuery.nodePositions.assign(coordinates.begin(), coordinates.end());
+    if (outPositions.empty()) {
+      Span<real const> coordinates = Flatten(mesh.GetNodeCoordinates());
+      outPositions.assign(coordinates.begin(), coordinates.end());
     }
     return;
   }
 
   // Deformable actors: map deformed positions through embedding.
   MOCHI_ASSERT(
-      visualMesh.embedding && positionQuery && !positionQuery->nodePositions.empty(),
-      "CQueryVisualNodePositions prerequisites for a deformable actor not satisfied.");
-  auto const numValues = static_cast<size_t>(kSpaceDim3) * visualMesh.mesh->GetNumNodes();
-  outQuery.nodePositions.resize(numValues);
-  auto dstCoords = Unflatten<Real3>(MakeSpan(outQuery.nodePositions));
-  auto srcCoords = Unflatten<Real3 const>(MakeSpan(positionQuery->nodePositions));
-  visualMesh.embedding->Update(srcCoords, dstCoords);
+      embedding && posQuery && !posQuery->nodePositions.empty(),
+      "Auxiliary mesh query prerequisites for a deformable actor not satisfied.");
+  outPositions.resize(static_cast<size_t>(kSpaceDim3) * mesh.GetNumNodes());
+  embedding->Update(
+      Unflatten<Real3 const>(MakeConstSpan(posQuery->nodePositions)),
+      Unflatten<Real3>(MakeSpan(outPositions)));
 }
 
-void mochi::UpdateQueryVisualNodeNormals(
+void mochi::UpdateAuxiliaryMeshNodeNormals(
     bool isRigid,
-    CVisualMesh const& visualMesh,
-    CQueryVisualNodePositions const& visPosQuery,
-    CQueryVisualNodeNormals& outVisNormQuery) {
+    TriangularMesh const& mesh,
+    Span<real const> positions,
+    DynamicArray<real>& outNormals) {
   MOCHI_PROFILE_SCOPE();
 
   // Rigid actors don't deform: compute normals once and cache.
-  if (isRigid && !outVisNormQuery.nodeNormals.empty()) {
+  if (isRigid && !outNormals.empty()) {
     return;
   }
-
-  TriangularMesh const* visMesh = visualMesh.mesh.get();
 
   // TODO[Nate] Compute the cross product only once per triangle, like
   // UpdateQuerySurfaceNodeNormals. Requires adjacency information, which TriangularMesh currently
   // doesn't have.
-  auto const numValues = static_cast<size_t>(kSpaceDim3) * visMesh->GetNumNodes();
-  outVisNormQuery.nodeNormals.clear(); // must be cleared to zeros for this algorithm to work
-  outVisNormQuery.nodeNormals.resize(numValues, 0_r);
-  Span<Int3 const> elements = visMesh->GetElementConnectivity();
-  auto const& visualPositions = visPosQuery.nodePositions;
-  auto& outVisualNormals = outVisNormQuery.nodeNormals;
-  for (Int3 const& elem : elements) {
-    Vec4r v0 = Load<3, Vec4r>(&visualPositions[kSpaceDim3 * elem[0]]);
-    Vec4r v1 = Load<3, Vec4r>(&visualPositions[kSpaceDim3 * elem[1]]);
-    Vec4r v2 = Load<3, Vec4r>(&visualPositions[kSpaceDim3 * elem[2]]);
+  auto const numValues = static_cast<size_t>(kSpaceDim3) * mesh.GetNumNodes();
+  outNormals.clear(); // must be cleared to zeros for this algorithm to work
+  outNormals.resize(numValues, 0_r);
+  for (Int3 const& elem : mesh.GetElementConnectivity()) {
+    Vec4r v0 = Load<3, Vec4r>(&positions[kSpaceDim3 * elem[0]]);
+    Vec4r v1 = Load<3, Vec4r>(&positions[kSpaceDim3 * elem[1]]);
+    Vec4r v2 = Load<3, Vec4r>(&positions[kSpaceDim3 * elem[2]]);
     Vec4r n = ToSimdDirection(Cross3(v1 - v0, v2 - v0));
 
-    real* dst = &outVisualNormals[kSpaceDim3 * elem[0]];
+    real* dst = &outNormals[kSpaceDim3 * elem[0]];
     Store<3>(dst, n + Load<3, Vec4r>(dst));
-    dst = &outVisualNormals[kSpaceDim3 * elem[1]];
+    dst = &outNormals[kSpaceDim3 * elem[1]];
     Store<3>(dst, n + Load<3, Vec4r>(dst));
-    dst = &outVisualNormals[kSpaceDim3 * elem[2]];
+    dst = &outNormals[kSpaceDim3 * elem[2]];
     Store<3>(dst, n + Load<3, Vec4r>(dst));
   }
 
-  for (int i = 0; i < numValues; i += kSpaceDim3) {
-    real* dst = &outVisualNormals[i];
+  for (size_t i = 0; i < numValues; i += kSpaceDim3) {
+    real* dst = &outNormals[i];
     Vec4r n = Normalize<3>(Load<3, Vec4r>(dst));
     Store<3>(dst, n);
   }
@@ -271,13 +300,39 @@ void mochi::UpdateQueryVisualNodePositionsAndNormals(
     CQueryVisualNodePositions& outVisPosQuery,
     CQueryVisualNodeNormals* outVisNormQuery) {
   bool const isRigid = isRigidDynamic || isStatic;
-
-  // Compute visual positions first.
-  UpdateQueryVisualNodePositions(isRigid, visualMesh, posQuery, outVisPosQuery);
-
-  // Optionally, compute visual normals (requires the updated visual node positions).
+  UpdateAuxiliaryMeshNodePositions(
+      isRigid,
+      *visualMesh.mesh,
+      visualMesh.embedding.get(),
+      posQuery,
+      outVisPosQuery.nodePositions);
   if (outVisNormQuery) {
-    UpdateQueryVisualNodeNormals(isRigid, visualMesh, outVisPosQuery, *outVisNormQuery);
+    UpdateAuxiliaryMeshNodeNormals(
+        isRigid,
+        *visualMesh.mesh,
+        MakeConstSpan(outVisPosQuery.nodePositions),
+        outVisNormQuery->nodeNormals);
+  }
+}
+
+void mochi::UpdateQueryContactSkinNodePositionsAndNormals(
+    ecs::Excluded<CRodContactSkinEmbedding>,
+    CContactSkinMesh const& contactSkin,
+    CQueryNodePositions const& posQuery,
+    CQueryContactSkinNodePositions& outPosQuery,
+    CQueryContactSkinNodeNormals* outNormQuery) {
+  UpdateAuxiliaryMeshNodePositions(
+      /*isRigid*/ false,
+      *contactSkin.mesh,
+      contactSkin.embedding.get(),
+      &posQuery,
+      outPosQuery.nodePositions);
+  if (outNormQuery) {
+    UpdateAuxiliaryMeshNodeNormals(
+        /*isRigid*/ false,
+        *contactSkin.mesh,
+        MakeConstSpan(outPosQuery.nodePositions),
+        outNormQuery->nodeNormals);
   }
 }
 

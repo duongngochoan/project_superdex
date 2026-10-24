@@ -32,10 +32,8 @@
 #include <mochi_core/geometry/obb.h>
 #include <mochi_core/geometry/sphere.h>
 #include <mochi_core/materials/material_params.h>
-#include <mochi_core/solvers/nonlinear_solver_params.h>
 #include <mochi_core/utils/error.h>
 #include <mochi_core/utils/nd_array.h>
-#include <mochi_core/utils/simd.h>
 #include <mochi_core/utils/span.h>
 #include <mochi_core/utils/transform_rt.h>
 
@@ -124,6 +122,8 @@ class Actor {
 
   [[nodiscard]] virtual MeshDataView GetVisualMesh() const = 0;
 
+  [[nodiscard]] virtual MeshDataView GetContactSkinMesh() const = 0;
+
   [[nodiscard]] virtual Span<real const> GetSurfaceMeshNodePositionsLocal(Error& error) const = 0;
 
   [[nodiscard]] virtual Span<real const> GetSurfaceMeshNodeNormalsLocal(Error& error) const = 0;
@@ -179,6 +179,11 @@ class Actor {
   [[nodiscard]] virtual Span<real const> GetVisualMeshNodePositionsLocal(Error& error) const = 0;
 
   [[nodiscard]] virtual Span<real const> GetVisualMeshNodeNormalsLocal(Error& error) const = 0;
+
+  [[nodiscard]] virtual Span<real const> GetContactSkinMeshNodePositionsLocal(
+      Error& error) const = 0;
+
+  [[nodiscard]] virtual Span<real const> GetContactSkinMeshNodeNormalsLocal(Error& error) const = 0;
 
   [[nodiscard]] virtual Span<int const> GetBoundaryConditionDofIndices() const = 0;
 

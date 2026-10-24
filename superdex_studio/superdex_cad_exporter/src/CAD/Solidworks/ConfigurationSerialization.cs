@@ -21,6 +21,7 @@ using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using Attribute = SolidWorks.Interop.sldworks.Attribute;
 
+using CADRobotExporter.Export;
 using CADRobotExporter.UI;
 using CADRobotExporter.RobotDescription;
 using CADRobotExporter.Utilities;
@@ -236,8 +237,10 @@ namespace CADRobotExporter.CAD
             return true;
         }
 
-        public static Feature SaveConfigTreeXML(ModelDoc2 model, LinkNode BaseNode, bool warnUser, Feature exporterFeature, string featureName)
+        public static Feature SaveConfigTreeXML(ModelDoc2 model, LinkNode BaseNode, bool warnUser, Feature exporterFeature, string featureName, bool allowCancel, out ConfigSaveResult result)
         {
+            result = ConfigSaveResult.NotNeeded;
+
             string oldData = GetConfigTreeData(exporterFeature, out double version);
             string newData = SerializeToString(BaseNode);
 
@@ -248,12 +251,34 @@ namespace CADRobotExporter.CAD
             }
             if (oldData != newData)
             {
-                if (!warnUser ||
-                    (warnUser &&
-                    MessageBox.Show("The Robot Configuration has changed, would you like to save?",
-                    "Save Robot Configuration", MessageBoxButtons.YesNo) == DialogResult.Yes))
+                if (!warnUser)
                 {
                     exporterFeature = SaveDataToModelDoc(model, newData, exporterFeature, featureName);
+                    result = ConfigSaveResult.Saved;
+                }
+                else
+                {
+                    DialogResult answer = MessageBox.Show(
+                        "The Robot Configuration has changed, would you like to save?",
+                        "Save Robot Configuration",
+                        allowCancel ? MessageBoxButtons.YesNoCancel : MessageBoxButtons.YesNo);
+
+                    if (answer == DialogResult.Cancel)
+                    {
+                        // Leave the document untouched; the caller decides what to abort.
+                        result = ConfigSaveResult.Cancelled;
+                        return exporterFeature;
+                    }
+
+                    if (answer == DialogResult.Yes)
+                    {
+                        exporterFeature = SaveDataToModelDoc(model, newData, exporterFeature, featureName);
+                        result = ConfigSaveResult.Saved;
+                    }
+                    else
+                    {
+                        result = ConfigSaveResult.Declined;
+                    }
                 }
             }
 
@@ -267,27 +292,6 @@ namespace CADRobotExporter.CAD
         }
 
         /// <summary>
-        /// If someone updates the name of a LinkNode in the Treeview, it needs to be pushed down
-        /// to the URDF Link itself.
-        /// </summary>
-        /// <param name="node">TreeView LinkNode to save properties of to its URDF Link</param>
-        private static void SavePropertiesLinkNodeToLink(LinkNode node)
-        {
-            if (node.Link == null)
-            {
-                node.Link = new Link();
-                return;
-            }
-
-            node.Link.Name = node.Name;
-
-            foreach (LinkNode child in node.Nodes)
-            {
-                SavePropertiesLinkNodeToLink(child);
-            }
-        }
-
-        /// <summary>
         /// Data Contract serialization. All members of an object need to be annotated with a
         /// [DataMember] attribute.
         /// </summary>
@@ -295,7 +299,6 @@ namespace CADRobotExporter.CAD
         /// <returns>A string serialized utilizing DataContract serialization XML scheme</returns>
         private static string SerializeToString(LinkNode node)
         {
-            SavePropertiesLinkNodeToLink(node);
             Link link = node.UpdateLinkTree(null);
             string data = "";
             using (MemoryStream stream = new MemoryStream())
@@ -391,15 +394,17 @@ namespace CADRobotExporter.CAD
 
             // Replace URDFElement with RobotElement in both opening and closing tags
             // This handles the inheritance change from URDFElement to RobotElement base class
+            // Namespace change that reverts from CADRobotExporter to SW2URDF are intentional
+            // for forwards compatibility
             string migratedData = data
                 .Replace("<URDFElement", "<RobotElement")
                 .Replace("</URDFElement>", "</RobotElement>")
                 .Replace(
                     "http://schemas.datacontract.org/2004/07/SW2URDF.UI",
-                    "http://schemas.datacontract.org/2004/07/CADRobotExporter.Export")
+                    "http://schemas.datacontract.org/2004/07/SW2URDF.Export")
                 .Replace(
-                    "http://schemas.datacontract.org/2004/07/SW2URDF.Export",
-                    "http://schemas.datacontract.org/2004/07/CADRobotExporter.Export");
+                    "http://schemas.datacontract.org/2004/07/CADRobotExporter.Export",
+                    "http://schemas.datacontract.org/2004/07/SW2URDF.Export");
 
             return migratedData;
         }

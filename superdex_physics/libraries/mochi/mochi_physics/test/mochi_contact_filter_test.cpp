@@ -16,12 +16,17 @@
 
 #include "mochi_physics_test_fixture.h"
 
+#include <mochi_core/utils/constants.h>
 #include <mochi_core/utils/defer.h>
+#include <mochi_core/utils/dynamic_array.h>
+#include <mochi_physics/src/mochi_contact.h>
 #include <mochi_physics/src/mochi_contact_filter.h>
 #include <mochi_physics/src/mochi_island.h>
 
 #include <algorithm>
 #include <initializer_list>
+#include <limits>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -188,7 +193,13 @@ TEST_F(MochiContactFilter, ActorVsActor) {
   // Create some actors
   auto actorA = CreateActor("SomeLayer")->GetHandle();
   auto actorB = CreateActor("SomeLayer")->GetHandle();
+  // E lies past C along the sweep, so creating it before C makes an unsorted sweep miss B-C.
+  auto actorE = CreateActor("SomeLayer")->GetHandle();
   auto actorC = CreateActor("SomeLayer")->GetHandle();
+  auto actorD = CreateActor("SomeLayer")->GetHandle();
+  auto actorF = CreateActor("SomeLayer")->GetHandle();
+  auto actorG = CreateActor("SomeLayer")->GetHandle();
+  auto actorH = CreateActor("SomeLayer")->GetHandle();
 
   // Force them into one island
   _scene->SetForceSingleIsland(true);
@@ -245,8 +256,49 @@ TEST_F(MochiContactFilter, ActorVsActor) {
   EXPECT_TRUE(sceneImpl->IsActorContactEnabled(actorA, actorB, test::ExpectOK{})); // unchanged
   EXPECT_FALSE(sceneImpl->IsActorContactEnabled(actorB, actorA, test::ExpectOK{})); // unchanged
 
+  // The broadphase pairs actors whose step bounds overlap, subject to the filters above. The second
+  // pass swaps x and z. The box centers vary most along x in the literals, so the sweep runs along
+  // x in the first pass and along z in the second. In the literals, A, B and D tie in lower x, C
+  // touches A and B, D overlaps A, B and C in x but not in y, and E is past the others in x. A,
+  // thin in z in the literals, is thin in x in the second pass, so a stop test left on x would miss
+  // C-A. F has a NaN lower bound, H a NaN upper bound and G infinite bounds; G comes first, so the
+  // axis choice starts from a non-finite center.
+  auto& reg = GetRegistry();
+  auto entities = [&](auto... actors) { return std::multiset<entt::entity>{GetEntity(actors)...}; };
+  auto syncColliders = [&](ActorHandle actor) {
+    auto const& colliders =
+        reg.get<CConservativePotentialColliders</*kIsSync*/ true> const>(GetEntity(actor));
+    return std::multiset<entt::entity>(colliders.begin(), colliders.end());
+  };
+  real const nan = std::numeric_limits<real>::quiet_NaN();
+  for (bool const swapXZ : {false, true}) {
+    DynamicArray<Aabb> bounds;
+    auto setBounds = [&](ActorHandle actor, Real3 const& min, Real3 const& max) {
+      auto const map = [&](Real3 const& v) { return swapXZ ? Real3{v[2], v[1], v[0]} : v; };
+      bounds.emplace_back(map(min), map(max));
+      reg.get<CConservativeStepBounds>(GetEntity(actor)).worldAabb = bounds.back();
+    };
+    setBounds(actorG, -kInf3, kInf3);
+    setBounds(actorA, {0_r, 0_r, 0_r}, {1_r, 1_r, 0.5_r});
+    setBounds(actorB, {0_r, 0_r, 0_r}, {1_r, 1_r, 1_r});
+    setBounds(actorC, {1_r, 0_r, 0_r}, {2_r, 1_r, 1_r});
+    setBounds(actorD, {0_r, 2_r, 0_r}, {2_r, 3_r, 1_r});
+    setBounds(actorE, {3_r, 0_r, 0_r}, {4_r, 1_r, 1_r});
+    setBounds(actorF, {nan, 0_r, 0_r}, {1_r, 1_r, 1_r});
+    setBounds(actorH, {0_r, 0_r, 0_r}, {nan, 1_r, 1_r});
+    EXPECT_EQ(swapXZ ? 2u : 0u, contact::SelectSweepAxis(bounds));
+    contact::UpdateConservativePotentialColliders(reg);
+    EXPECT_EQ(entities(actorB, actorG), syncColliders(actorA));
+    EXPECT_EQ(entities(actorC, actorG), syncColliders(actorB));
+    EXPECT_EQ(entities(actorA, actorB, actorG), syncColliders(actorC));
+    EXPECT_EQ(entities(actorG), syncColliders(actorD));
+    EXPECT_EQ(entities(actorG), syncColliders(actorE));
+    EXPECT_EQ(entities(), syncColliders(actorF));
+    EXPECT_EQ(entities(), syncColliders(actorH));
+    EXPECT_EQ(entities(actorA, actorB, actorC, actorD, actorE), syncColliders(actorG));
+  }
+
   // Peak at the registry to ensure entries are removed from the table as actors are destroyed.
-  auto const& reg = test::GetRegistry(_scene);
   auto const& table = reg.ctx<CContactFilterTable>();
   EXPECT_EQ(3, table.entitiesWithNoContact.size()); // AA, BA, AC
   _scene->DestroyActor(actorB);

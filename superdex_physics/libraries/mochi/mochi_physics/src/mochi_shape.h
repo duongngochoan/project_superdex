@@ -49,8 +49,18 @@
 
 namespace mochi {
 
-struct RodVisualMeshEmbeddingData;
+struct RodSurfaceEmbeddingData;
 struct BlendingDataMap;
+
+namespace details {
+
+// Return skinning aligned 1:1 with @p surfaceMesh's active nodes, or null if @p meshSkinning is
+// null. Returns @p meshSkinning itself when the surface already follows full-mesh node order.
+std::shared_ptr<SkinningData const> MakeSurfaceSkinning(
+    std::shared_ptr<SkinningData const> const& meshSkinning,
+    TriangularMesh const& surfaceMesh);
+
+} // namespace details
 
 // Base class for shapes
 class Shape {
@@ -64,7 +74,8 @@ class Shape {
   // Return the volume of the shape, if possible.
   virtual std::optional<real> GetVolume() const = 0;
 
-  // Return the centroid (center-of-mass assuming uniform density), if possible.
+  // Return the centroid (center-of-mass assuming uniform density), if possible. Must have a value
+  // whenever GetVolume() does.
   virtual std::optional<Real3> GetCentroid() const = 0;
 
   // Return this shape's raw triangular surface mesh, or nullptr if it doesn't have one.
@@ -87,6 +98,12 @@ class Shape {
       view.nodesPerElement = mesh->GetNumNodesPerElement();
       view.coordinates = Flatten(mesh->GetActiveNodeCoordinates());
       view.connectivity = mesh->GetActiveNodesFlatConnectivity();
+      // Mesh shapes that carry per-node skinning expose it in surface (active-node) order, aligned
+      // 1:1 with the coordinates above.
+      auto const& skinning = GetSurfaceSkinning();
+      if (skinning) {
+        view.skinning = SkinningDataView{*skinning};
+      }
     }
 
     return view;
@@ -108,6 +125,14 @@ class Shape {
 
   // Populate a ModelData struct based on the derived Shape implementation, or fail with an Error.
   virtual ModelData GetModelData(Error& error) const = 0;
+
+  // Return skinning aligned 1:1 with GetSurfaceMesh()'s active nodes, or null if this shape has
+  // none. Derived shapes own immutable storage for their lifetime, so returned views remain valid
+  // and safe for concurrent reads. Bone indices are forwarded verbatim.
+  virtual std::shared_ptr<SkinningData const> const& GetSurfaceSkinning() const {
+    static std::shared_ptr<SkinningData const> const kEmpty;
+    return kEmpty;
+  }
 };
 
 using ShapePtr = std::shared_ptr<Shape>;
@@ -179,8 +204,8 @@ struct BlendingDataMap {
   std::map<DynamicString, BlendingDataTargetMesh> perSourceShapeData;
   // Data re-copied to vectors, to enable sharing spans externally
   DynamicArray<DynamicString> sourceShapes; // size = arbitrary
-  DynamicArray<Span<int const>> perSourceShapeIndices; // size = numSourceShapes * numNodes * 2
-  DynamicArray<Span<real const>> perSourceShapeWeights; // size = numSourceShapes * numNodes * 2
+  DynamicArray<Span<int const>> perSourceShapeIndices; // each span has numNodes entries
+  DynamicArray<Span<real const>> perSourceShapeWeights; // each span has numNodes entries
 
   void CopyMapToVectors() {
     int numSourceShapes = perSourceShapeData.size();
@@ -252,18 +277,21 @@ class GridSdfShape : public Shape {
   GridSdfShape& operator=(GridSdfShape&&) = delete;
 
   // Return this shape's GridSdf if it has one.
-  MOCHI_API std::shared_ptr<GridSdf const> GetGridSdf() const;
+  std::shared_ptr<GridSdf const> GetGridSdf() const;
 
   // If this shape already has a GridSdf, then return it.
-  // Else if this shape does not support GridSdf, then set an error and return nullptr.
-  // Else if a GridSdf can be computed, then start an async task (if not already started) and
-  // return nullptr with (*outIsPending = true). To get the result of the async task, call
+  // Else if an async task is already computing one, then return nullptr with
+  // (*outIsPending = true), ignoring these params: the task uses the params of the request that
+  // started it.
+  // Else if a GridSdf cannot be computed with these params, then set an error and return nullptr
+  // with (*outIsPending = false).
+  // Else start an async task that computes one with these params, and return nullptr with
+  // (*outIsPending = true). To get the result of the async task, call
   // GetGridSdfSemaphore().Wait(), then GetGridSdf().
-  MOCHI_API std::shared_ptr<GridSdf const> RequestGridSdf(
-      GridSdfParams const& params,
-      bool* outIsPending) const;
+  std::shared_ptr<GridSdf const>
+  RequestGridSdf(GridSdfParams const& params, bool* outIsPending, Error& error) const;
 
-  // If you RequestGridSdf starts an async job, then you can use this semaphore to wait for
+  // If RequestGridSdf starts an async task, then you can use this semaphore to wait for its
   // completion (see RequestGridSdf above).
   TaskSemaphore GetGridSdfSemaphore() const {
     return _gridSdfSem;
@@ -285,6 +313,8 @@ class TetrahedralMeshShape final : public GridSdfShape {
       std::shared_ptr<BlendingDataMap const> meshBlendingData = {},
       std::shared_ptr<TriangularMesh const> visualMesh = {},
       std::shared_ptr<MeshEmbedding const> visualEmbedding = {},
+      std::shared_ptr<TriangularMesh const> contactSkin = {},
+      std::shared_ptr<LinearMeshEmbedding const> contactSkinEmbedding = {},
       std::shared_ptr<GridSdf const> gridSdf = {},
       std::unordered_map<std::string, RomData> roms = {},
       std::unordered_map<std::string, SampleMeshInfo> sampleMeshes = {},
@@ -293,14 +323,20 @@ class TetrahedralMeshShape final : public GridSdfShape {
       : GridSdfShape(std::move(gridSdf)),
         _mesh(std::move(mesh)),
         _meshSkinningData(std::move(meshSkinningData)),
+        _surfaceSkinningData(
+            details::MakeSurfaceSkinning(_meshSkinningData, *_mesh->GetBoundaryMesh())),
         _constrainedNodesData(std::move(constrainedNodesData)),
         _meshBlendingData(std::move(meshBlendingData)),
         _visualMesh(std::move(visualMesh)),
         _visualEmbedding(std::move(visualEmbedding)),
+        _contactSkin(std::move(contactSkin)),
+        _contactSkinEmbedding(std::move(contactSkinEmbedding)),
         _romData(std::move(roms)),
         _sampleMeshes(std::move(sampleMeshes)),
         _bshs(std::move(bshs)),
-        _materialParamsField(std::move(materialParamsField)) {}
+        _materialParamsField(std::move(materialParamsField)) {
+    MOCHI_ASSERT_VERBOSE(!_contactSkin == !_contactSkinEmbedding);
+  }
 
   AnyShape GetBoundingVolume(Error& error) const override {
     MOCHI_ERROR_RETURN(error, {});
@@ -323,6 +359,10 @@ class TetrahedralMeshShape final : public GridSdfShape {
     return _meshSkinningData;
   }
 
+  std::shared_ptr<SkinningData const> const& GetSurfaceSkinning() const override {
+    return _surfaceSkinningData;
+  }
+
   std::shared_ptr<ConstrainedNodesData const> const& GetMeshConstrainedNodes() const {
     return _constrainedNodesData;
   }
@@ -341,6 +381,14 @@ class TetrahedralMeshShape final : public GridSdfShape {
 
   std::shared_ptr<MeshEmbedding const> const& GetVisualEmbedding() const {
     return _visualEmbedding;
+  }
+
+  std::shared_ptr<TriangularMesh const> const& GetContactSkin() const {
+    return _contactSkin;
+  }
+
+  std::shared_ptr<LinearMeshEmbedding const> const& GetContactSkinEmbedding() const {
+    return _contactSkinEmbedding;
   }
 
   std::shared_ptr<PerElementSoftMaterialData const> const& GetSoftMaterialParamsField() const {
@@ -364,10 +412,13 @@ class TetrahedralMeshShape final : public GridSdfShape {
  private:
   std::shared_ptr<TetrahedralMesh const> _mesh;
   std::shared_ptr<SkinningData const> _meshSkinningData;
+  std::shared_ptr<SkinningData const> const _surfaceSkinningData;
   std::shared_ptr<ConstrainedNodesData const> _constrainedNodesData;
   std::shared_ptr<BlendingDataMap const> _meshBlendingData;
   std::shared_ptr<TriangularMesh const> _visualMesh;
   std::shared_ptr<MeshEmbedding const> _visualEmbedding;
+  std::shared_ptr<TriangularMesh const> _contactSkin;
+  std::shared_ptr<LinearMeshEmbedding const> _contactSkinEmbedding;
   std::unordered_map<std::string, RomData> _romData;
   std::unordered_map<std::string, SampleMeshInfo> _sampleMeshes;
   std::unordered_map<std::string, ContactSamplesBsh> _bshs;
@@ -384,14 +435,21 @@ class TriangularMeshShape final : public GridSdfShape {
       std::shared_ptr<BlendingDataMap const> meshBlendingData = {},
       std::unique_ptr<TriangularMesh> visualMesh = {},
       std::unique_ptr<MeshEmbedding> visualEmbedding = {},
+      std::unique_ptr<TriangularMesh> contactSkin = {},
+      std::unique_ptr<LinearMeshEmbedding> contactSkinEmbedding = {},
       std::shared_ptr<GridSdf> gridSdf = {})
       : GridSdfShape(std::move(gridSdf)),
         _mesh(std::move(mesh)),
         _meshSkinningData(std::move(meshSkinningData)),
+        _surfaceSkinningData(details::MakeSurfaceSkinning(_meshSkinningData, *_mesh)),
         _constrainedNodesData(std::move(constrainedNodesData)),
         _meshBlendingData(std::move(meshBlendingData)),
         _visualMesh(std::move(visualMesh)),
-        _visualEmbedding(std::move(visualEmbedding)) {}
+        _visualEmbedding(std::move(visualEmbedding)),
+        _contactSkin(std::move(contactSkin)),
+        _contactSkinEmbedding(std::move(contactSkinEmbedding)) {
+    MOCHI_ASSERT_VERBOSE(!_contactSkin == !_contactSkinEmbedding);
+  }
 
   AnyShape GetBoundingVolume(Error& error) const override {
     MOCHI_ERROR_RETURN(error, {});
@@ -418,6 +476,10 @@ class TriangularMeshShape final : public GridSdfShape {
     return _meshSkinningData;
   }
 
+  std::shared_ptr<SkinningData const> const& GetSurfaceSkinning() const override {
+    return _surfaceSkinningData;
+  }
+
   std::shared_ptr<ConstrainedNodesData const> const& GetMeshConstrainedNodes() const {
     return _constrainedNodesData;
   }
@@ -438,15 +500,26 @@ class TriangularMeshShape final : public GridSdfShape {
     return _visualEmbedding;
   }
 
+  std::shared_ptr<TriangularMesh const> const& GetContactSkin() const {
+    return _contactSkin;
+  }
+
+  std::shared_ptr<LinearMeshEmbedding const> const& GetContactSkinEmbedding() const {
+    return _contactSkinEmbedding;
+  }
+
   ModelData GetModelData(Error& error) const override;
 
  private:
   std::shared_ptr<TriangularMesh const> _mesh;
   std::shared_ptr<SkinningData const> _meshSkinningData;
+  std::shared_ptr<SkinningData const> const _surfaceSkinningData;
   std::shared_ptr<ConstrainedNodesData const> _constrainedNodesData;
   std::shared_ptr<BlendingDataMap const> _meshBlendingData;
   std::shared_ptr<TriangularMesh const> _visualMesh;
   std::shared_ptr<MeshEmbedding const> _visualEmbedding;
+  std::shared_ptr<TriangularMesh const> _contactSkin;
+  std::shared_ptr<LinearMeshEmbedding const> _contactSkinEmbedding;
 };
 
 // Describes a polyline mesh (used for rod actor geometry). Can be shared by actors.
@@ -461,7 +534,9 @@ class PolylineShape final : public Shape {
       DynamicArray<Real3> nodes,
       DynamicArray<Real3> elementFrameAxes,
       std::shared_ptr<TriangularMesh const> visualMesh,
-      std::shared_ptr<RodVisualMeshEmbeddingData const> rodVisualEmbedding,
+      std::shared_ptr<RodSurfaceEmbeddingData const> rodVisualEmbedding,
+      std::shared_ptr<TriangularMesh const> contactSkin,
+      std::shared_ptr<RodSurfaceEmbeddingData const> rodContactSkinEmbedding,
       bool isClosedLoop);
 
   AnyShape GetBoundingVolume(Error& error) const override {
@@ -493,8 +568,16 @@ class PolylineShape final : public Shape {
     return _visualMesh;
   }
 
-  std::shared_ptr<RodVisualMeshEmbeddingData const> const& GetRodVisualEmbedding() const {
+  std::shared_ptr<RodSurfaceEmbeddingData const> const& GetRodVisualEmbedding() const {
     return _rodVisualEmbedding;
+  }
+
+  std::shared_ptr<TriangularMesh const> const& GetContactSkin() const {
+    return _contactSkin;
+  }
+
+  std::shared_ptr<RodSurfaceEmbeddingData const> const& GetRodContactSkinEmbedding() const {
+    return _rodContactSkinEmbedding;
   }
 
   /// Returns the polyline's flat connectivity array. For an open polyline this is
@@ -512,7 +595,9 @@ class PolylineShape final : public Shape {
   bool _isClosedLoop = false;
   DynamicArray<int> _connectivity;
   std::shared_ptr<TriangularMesh const> _visualMesh;
-  std::shared_ptr<RodVisualMeshEmbeddingData const> _rodVisualEmbedding;
+  std::shared_ptr<RodSurfaceEmbeddingData const> _rodVisualEmbedding;
+  std::shared_ptr<TriangularMesh const> _contactSkin;
+  std::shared_ptr<RodSurfaceEmbeddingData const> _rodContactSkinEmbedding;
 };
 
 // Define data structure for bones

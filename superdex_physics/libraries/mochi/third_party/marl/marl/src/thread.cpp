@@ -159,11 +159,13 @@ Thread::Affinity Thread::Affinity::all(
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
   if (pthread_getaffinity_np(thread, sizeof(cpu_set_t), &cpuset) == 0) {
-    int count = CPU_COUNT(&cpuset);
-    for (int i = 0; i < count; i++) {
-      Core core;
-      core.pthread.index = static_cast<uint16_t>(i);
-      affinity.cores.emplace_back(std::move(core));
+    // [Mochi] Upstream took CPUs 0 to CPU_COUNT - 1, not the CPUs in the mask.
+    for (int i = 0; i < CPU_SETSIZE; i++) {
+      if (CPU_ISSET(i, &cpuset)) {
+        Core core;
+        core.pthread.index = static_cast<uint16_t>(i);
+        affinity.cores.emplace_back(std::move(core));
+      }
     }
   }
 #elif defined(__FreeBSD__)
@@ -171,11 +173,13 @@ Thread::Affinity Thread::Affinity::all(
   cpuset_t cpuset;
   CPU_ZERO(&cpuset);
   if (pthread_getaffinity_np(thread, sizeof(cpuset_t), &cpuset) == 0) {
-    int count = CPU_COUNT(&cpuset);
-    for (int i = 0; i < count; i++) {
-      Core core;
-      core.pthread.index = static_cast<uint16_t>(i);
-      affinity.cores.emplace_back(std::move(core));
+    // [Mochi] Upstream took CPUs 0 to CPU_COUNT - 1, not the CPUs in the mask.
+    for (int i = 0; i < CPU_SETSIZE; i++) {
+      if (CPU_ISSET(i, &cpuset)) {
+        Core core;
+        core.pthread.index = static_cast<uint16_t>(i);
+        affinity.cores.emplace_back(std::move(core));
+      }
     }
   }
 #else

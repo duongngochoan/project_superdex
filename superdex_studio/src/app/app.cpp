@@ -23,6 +23,7 @@
 #include "ui/imgui_widgets.h"
 
 #include <mochi_core/mochi_platform.h>
+#include <mochi_core/utils/defer.h>
 #include <mochi_core/utils/file_utils.h>
 #include <mochi_core/utils/path.h>
 #include <mochi_mesh/mesh_cli_control.h>
@@ -39,18 +40,23 @@
 
 #ifdef MOCHI_MCP_ENABLED
 #include <imgui_mcp_bridge.h>
+#include "app/internal/mcp_commands.h"
 #include "app/mcp_port.h"
 #endif
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <system_error>
+#include <utility>
 
 #include "editors/bot_scene_editor.h"
 #include "editors/mochi_prefab_editor.h"
@@ -97,6 +103,84 @@ static int GetMcpPort() {
   return selection.port;
 }
 #endif
+
+static std::filesystem::path GetIblRootDir() {
+  return SuperDexStudio::GetExecutableDir() / "assets" / "ibl";
+}
+
+static std::string NormalizeIblRelativePath(std::string const& relativePath) {
+  return std::filesystem::path(relativePath).lexically_normal().generic_string();
+}
+
+static bool ResolveIblPath(std::string const& relativePath, std::filesystem::path& resolvedPath) {
+  namespace fs = std::filesystem;
+  fs::path const path{relativePath};
+  if (path.has_root_path()) {
+    return false;
+  }
+  auto const first = path.begin();
+  if (first != path.end() && *first == "..") {
+    return false;
+  }
+
+  std::error_code error;
+  fs::path const root = fs::weakly_canonical(GetIblRootDir(), error);
+  if (error) {
+    return false;
+  }
+  resolvedPath = fs::weakly_canonical(root / path, error);
+  if (error) {
+    return false;
+  }
+  auto rootPart = root.begin();
+  auto resolvedPart = resolvedPath.begin();
+  for (; rootPart != root.end() && resolvedPart != resolvedPath.end(); ++rootPart, ++resolvedPart) {
+    if (*rootPart != *resolvedPart) {
+      return false;
+    }
+  }
+  return rootPart == root.end();
+}
+
+static std::string IblLabelFromRelative(std::string const& relativePath) {
+  auto labelPath = std::filesystem::path(relativePath);
+  labelPath.replace_extension();
+  return labelPath.generic_string();
+}
+
+static bool IsIblFile(std::filesystem::path const& path) {
+  std::string extension = path.extension().string();
+  std::ranges::transform(extension, extension.begin(), [](unsigned char character) {
+    return static_cast<char>(std::tolower(character));
+  });
+  return extension == ".hdr" || extension == ".exr";
+}
+
+static std::vector<std::string> ScanIblFolder() {
+  namespace fs = std::filesystem;
+  fs::path const root = GetIblRootDir();
+  std::vector<std::string> iblPaths;
+  std::error_code error;
+  fs::recursive_directory_iterator iterator{
+      root, fs::directory_options::skip_permission_denied, error};
+  fs::recursive_directory_iterator const end;
+  while (iterator != end) {
+    fs::directory_entry const entry = *iterator;
+    fs::file_status const status = entry.symlink_status(error);
+    if (!error && fs::is_regular_file(status) && IsIblFile(entry.path())) {
+      fs::path const relativePath = entry.path().lexically_relative(root);
+      fs::path resolvedPath;
+      if (!relativePath.empty() && ResolveIblPath(relativePath.generic_string(), resolvedPath)) {
+        iblPaths.push_back(relativePath.generic_string());
+      }
+    }
+    error.clear();
+    iterator.increment(error);
+    error.clear();
+  }
+  std::ranges::sort(iblPaths);
+  return iblPaths;
+}
 
 static mochi::Path const& GetIniFilePath() {
   namespace fs = std::filesystem;
@@ -294,10 +378,7 @@ void SuperDexStudio::OnInitialize() {
     _appSettings.windowVisibility.try_emplace(w.name, w.showByDefault);
   }
 
-  _defaultIbl = GetResourceManager().LoadIbl(GetDefaultIblPath());
-  if (!_defaultIbl) {
-    MOCHI_LOG_ERROR("Failed to load default IBL: %s", GetDefaultIblPath().c_str());
-  }
+  SetCurrentIbl(_appSettings.graphics.iblPath);
 
   _assetManager = AssetManager::Create(this);
   if (!_assetManager) {
@@ -359,6 +440,10 @@ void SuperDexStudio::OnInitialize() {
 
   // Register importers
   RegisterImporter(std::make_unique<UrdfImporter>(this));
+
+#ifdef MOCHI_MCP_ENABLED
+  RegisterMcpCommands(*this);
+#endif
 
   // Auto-load file from environment variable (for headless/MCP automation)
   if (char const* autoLoadPath = std::getenv("MOCHI_AUTO_LOAD")) {
@@ -439,6 +524,12 @@ void SuperDexStudio::MaybeRaiseLogConsole() {
 }
 
 void SuperDexStudio::OnUpdate() {
+  // Runs before anything is drawn this frame: Save As closes an editor and unloads an asset, which
+  // frees textures (viewport, thumbnail) that would otherwise already be in this frame's draw
+  // lists.
+  if (std::exchange(_saveAsRequested, false)) {
+    SaveActiveAssetEditorAs();
+  }
   ImGuizmo::BeginFrame();
   // pump async resource loading
   GetResourceManager().PumpAsyncLoad();
@@ -600,7 +691,18 @@ void SuperDexStudio::OnUpdate() {
   }
 }
 
+void SuperDexStudio::OnPostSwap() {
+  if (_screenshotRun != nullptr && !_screenshotRun->Step(*this)) {
+    _exitCode = _screenshotRun->ExitCode();
+    _screenshotRun.reset();
+    Stop();
+  }
+}
+
 void SuperDexStudio::OnShutdown() {
+  if (_screenshotRun != nullptr) {
+    std::fputs("superdex_studio: Studio closed before the screenshot was saved\n", stderr);
+  }
   SaveSettings();
   _logConsole.reset();
   while (!_assetEditors.empty()) {
@@ -674,14 +776,8 @@ std::filesystem::path SuperDexStudio::GetExecutableDir() {
 #endif
 }
 
-std::string const& SuperDexStudio::GetDefaultIblPath() {
-  static std::string const path =
-      (GetExecutableDir() / "assets" / "ibl" / "studio_small_08_1k.hdr").string();
-  return path;
-}
-
-mochi_renderer::IBL* SuperDexStudio::GetDefaultIbl() const {
-  return _defaultIbl;
+mochi_renderer::IBL* SuperDexStudio::GetCurrentIbl() const {
+  return _currentIbl;
 }
 
 mochi_renderer::SceneViewSettings const& SuperDexStudio::GetViewSettings() const {
@@ -840,6 +936,112 @@ void SuperDexStudio::SaveActiveAssetEditor() {
     editor->Save();
   }
 }
+
+void SuperDexStudio::SaveActiveAssetEditorAs() {
+  auto* editor = GetActiveAssetEditor();
+  if (editor == nullptr || !editor->GetAsset()->SupportsSaveAs()) {
+    return;
+  }
+  Asset* const asset = editor->GetAsset();
+  mochi::Path const original = asset->GetPath();
+  std::string const filename = original.GetFilename();
+  std::string const extension = filename.substr(GetAssetNameFromPath(original).size());
+  std::string const filter = "*" + extension;
+  std::array<char const*, 1> const filters{{filter.c_str()}};
+#if MOCHI_PLATFORM_MACOS
+  // Custom extensions without a registered UTI are disabled when the native filter is set.
+  int constexpr numFilters = 0;
+#else
+  int constexpr numFilters = static_cast<int>(filters.size());
+#endif
+  mochi::Path selected = GetFileDialogPath(
+      "Save As",
+      filters.data(),
+      numFilters,
+      filter.c_str(),
+      true,
+      original.GetParentPath() / (GetAssetNameFromPath(original) + "_copy" + extension));
+  if (selected.IsEmpty()) {
+    return;
+  }
+  if (!selected.GetFilename().ends_with(extension)) {
+    selected = mochi::Path{selected.ToString() + extension};
+  }
+  if (selected == original) {
+    editor->Save();
+    return;
+  }
+  // Another loaded asset's in-memory state would no longer match its file.
+  if (_assetManager->FindAssetByPath(selected) != nullptr) {
+    MOCHI_LOG_ERROR(
+        "Cannot save over '%s' while it is loaded; close it first.", selected.ToString().c_str());
+    return;
+  }
+  if (!asset->SaveAs(selected)) {
+    MOCHI_LOG_ERROR("Failed to save '%s'.", selected.ToString().c_str());
+    return;
+  }
+
+  // Unloading the original discards its unsaved edits, which now live in the new file.
+  CloseAssetEditor(FindAssetEditorIndex(asset));
+  if (!_assetManager->UnloadAssetByPath(original) && !asset->ReloadFromDisk()) {
+    MOCHI_LOG_WARNING(
+        "'%s' still has unsaved edits in memory; they were saved to '%s'.",
+        original.ToString().c_str(),
+        selected.ToString().c_str());
+  }
+  OpenFile(selected);
+}
+
+#if MOCHI_INTERNAL
+void SuperDexStudio::CreateSceneArchive(mochi::Path const& scenePath) {
+  if (auto const* scene = _assetManager->FindAssetByPath(scenePath);
+      scene != nullptr && scene->IsDirty()) {
+    MOCHI_LOG_ERROR("Save '%s' before archiving it.", scenePath.ToString().c_str());
+    return;
+  }
+  std::string const extension{superdex::robotics::kSceneArchiveExtension};
+  std::string const filter = "*" + extension;
+  std::array<char const*, 1> const filters{{filter.c_str()}};
+#if MOCHI_PLATFORM_MACOS
+  // Custom extensions without a registered UTI are disabled when the native filter is set.
+  int constexpr numFilters = 0;
+#else
+  int constexpr numFilters = static_cast<int>(filters.size());
+#endif
+  mochi::Path selected = GetFileDialogPath(
+      "Create Scene Archive",
+      filters.data(),
+      numFilters,
+      "Bot Scene Archive (*.mochi_bot_scene_archive)",
+      true,
+      scenePath.GetParentPath() / (GetAssetNameFromPath(scenePath) + extension));
+  if (selected.IsEmpty()) {
+    return;
+  }
+  if (!selected.GetFilename().ends_with(extension)) {
+    selected = mochi::Path{selected.ToString() + extension};
+  }
+  // A loaded archive's in-memory state would no longer match its file.
+  if (_assetManager->FindAssetByPath(selected) != nullptr) {
+    MOCHI_LOG_ERROR(
+        "Cannot write '%s' while it is loaded; close it first.", selected.ToString().c_str());
+    return;
+  }
+  superdex::robotics::ArchiveParams params;
+  params.src = scenePath.ToString();
+  params.dst = selected.ToString();
+  params.comment = "Archived from SuperDex Studio";
+  mochi::ErrorLog error;
+  superdex::robotics::ArchiveBotScene(params, error);
+  if (!error.IsOK()) {
+    MOCHI_LOG_ERROR("Failed to create scene archive '%s'.", selected.ToString().c_str());
+    return;
+  }
+  MOCHI_LOG("Created scene archive '%s'.", selected.ToString().c_str());
+  AddRecentFile(selected);
+}
+#endif // MOCHI_INTERNAL
 
 void SuperDexStudio::SaveAllAssetEditors() {
   for (auto& editor : _assetEditors) {
@@ -1049,6 +1251,155 @@ void SuperDexStudio::SaveViewportScreenshot(
   MOCHI_ERROR_RETURN(error);
 
   mochi_renderer::WritePng(outFile, width, height, 4, pixels, error);
+}
+
+void SuperDexStudio::RenderViewportScreenshot(
+    AssetEditor& editor,
+    int width,
+    int height,
+    mochi::Path const& outFile,
+    mochi::Error& error) {
+  MOCHI_ERROR_RETURN(error);
+  // GetEngine() reads _mochiRenderer, and every frame goes through _renderer.
+  MOCHI_ERROR_IF(
+      _renderer == nullptr || _mochiRenderer == nullptr, error, "Studio has no renderer yet.");
+  MOCHI_ERROR_RETURN(error);
+  Viewport* const viewportPtr = editor.GetViewport();
+  if (viewportPtr == nullptr) {
+    MOCHI_ERROR_SET(error, "The editor has no viewport.");
+    return;
+  }
+  Viewport& viewport = *viewportPtr;
+
+  std::vector<uint8_t> pixels;
+  bool restored = true;
+  try {
+    restored = viewport.WithRenderSize(
+        width,
+        height,
+        [&](mochi::Error& renderError) {
+          // The editor adds its 3D overlays (joint axes, contacts, drag handles) in OnRender, so
+          // the image matches the viewport; labels drawn with ImGui, such as debug text, are not in
+          // it. A frame skipped for pacing draws nothing. Pacing skips a frame only while earlier
+          // ones are in flight, so after flushAndWait a later attempt renders.
+          auto const renderFrame = [&] {
+            bool const began = _renderer->BeginFrame();
+            // Every BeginFrame needs its EndFrame, even for a skipped frame: BeginFrame marks the
+            // frame active either way, and EndFrame clears that and ends Filament's frame only if
+            // one began.
+            MOCHI_DEFER({ _renderer->EndFrame(); });
+            if (began) {
+              editor.OnRender(_renderer.get());
+            }
+            return began;
+          };
+          // flushAndWait leaves nothing in flight, so pacing has no reason to skip the next
+          // frame; the extra attempts only cover an unexpected skip.
+          constexpr int kRenderAttempts = 3;
+          bool rendered = renderFrame();
+          for (int attempt = 1; attempt < kRenderAttempts && !rendered; ++attempt) {
+            filament::Engine* const engine = GetEngine();
+            if (engine == nullptr) {
+              break;
+            }
+            engine->flushAndWait();
+            rendered = renderFrame();
+          }
+          if (!rendered) {
+            MOCHI_ERROR_SET(renderError, "The renderer skipped the frame.");
+            return;
+          }
+          RenderTarget const* const target = viewport.GetRenderTarget();
+          MOCHI_ERROR_IF(target == nullptr, renderError, "The viewport has no render target.");
+          MOCHI_ERROR_RETURN(renderError);
+          // ReadPixels queues the readback after this frame's commands, then flushes and waits for
+          // it, so it reads the frame just rendered.
+          _renderer->ReadPixels(*target, pixels, renderError);
+        },
+        error);
+  } catch (std::exception const& e) {
+    MOCHI_LOG_ERROR("Rendering the screenshot failed: %s", e.what());
+    // MOCHI_ERROR_SET keeps the first error, so a more specific one the render already set stays.
+    MOCHI_ERROR_SET(error, "Rendering the screenshot failed; see the log.");
+    return;
+  } catch (...) {
+    MOCHI_LOG_ERROR(
+        "Rendering the screenshot failed with an exception that is not a std::exception.");
+    MOCHI_ERROR_SET(error, "Rendering the screenshot failed; see the log.");
+    return;
+  }
+  MOCHI_ERROR_RETURN(error);
+  mochi::Error saveError;
+  MOCHI_ERROR_IF(
+      pixels.size() != static_cast<std::size_t>(width) * height * 4,
+      saveError,
+      "The rendered image does not have the requested size.");
+  mochi_renderer::WritePng(outFile, width, height, 4, pixels, saveError);
+  // One Error holds one message, so when saving and the restore both failed, saving's goes to the
+  // log.
+  if (restored) {
+    if (!saveError.IsOK()) {
+      error.SetFirstError(saveError.GetDescription(), saveError.GetFile(), saveError.GetLine());
+    }
+  } else if (saveError.IsOK()) {
+    MOCHI_ERROR_SET(
+        error,
+        "The screenshot was saved, but the viewport could not get its own size and view back; "
+        "see the log.");
+  } else {
+    MOCHI_LOG_ERROR("Saving the screenshot failed: %s", saveError.GetDescription());
+    MOCHI_ERROR_SET(
+        error,
+        "Saving the screenshot failed, and the viewport could not get its own size and view "
+        "back; see the log.");
+  }
+}
+
+void SuperDexStudio::SaveWindowScreenshot(
+    [[maybe_unused]] mochi::Path const& outFile,
+    mochi::Error& error) {
+  MOCHI_ERROR_RETURN(error);
+#if MOCHI_PLATFORM_MACOS
+  MOCHI_ERROR_SET(error, "Window screenshots are not available with Metal; save the viewport.");
+#else
+  int width = 0;
+  int height = 0;
+  glfwGetFramebufferSize(GetMainWindow()->GetGLFW(), &width, &height);
+  MOCHI_ERROR_IF(width <= 0 || height <= 0, error, "The window has no pixels to save.");
+  MOCHI_ERROR_RETURN(error);
+
+  std::size_t const rowBytes = static_cast<std::size_t>(width) * 4;
+  std::vector<uint8_t> rows(rowBytes * height);
+  // Reads the back buffer, as the MCP bridge's window capture does: after the swap it still holds a
+  // recent frame (the front buffer reads back black on Mesa under Xvfb).
+  while (glGetError() != GL_NO_ERROR) {
+  }
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rows.data());
+  MOCHI_ERROR_IF(glGetError() != GL_NO_ERROR, error, "Reading the window's pixels failed.");
+  MOCHI_ERROR_RETURN(error);
+
+  // GL rows run bottom to top, and the window is opaque whatever its alpha channel holds.
+  std::vector<uint8_t> pixels(rows.size());
+  for (int y = 0; y < height; ++y) {
+    std::copy_n(
+        rows.begin() + static_cast<std::ptrdiff_t>(rowBytes * (height - 1 - y)),
+        rowBytes,
+        pixels.begin() + static_cast<std::ptrdiff_t>(rowBytes * y));
+  }
+  for (std::size_t alpha = 3; alpha < pixels.size(); alpha += 4) {
+    pixels[alpha] = 255;
+  }
+  mochi_renderer::WritePng(outFile, width, height, 4, pixels, error);
+#endif
+}
+
+void SuperDexStudio::StartScreenshotRun(ScreenshotOptions options) {
+  _screenshotRun = std::make_unique<ScreenshotRun>(std::move(options));
+  _persistSettings = false;
+  ImGui::GetIO().IniFilename = nullptr;
+  // Until the run says otherwise: the app may stop before it finishes.
+  _exitCode = 1;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -1280,16 +1631,20 @@ void SuperDexStudio::LoadSettings() {
   if (!error.IsOK()) {
     return; // Don't set _settingsLoadedOK — prevents SaveSettings from overwriting the file.
   }
-  // Prune recent entries that no longer exist on disk
-  std::erase_if(_appSettings.recentEntries.files, [](std::string const& p) {
-    return !std::filesystem::exists(p);
-  });
-  std::erase_if(_appSettings.recentEntries.folders, [](std::string const& p) {
-    return !std::filesystem::exists(p);
-  });
+  // Prune recent entries that no longer exist on disk. Entries that cannot be checked (e.g. macOS
+  // privacy-protected folders) are kept, and the throwing overload would abort startup on them.
+  auto const isGone = [](std::string const& p) {
+    std::error_code error;
+    return !std::filesystem::exists(p, error) && !error;
+  };
+  std::erase_if(_appSettings.recentEntries.files, isGone);
+  std::erase_if(_appSettings.recentEntries.folders, isGone);
 }
 
 void SuperDexStudio::SaveSettings() {
+  if (!_persistSettings) {
+    return;
+  }
   mochi::ErrorLog error;
   superdex::robotics::SaveParamsToFile(_appSettings, GetSettingsFilePath().ToString(), error);
 }
@@ -1462,6 +1817,12 @@ void SuperDexStudio::ShowMainMenu() {
         SaveActiveAssetEditor();
       }
       ImGui::EndDisabled();
+      ImGui::BeginDisabled(!editor || !editor->GetAsset()->SupportsSaveAs());
+      if (ImGui::MenuItem("Save As...")) {
+        // Deferred to the start of the next frame (see OnUpdate).
+        _saveAsRequested = true;
+      }
+      ImGui::EndDisabled();
       if (ImGui::MenuItem("Save All", "Ctrl+Shift+S")) {
         SaveAllAssetEditors();
       }
@@ -1601,7 +1962,8 @@ void SuperDexStudio::ShowMainMenu() {
 }
 
 bool SuperDexStudio::ShowGraphicsSettings() {
-  auto& view = _appSettings.graphics.view;
+  auto& graphics = _appSettings.graphics;
+  auto& view = graphics.view;
   bool changed = false;
   changed |= ImGui::BoolCombo("MSAA", &view.msaaEnabled);
   ImGui::BeginDisabled(!view.msaaEnabled);
@@ -1651,11 +2013,72 @@ bool SuperDexStudio::ShowGraphicsSettings() {
   }
   ImGui::EndDisabled();
   changed |= ImGui::BoolCombo("Skybox", &view.showSkybox);
+
+  std::string preview =
+      graphics.iblPath.empty() ? "[none]" : IblLabelFromRelative(graphics.iblPath);
+  std::filesystem::path resolvedIblPath;
+  std::error_code existsError;
+  if (!graphics.iblPath.empty() &&
+      (!ResolveIblPath(graphics.iblPath, resolvedIblPath) ||
+       !std::filesystem::exists(resolvedIblPath, existsError))) {
+    preview += " (missing)";
+  }
+  if (ImGui::BeginCombo("IBL", preview.c_str())) {
+    if (ImGui::Selectable("[none]", graphics.iblPath.empty())) {
+      graphics.iblPath.clear();
+      changed = true;
+    }
+    for (std::string const& iblPath : ScanIblFolder()) {
+      std::string const label = IblLabelFromRelative(iblPath);
+      ImGui::PushID(iblPath.c_str());
+      if (ImGui::Selectable(label.c_str(), graphics.iblPath == iblPath)) {
+        graphics.iblPath = iblPath;
+        SetCurrentIbl(graphics.iblPath, true);
+        changed = true;
+      }
+      ImGui::PopID();
+    }
+    ImGui::EndCombo();
+  }
+
   ImGui::BeginDisabled(view.showSkybox);
   changed |= ImGui::ColorEdit4(
-      "Clear Color", _appSettings.graphics.clearColor.data(), ImGuiColorEditFlags_AlphaPreview);
+      "Clear Color", graphics.clearColor.data(), ImGuiColorEditFlags_AlphaPreview);
   ImGui::EndDisabled();
   return changed;
+}
+
+void SuperDexStudio::SetCurrentIbl(std::string const& relativePath, bool forceReload) {
+  std::string const normalizedPath = NormalizeIblRelativePath(relativePath);
+  if (!forceReload && normalizedPath == _currentIblRelativePath) {
+    return;
+  }
+
+  _currentIbl = nullptr;
+  if (!normalizedPath.empty()) {
+    std::filesystem::path absolutePath;
+    if (!ResolveIblPath(normalizedPath, absolutePath)) {
+      MOCHI_LOG_WARNING("Ignoring IBL path outside the IBL folder: %s", normalizedPath.c_str());
+    } else {
+      _currentIbl = GetResourceManager().LoadIbl(absolutePath.string());
+      if (!_currentIbl) {
+        MOCHI_LOG_WARNING("Failed to load selected IBL: %s", absolutePath.string().c_str());
+      }
+    }
+  }
+  _currentIblRelativePath = normalizedPath;
+
+  for (auto const& editor : _assetEditors) {
+    if (auto* viewport = editor->GetViewport()) {
+      if (auto* scene = viewport->GetRenderScene()) {
+        scene->SetIbl(_currentIbl);
+        scene->SetSkyboxVisible(_appSettings.graphics.view.showSkybox);
+      }
+    }
+  }
+  if (_assetManager) {
+    _assetManager->SetThumbnailIbl(_currentIbl);
+  }
 }
 
 void SuperDexStudio::ApplyGraphicsSettings() {
@@ -1663,6 +2086,7 @@ void SuperDexStudio::ApplyGraphicsSettings() {
     editor->ApplySceneViewSettings(_appSettings.graphics.view);
   }
   _renderer->SetClearColor(mochi_renderer::ToFilament(_appSettings.graphics.clearColor));
+  SetCurrentIbl(_appSettings.graphics.iblPath);
 }
 
 bool SuperDexStudio::ShowPhysicsSettings() {

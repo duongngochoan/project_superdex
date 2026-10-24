@@ -22,6 +22,8 @@
 #include <mochi_core/utils/file_utils.h>
 #include <mochi_core/utils/nd_array_utils.h>
 #include <mochi_core/utils/span.h>
+#include <mochi_physics/mochi_physics_experimental.h>
+#include <mochi_physics/src/mochi_common_components.h>
 #include <mochi_physics/src/mochi_scene.h>
 #include <mochi_physics/utils/mochi_prefab.h>
 
@@ -37,8 +39,10 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 using namespace mochi;
 using namespace mochi::test;
@@ -92,6 +96,7 @@ static void ExpectEqual(
   EXPECT_EQ(expected.hasGravity, actual.hasGravity);
   EXPECT_EQ(expected.hasInertia, actual.hasInertia);
   EXPECT_EQ(expected.hasStress, actual.hasStress);
+  EXPECT_EQ(expected.useContactSkin, actual.useContactSkin);
 
   // Compare material properties
   EXPECT_EQ(expected.material, actual.material);
@@ -151,7 +156,7 @@ static constexpr char const* kRigidMinimalCubeStackJson = R"({
 })";
 
 // Prefab for testing mixed rigid/soft actor export
-static constexpr char const* kSoftArmadilloOnRigidCubeJson = R"({
+static constexpr char const* kSoftContactSkinCubeOnRigidCubeJson = R"({
   "actors": {
     "rigid": [
       {
@@ -181,15 +186,16 @@ static constexpr char const* kSoftArmadilloOnRigidCubeJson = R"({
             "youngsModulus": 10000
           }
         },
-        "name": "Armadillo",
+        "name": "ContactSkinCube",
         "scale": [0.2, 0.2, 0.2],
-        "shape": "armadillo/armadillo_coarse_mesh.mochi.json",
-        "translation": [-0.1, 0.5, -0.1]
+        "shape": "cube/cube_minimal_contact_skin.mochi.json",
+        "translation": [-0.1, 0.5, -0.1],
+        "useContactSkin": true
       }
     ]
   },
   "scene": {
-    "description": "Soft armadillo falling on static rigid cube"
+    "description": "Soft contact-skinned cube falling on static rigid cube"
   }
 })";
 
@@ -302,9 +308,9 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportScene_RigidActors) {
 
 TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportScene_SoftActors) {
   // Comprehensive test for soft actor export with material properties
-  auto tempDir = CreateTempDirectory("export_soft_armadillo_on_rigid_cube", ExpectOK{});
+  auto tempDir = CreateTempDirectory("export_soft_contact_skin_cube", ExpectOK{});
   auto originalPrefabPath = CreateTempPrefabFile(
-      kSoftArmadilloOnRigidCubeJson, "soft_armadillo_on_rigid_cube.mochi_scene", tempDir.Path());
+      kSoftContactSkinCubeOnRigidCubeJson, "soft_contact_skin_cube.mochi_scene", tempDir.Path());
   auto originalPrefab = prefab::ShallowLoadFromFile(originalPrefabPath.string(), ExpectOK{});
 
   auto* context = CreateContext(0);
@@ -316,7 +322,7 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportScene_SoftActors) {
   prefab::AddToScene(
       originalPrefabPath.string(), GetAssetsDir(), scene, prefab::PrefabParams{}, ExpectOK{});
 
-  auto prefabFile = ExportScene(scene, "soft_armadillo_on_rigid_cube", tempDir.Path());
+  auto prefabFile = ExportScene(scene, "soft_contact_skin_cube", tempDir.Path());
   auto exportedPrefab = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
 
   // Validate soft actors and their material properties
@@ -433,6 +439,69 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportActor_SingleRigid) {
       tempDir.Path(),
       prefabFile,
       "Single rigid actor");
+
+  // ExportActor ignores ExportParams::excludeActors, even when it lists the exported actor.
+  prefab::ExportParams exportParams;
+  exportParams.excludeActors.push_back(rigidActors[0]->GetHandle());
+  prefab::ExportActor(
+      rigidActors[0], "exported_with_params", tempDir.Path().string(), exportParams, ExpectOK{});
+  auto const withParams = prefab::ShallowLoadFromFile(
+      (tempDir.Path() / "exported_with_params" / "exported_with_params.mochi_scene").string(),
+      ExpectOK{});
+  EXPECT_EQ(withParams.actors.rigid.size(), 1);
+}
+
+TEST_IF(MOCHI_USE_HDF5, PrefabExport, ExportActor_ShapelessLinkKeepsExplicitInertia) {
+  auto constexpr kMass = 2_r;
+  auto constexpr kCom = Real3{0.2_r, 0_r, 0_r};
+  auto constexpr kMoi = Real6{0.01_r, 0_r, 0_r, 0.02_r, 0_r, 0.03_r};
+  auto constexpr kTol = 1e-5_r;
+
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto* scene = context->CreateScene("test_export_shapeless_inertia");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  ArticulatedActorParams params;
+  params.joints = {
+      {.type = ArticulatedJointType::Hard},
+      {.type = ArticulatedJointType::Revolute, .axis = Real3{0_r, 0_r, 1_r}}};
+  params.links = {
+      {.parentLink = -1},
+      {.parentLink = 0, .mass = kMass, .centerOfMass = kCom, .momentOfInertia = kMoi}};
+  auto* actor = scene->CreateArticulatedActor(params, ExpectOK{});
+
+  auto tempDir = CreateTempDirectory("export_shapeless_inertia", ExpectOK{});
+  prefab::ExportActor(actor, "shapeless", tempDir.Path().string(), ExpectOK{});
+  std::filesystem::path const prefabFile = tempDir.Path() / "shapeless" / "shapeless.mochi_scene";
+  auto const exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+  ASSERT_EQ(exported.actors.articulated.size(), 1);
+  auto const& links = exported.actors.articulated[0].links;
+  ASSERT_EQ(links.size(), 2);
+
+  // The massless root exports no mass properties; the shapeless link keeps its explicit inertia.
+  EXPECT_FALSE(links[0].mass.has_value());
+  EXPECT_FALSE(links[0].density.has_value());
+  ASSERT_TRUE(links[1].mass && links[1].centerOfMass && links[1].momentOfInertia);
+  EXPECT_FALSE(links[1].density.has_value());
+  EXPECT_NEAR_RTOL(kMass, *links[1].mass, kTol);
+  EXPECT_NEAR_TOL(kCom, *links[1].centerOfMass, kTol);
+  EXPECT_NEAR_TOL(kMoi, *links[1].momentOfInertia, kTol);
+
+  auto* reloadScene = context->CreateScene("test_reload_shapeless_inertia");
+  MOCHI_DEFER(context->DestroyScene(reloadScene));
+  auto const loadResult = prefab::AddToScene(
+      prefabFile.string(), GetAssetsDir(), reloadScene, prefab::PrefabParams{}, ExpectOK{});
+  auto const articulated = loadResult.Filter(ActorType::Articulated);
+  ASSERT_EQ(articulated.size(), 1);
+  Actor* link = reloadScene->GetActor(articulated[0]->GetNestedLinkActors(ExpectOK{})[1]);
+  EXPECT_NEAR_RTOL(kMass, link->GetMass(ExpectOK{}), kTol);
+  EXPECT_NEAR_TOL(kCom, link->GetRigidCenterOfMassLocal(ExpectOK{}), kTol);
+  EXPECT_NEAR_TOL(kMoi, link->GetRigidMomentOfInertiaLocal(ExpectOK{}), kTol);
+}
+
+TEST(PrefabExport, ExportActor_NullActorReportsError) {
+  prefab::ExportActor(nullptr, "unused", "unused", ExpectNotOK{});
 }
 
 TEST(PrefabExport, ExportActor_UnsupportedActorTypeLeavesNoOutputDirectory) {
@@ -892,7 +961,11 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportScene_SoftSkinnedActorWitho
   auto exportedPrefab = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
 
   ASSERT_EQ(1, isize(exportedPrefab.actors.softSkinned));
-  EXPECT_TRUE(exportedPrefab.actors.softSkinned[0].softAttachLinks.empty());
+  auto const& softSkinned = exportedPrefab.actors.softSkinned[0];
+  EXPECT_TRUE(softSkinned.softAttachLinks.empty());
+  EXPECT_TRUE(softSkinned.hasStress);
+  ASSERT_EQ(1, isize(softSkinned.softParams));
+  EXPECT_TRUE(softSkinned.softParams[0].hasInertia);
   TestRoundTrip(scene, context, prefabFile, tempDir.Path());
 }
 
@@ -912,11 +985,13 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportScene_SoftSkinnedActorEffec
        .shape = CreateUnitCubeTetMeshShape(context),
        .colliderType = ColliderType::None}};
 
+  params.hasGravity = true;
   auto makeSoft = [&](char const* name) {
     SoftActorParams soft;
     soft.name = name;
     soft.shape = CreateUnitCubeTetSoftShape(context);
     soft.hasGravity = false;
+    soft.hasInertia = false;
     return soft;
   };
   params.softParams = {makeSoft("named"), makeSoft(""), makeSoft(""), makeSoft("soft_2")};
@@ -944,7 +1019,12 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportScene_SoftSkinnedActorEffec
 
   ASSERT_EQ(1, isize(exportedPrefab.actors.softSkinned));
   auto const& softSkinned = exportedPrefab.actors.softSkinned[0];
+  EXPECT_TRUE(softSkinned.hasGravity);
   ASSERT_EQ(4, isize(softSkinned.softParams));
+  for (auto const& soft : softSkinned.softParams) {
+    EXPECT_FALSE(soft.hasInertia);
+    EXPECT_TRUE(soft.hasStress);
+  }
   EXPECT_STREQ("named", softSkinned.softParams[0].name.c_str());
   EXPECT_STREQ("soft_1", softSkinned.softParams[1].name.c_str());
   EXPECT_STREQ("soft_3", softSkinned.softParams[2].name.c_str());
@@ -1267,10 +1347,13 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_UsesExportedN
        .shape = CreateUnitCubeTetMeshShape(context),
        .colliderType = ColliderType::None}};
 
+  params.hasInertia = true;
   auto& soft = params.softParams.push_back();
   soft.name = "soft";
   soft.shape = CreateUnitCubeTetSoftShape(context);
   soft.hasGravity = false;
+  soft.hasInertia = false;
+  soft.hasStress = false;
 
   Actor* skel = scene->CreateSoftSkinnedActor(params, ExpectOK{});
   ASSERT_NE(nullptr, skel);
@@ -1290,7 +1373,10 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_UsesExportedN
 
   ASSERT_EQ(1, isize(exportedPrefab.actors.softSkinned));
   auto const& exportedSoftSkinned = exportedPrefab.actors.softSkinned[0];
+  EXPECT_FALSE(exportedSoftSkinned.hasGravity);
+  EXPECT_TRUE(exportedSoftSkinned.hasInertia);
   ASSERT_EQ(1, isize(exportedSoftSkinned.softParams));
+  EXPECT_FALSE(exportedSoftSkinned.softParams[0].hasStress);
   DynamicString nestedSoftName = exportedSoftSkinned.skeletonParams.name;
   nestedSoftName += "/";
   nestedSoftName += exportedSoftSkinned.softParams[0].name;
@@ -1424,7 +1510,7 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_RoundTripsSel
 TEST_IF(
     MOCHI_HDF5_AND_INTERNAL,
     PrefabExport,
-    ExportContactFilter_AvoidsTopLevelNestedNameCollision) {
+    ExportContactConfiguration_AvoidsTopLevelNestedNameCollision) {
   auto* context = CreateContext(0);
   MOCHI_DEFER(DestroyContext(context));
   auto* scene = context->CreateScene("contact_filter_top_level_nested_collision");
@@ -1457,6 +1543,10 @@ TEST_IF(
       /*enable*/ false,
       IncludeNestedActors::No,
       ExpectOK{});
+  ContactPairParamsOverride paramsOverride;
+  paramsOverride.penaltyCoefficient = 7_r;
+  scene->SetContactPairParamsOverride(
+      topLevelActor->GetHandle(), links[0], paramsOverride, ExpectOK{});
 
   auto tempDir =
       CreateTempDirectory("export_contact_filter_top_level_nested_collision", ExpectOK{});
@@ -1493,6 +1583,17 @@ TEST_IF(
   }
   EXPECT_TRUE(foundFilter);
 
+  ASSERT_TRUE(exportedPrefab.contactPairParamsOverrides.has_value());
+  ASSERT_EQ(1, isize(*exportedPrefab.contactPairParamsOverrides));
+  auto const& paramsOverrideEntry = (*exportedPrefab.contactPairParamsOverrides)[0];
+  ASSERT_EQ(2, isize(paramsOverrideEntry.actors));
+  EXPECT_TRUE(
+      (paramsOverrideEntry.actors[0] == rigidName &&
+       paramsOverrideEntry.actors[1] == nestedLinkName) ||
+      (paramsOverrideEntry.actors[0] == nestedLinkName &&
+       paramsOverrideEntry.actors[1] == rigidName));
+  EXPECT_EQ(std::optional<real>{7_r}, paramsOverrideEntry.paramsOverride.penaltyCoefficient);
+
   auto reloaded =
       prefab::LoadFromFile(prefabFile.string(), tempDir.Path().string(), context, ExpectOK{});
   auto* newScene = context->CreateScene("roundtrip_collision");
@@ -1516,6 +1617,12 @@ TEST_IF(
   auto const* sceneImpl = static_cast<SceneImpl const*>(newScene);
   EXPECT_FALSE(sceneImpl->IsActorContactEnabled(
       rigidActor->GetHandle(), linkActor->GetHandle(), ExpectOK{}));
+  EXPECT_EQ(
+      std::optional<real>{7_r},
+      newScene
+          ->GetContactPairParamsOverride(
+              rigidActor->GetHandle(), linkActor->GetHandle(), ExpectOK{})
+          .penaltyCoefficient);
 }
 
 TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_DropsUnsupportedActorTypes) {
@@ -1748,3 +1855,492 @@ TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ExportContactFilter_AsymmetricLay
   EXPECT_FALSE(newScene->IsLayerContactEnabled("LayerX", "LayerY"));
   EXPECT_TRUE(newScene->IsLayerContactEnabled("LayerY", "LayerX"));
 }
+
+TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ContactFiltersAreDeterministic) {
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto tempDirA = CreateTempDirectory("contact_filter_order_a", ExpectOK{});
+  auto tempDirB = CreateTempDirectory("contact_filter_order_b", ExpectOK{});
+  auto const shape = context->LoadShapeFromFile(
+      GetAssetPath("cube/cube_minimal.mochi.json"),
+      Real3{0.1_r, 0.1_r, 0.1_r},
+      TransformRT{},
+      ExpectOK{});
+
+  constexpr int kNumPairs = 24;
+  using NamePair = std::pair<std::string, std::string>;
+  DynamicArray<NamePair> expectedActorAsymmetric;
+  DynamicArray<NamePair> expectedActorSymmetric;
+  DynamicArray<NamePair> expectedLayerAsymmetric;
+  DynamicArray<NamePair> expectedLayerSymmetric;
+  for (int i = 0; i < kNumPairs; ++i) {
+    std::string const actorName = "Actor" + std::to_string(i);
+    std::string const layerName = "Layer" + std::to_string(i);
+    expectedActorAsymmetric.push_back({actorName, "AsymmetricAnchor"});
+    expectedActorSymmetric.push_back({actorName, "SymmetricAnchor"});
+    expectedLayerAsymmetric.push_back({layerName, "AsymmetricLayer"});
+    expectedLayerSymmetric.push_back({layerName, "SymmetricLayer"});
+  }
+  std::sort(expectedActorAsymmetric.begin(), expectedActorAsymmetric.end());
+  std::sort(expectedActorSymmetric.begin(), expectedActorSymmetric.end());
+  std::sort(expectedLayerAsymmetric.begin(), expectedLayerAsymmetric.end());
+  std::sort(expectedLayerSymmetric.begin(), expectedLayerSymmetric.end());
+
+  auto actorPairs = [](DynamicArray<prefab::ActorContactEntry> const& entries) {
+    DynamicArray<NamePair> pairs;
+    pairs.reserve(entries.size());
+    for (auto const& entry : entries) {
+      pairs.push_back({std::string(entry.actors[0]), std::string(entry.actors[1])});
+    }
+    return pairs;
+  };
+  auto layerPairs = [](DynamicArray<prefab::LayerContactEntry> const& entries) {
+    DynamicArray<NamePair> pairs;
+    pairs.reserve(entries.size());
+    for (auto const& entry : entries) {
+      pairs.push_back({std::string(entry.layers[0]), std::string(entry.layers[1])});
+    }
+    return pairs;
+  };
+
+  auto exportWithOrder =
+      [&](std::filesystem::path const& outputDir, bool reverse, std::string& json) {
+        auto* scene = context->CreateScene("contact_filter_determinism");
+        MOCHI_DEFER(context->DestroyScene(scene));
+
+        auto makeActor = [&](char const* name, char const* layer) {
+          RigidActorParams params;
+          params.name = name;
+          params.layer = layer;
+          params.shape = shape;
+          params.colliderType = ColliderType::Box;
+          return scene->CreateRigidActor(params, ExpectOK{});
+        };
+        Actor* const symmetricAnchor = makeActor("SymmetricAnchor", "SymmetricLayer");
+        Actor* const asymmetricAnchor = makeActor("AsymmetricAnchor", "AsymmetricLayer");
+
+        DynamicArray<Actor*> actors;
+        DynamicArray<std::string> layerNames;
+        for (int i = 0; i < kNumPairs; ++i) {
+          std::string const actorName = "Actor" + std::to_string(i);
+          layerNames.push_back("Layer" + std::to_string(i));
+          actors.push_back(makeActor(actorName.c_str(), layerNames.back().c_str()));
+        }
+
+        for (int n = 0; n < kNumPairs; ++n) {
+          int const i = reverse ? kNumPairs - 1 - n : n;
+          scene->EnableActorContactSymmetric(
+              actors[i]->GetHandle(),
+              symmetricAnchor->GetHandle(),
+              false,
+              IncludeNestedActors::No,
+              ExpectOK{});
+          scene->EnableActorContactAsymmetric(
+              actors[i]->GetHandle(),
+              asymmetricAnchor->GetHandle(),
+              false,
+              IncludeNestedActors::No,
+              ExpectOK{});
+          scene->EnableLayerContactSymmetric(layerNames[i], "SymmetricLayer", false, ExpectOK{});
+          scene->EnableLayerContactAsymmetric(layerNames[i], "AsymmetricLayer", false, ExpectOK{});
+        }
+
+        auto const prefabFile = ExportScene(scene, "contact_filter", outputDir);
+        ReadFile(prefabFile, json, ExpectOK{});
+        auto const exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+        ASSERT_TRUE(exported.contactFilter.has_value());
+        auto const& filter = *exported.contactFilter;
+        ASSERT_TRUE(filter.actorContactAsymmetric.has_value());
+        ASSERT_TRUE(filter.actorContactSymmetric.has_value());
+        ASSERT_TRUE(filter.layerContactAsymmetric.has_value());
+        ASSERT_TRUE(filter.layerContactSymmetric.has_value());
+        EXPECT_EQ(expectedActorAsymmetric, actorPairs(*filter.actorContactAsymmetric));
+        EXPECT_EQ(expectedActorSymmetric, actorPairs(*filter.actorContactSymmetric));
+        EXPECT_EQ(expectedLayerAsymmetric, layerPairs(*filter.layerContactAsymmetric));
+        EXPECT_EQ(expectedLayerSymmetric, layerPairs(*filter.layerContactSymmetric));
+      };
+
+  std::string jsonA;
+  std::string jsonB;
+  exportWithOrder(tempDirA.Path(), false, jsonA);
+  exportWithOrder(tempDirB.Path(), true, jsonB);
+  EXPECT_EQ(jsonA, jsonB);
+}
+
+TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ContactPairOverridesAreDeterministic) {
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto tempDirA = CreateTempDirectory("contact_pair_override_order_a", ExpectOK{});
+  auto tempDirB = CreateTempDirectory("contact_pair_override_order_b", ExpectOK{});
+
+  constexpr int kNumPairs = 24;
+  DynamicArray<std::pair<std::string, real>> expectedEntries;
+  for (int i = 0; i < kNumPairs; ++i) {
+    expectedEntries.push_back({"Actor" + std::to_string(i), static_cast<real>(i) * 0.01_r});
+  }
+  std::sort(expectedEntries.begin(), expectedEntries.end());
+
+  auto exportWithOrder = [&](std::filesystem::path const& outputDir,
+                             bool reverse,
+                             std::string& json) {
+    auto* scene = context->CreateScene("pair_override_determinism");
+    MOCHI_DEFER(context->DestroyScene(scene));
+    Actor* const anchor = CreateRigidCubeActor(context, scene, "Anchor");
+    DynamicArray<Actor*> actors;
+    for (int i = 0; i < kNumPairs; ++i) {
+      actors.push_back(CreateRigidCubeActor(context, scene, ("Actor" + std::to_string(i)).c_str()));
+    }
+
+    for (int n = 0; n < kNumPairs; ++n) {
+      int const i = reverse ? kNumPairs - 1 - n : n;
+      ContactPairParamsOverride params;
+      params.coulombFrictionCoefficient = static_cast<real>(i) * 0.01_r;
+      scene->SetContactPairParamsOverride(
+          actors[i]->GetHandle(), anchor->GetHandle(), params, ExpectOK{});
+    }
+
+    auto const prefabFile = ExportScene(scene, "pair_overrides", outputDir);
+    ReadFile(prefabFile, json, ExpectOK{});
+    auto const exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+    ASSERT_TRUE(exported.contactPairParamsOverrides.has_value());
+    ASSERT_EQ(kNumPairs, isize(*exported.contactPairParamsOverrides));
+    for (int i = 0; i < kNumPairs; ++i) {
+      auto const& entry = (*exported.contactPairParamsOverrides)[i];
+      ASSERT_EQ(2, isize(entry.actors));
+      EXPECT_STREQ(expectedEntries[i].first.c_str(), entry.actors[0].c_str());
+      EXPECT_STREQ("Anchor", entry.actors[1].c_str());
+      EXPECT_EQ(
+          std::optional<real>{expectedEntries[i].second},
+          entry.paramsOverride.coulombFrictionCoefficient);
+    }
+  };
+
+  std::string jsonA;
+  std::string jsonB;
+  exportWithOrder(tempDirA.Path(), false, jsonA);
+  exportWithOrder(tempDirB.Path(), true, jsonB);
+  EXPECT_EQ(jsonA, jsonB);
+}
+
+TEST_IF(MOCHI_HDF5_AND_INTERNAL, PrefabExport, ContactPairOverridesExcludeAndRoundTrip) {
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto* scene = context->CreateScene("pair_override_exclusion");
+  MOCHI_DEFER(context->DestroyScene(scene));
+  Actor* const actorA = CreateRigidCubeActor(context, scene, "ActorA");
+  Actor* const actorB = CreateRigidCubeActor(context, scene, "ActorB");
+  Actor* const actorC = CreateRigidCubeActor(context, scene, "ActorC");
+
+  auto setOverride = [&](Actor* first, Actor* second, real value) {
+    ContactPairParamsOverride params;
+    params.penaltyCoefficient = value;
+    scene->SetContactPairParamsOverride(
+        first->GetHandle(), second->GetHandle(), params, ExpectOK{});
+  };
+  setOverride(actorA, actorB, 1_r);
+  setOverride(actorA, actorC, 2_r);
+  setOverride(actorB, actorC, 3_r);
+
+  auto tempDir = CreateTempDirectory("contact_pair_override_exclusion", ExpectOK{});
+  prefab::ExportParams exportParams;
+  exportParams.excludeActors.push_back(actorB->GetHandle());
+  prefab::ExportScene(scene, "pair_overrides", tempDir.Path().string(), exportParams, ExpectOK{});
+  auto const prefabFile = tempDir.Path() / "pair_overrides" / "pair_overrides.mochi_scene";
+  auto exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+  ASSERT_TRUE(exported.contactPairParamsOverrides.has_value());
+  ASSERT_EQ(1, isize(*exported.contactPairParamsOverrides));
+  auto const& entry = (*exported.contactPairParamsOverrides)[0];
+  ASSERT_EQ(2, isize(entry.actors));
+  EXPECT_STREQ("ActorA", entry.actors[0].c_str());
+  EXPECT_STREQ("ActorC", entry.actors[1].c_str());
+  EXPECT_EQ(std::optional<real>{2_r}, entry.paramsOverride.penaltyCoefficient);
+
+  auto loaded =
+      prefab::LoadFromFile(prefabFile.string(), tempDir.Path().string(), context, ExpectOK{});
+  auto* roundTripScene = context->CreateScene("roundtrip");
+  MOCHI_DEFER(context->DestroyScene(roundTripScene));
+  prefab::AddToScene(loaded, roundTripScene, {}, ExpectOK{});
+  ActorHandle roundTripA;
+  ActorHandle roundTripC;
+  roundTripScene->ForEachActor([&](Actor const* actor) {
+    if (std::string_view(actor->GetName()) == "ActorA") {
+      roundTripA = actor->GetHandle();
+    } else if (std::string_view(actor->GetName()) == "ActorC") {
+      roundTripC = actor->GetHandle();
+    }
+  });
+  ASSERT_TRUE(roundTripA.IsValid());
+  ASSERT_TRUE(roundTripC.IsValid());
+  EXPECT_EQ(
+      std::optional<real>{2_r},
+      roundTripScene->GetContactPairParamsOverride(roundTripA, roundTripC, ExpectOK{})
+          .penaltyCoefficient);
+}
+
+// A standalone soft actor, an articulated chain covering every DoF kind (Free, Revolute, Prismatic,
+// Spherical), and a soft-skinned actor, all built from procedural shapes.
+struct CurrentPoseExportActors {
+  Actor* soft = nullptr;
+  Actor* articulated = nullptr;
+  Actor* skinned = nullptr;
+};
+
+static CurrentPoseExportActors CreateCurrentPoseExportActors(Context* context, Scene* scene) {
+  CurrentPoseExportActors actors;
+
+  SoftActorParams softParams;
+  softParams.name = "Soft";
+  softParams.shape = CreateUnitCubeTetMeshShape(context);
+  softParams.worldFromLocal = TransformRT(
+      Quaternion::FromAxisAngle(Normalize(Real3{1_r, 2_r, 3_r}), 0.7_r), Real3{1_r, 2_r, 3_r});
+  actors.soft = scene->CreateSoftActor(softParams, ExpectOK{});
+
+  ArticulatedActorParams articulatedParams;
+  articulatedParams.name = "Chain";
+  articulatedParams.worldFromRoot = TransformRT(
+      Quaternion::FromAxisAngle(Normalize(Real3{-1_r, 0.5_r, 2_r}), 0.4_r), Real3{-2_r, 1_r, 0_r});
+  ShapeHandle const linkShape = CreateUnitCubeTetMeshShape(context);
+  ArticulatedJointType const jointTypes[] = {
+      ArticulatedJointType::Free,
+      ArticulatedJointType::Revolute,
+      ArticulatedJointType::Prismatic,
+      ArticulatedJointType::Spherical};
+  for (int i = 0; i < isize(jointTypes); ++i) {
+    articulatedParams.joints.push_back({.type = jointTypes[i], .axis = Real3{0_r, 0_r, 1_r}});
+    articulatedParams.links.push_back(
+        {.parentLink = i - 1, .shape = linkShape, .colliderType = ColliderType::None});
+  }
+  actors.articulated = scene->CreateArticulatedActor(articulatedParams, ExpectOK{});
+
+  SoftSkinnedActorParams skinnedParams;
+  skinnedParams.skeletonParams.name = "Skeleton";
+  skinnedParams.skeletonParams.worldFromRoot =
+      TransformRT(Quaternion::FromAxisAngle(Real3{0_r, 1_r, 0_r}, 1.1_r), Real3{3_r, 0_r, -1_r});
+  skinnedParams.skeletonParams.joints = {{.type = ArticulatedJointType::Free}};
+  skinnedParams.skeletonParams.links = {
+      {.name = "bone", .parentLink = -1, .shape = linkShape, .colliderType = ColliderType::None}};
+  auto& nestedSoft = skinnedParams.softParams.push_back();
+  nestedSoft.name = "soft";
+  nestedSoft.shape = CreateUnitCubeTetSoftShape(context);
+  nestedSoft.hasGravity = false;
+  actors.skinned = scene->CreateSoftSkinnedActor(skinnedParams, ExpectOK{});
+  return actors;
+}
+
+// Elastic (pre-skinning) displacements of a soft actor. For standalone soft actors, this matches
+// Actor::GetDisplacements.
+[[nodiscard]] static Span<real const> GetElasticDisplacements(Scene* scene, ActorHandle handle) {
+  return MakeConstSpan(GetRegistry(scene)
+                           .get<CDisplacementSlice<real, TimeStep::Current> const>(
+                               GetEntity(GetRegistry(scene), handle, ExpectOK{}))
+                           .value);
+}
+
+[[nodiscard]] static DynamicArray<real> GetPose(Actor const* actor) {
+  DynamicArray<real> pose(actor->GetNumDofs());
+  actor->GetArticulatedPose(pose, ExpectOK{});
+  return pose;
+}
+
+[[nodiscard]] static DynamicArray<real> MakeDisplacements(int size, real amplitude) {
+  DynamicArray<real> displacements(size);
+  for (int i = 0; i < size; ++i) {
+    displacements[i] = amplitude * StaticCast<real>((i % 5) - 2);
+  }
+  return displacements;
+}
+
+static void SetExportActorPoses(Scene* scene, CurrentPoseExportActors const& actors) {
+  actors.soft->SetDisplacements(
+      MakeDisplacements(isize(actors.soft->GetDisplacements(ExpectOK{})), 0.01_r), ExpectOK{});
+  actors.articulated->SetArticulatedPoseFromJoints(
+      DynamicArray<real>{
+          0.1_r, -0.2_r, 0.3_r, 0.2_r, -0.1_r, 0.3_r, 0.4_r, 0.05_r, -0.3_r, 0.2_r, 0.1_r},
+      ExpectOK{});
+  actors.skinned->SetArticulatedPoseFromJoints(
+      DynamicArray<real>{0.1_r, -0.2_r, 0.3_r, 0.2_r, -0.1_r, 0.3_r}, ExpectOK{});
+  ActorHandle const nestedSoft = actors.skinned->GetNestedSoftActors(ExpectOK{})[0];
+  scene->GetActor(nestedSoft)
+      ->SetDisplacements(
+          MakeDisplacements(isize(GetElasticDisplacements(scene, nestedSoft)), 0.02_r), ExpectOK{});
+}
+
+[[nodiscard]] static prefab::ScenePrefab ExportAndLoad(
+    Scene* scene,
+    std::filesystem::path const& outputDir,
+    prefab::ExportParams const& params) {
+  auto const prefabFile = ExportScene(scene, "current_pose", outputDir, params);
+  return prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+}
+
+static void ExpectNoCurrentPoseFields(prefab::ScenePrefab const& exported) {
+  ASSERT_EQ(1, isize(exported.actors.soft));
+  ASSERT_EQ(1, isize(exported.actors.articulated));
+  ASSERT_EQ(1, isize(exported.actors.softSkinned));
+  EXPECT_FALSE(exported.actors.soft[0].nodeDisplacements.has_value());
+  EXPECT_FALSE(exported.actors.articulated[0].jointPose.has_value());
+  auto const& skinned = exported.actors.softSkinned[0];
+  EXPECT_FALSE(skinned.skeletonParams.jointPose.has_value());
+  ASSERT_EQ(1, isize(skinned.softParams));
+  EXPECT_FALSE(skinned.softParams[0].nodeDisplacements.has_value());
+}
+
+class PrefabExportCurrentPoseTest : public MochiSceneTestBase {
+ protected:
+  void SetUp() override {
+    MochiSceneTestBase::SetUp();
+    actors = CreateCurrentPoseExportActors(_mochiContext, _scene);
+  }
+
+  CurrentPoseExportActors actors;
+};
+
+// Freshly created actors, including Free and Spherical joints whose rest pose converts through
+// quaternions, are exactly at rest and must not export current pose fields.
+TEST_IF_F(MOCHI_USE_HDF5, PrefabExportCurrentPoseTest, ExportScene_FreshActorsExportNoCurrentPose) {
+  auto tempDir = CreateTempDirectory("export_fresh_current_pose", ExpectOK{});
+  ExpectNoCurrentPoseFields(ExportAndLoad(_scene, tempDir.Path(), {.exportCurrentPose = true}));
+}
+
+TEST_IF_F(MOCHI_USE_HDF5, PrefabExportCurrentPoseTest, ExportScene_DefaultExportsNoCurrentPose) {
+  SetExportActorPoses(_scene, actors);
+  auto tempDir = CreateTempDirectory("export_default_current_pose", ExpectOK{});
+  ExpectNoCurrentPoseFields(ExportAndLoad(_scene, tempDir.Path(), {}));
+}
+
+TEST_IF_F(MOCHI_USE_HDF5, PrefabExportCurrentPoseTest, ExportScene_ExportCurrentPoseFalse) {
+  SetExportActorPoses(_scene, actors);
+  auto tempDir = CreateTempDirectory("export_current_pose_false", ExpectOK{});
+  ExpectNoCurrentPoseFields(ExportAndLoad(_scene, tempDir.Path(), {.exportCurrentPose = false}));
+}
+
+enum class PoseSource { SetDirectly, SteppedUnderGravity };
+
+class PrefabExportCurrentPoseRoundTrip : public PrefabExportCurrentPoseTest,
+                                         public ::testing::WithParamInterface<PoseSource> {};
+
+// Current-pose exports added back to a new scene restore the same deformation, joint pose,
+// and root transforms.
+TEST_IF_P(MOCHI_USE_HDF5, PrefabExportCurrentPoseRoundTrip, RestoresState) {
+  if (GetParam() == PoseSource::SetDirectly) {
+    SetExportActorPoses(_scene, actors);
+  } else {
+    for (int i = 0; i < 5; ++i) {
+      _scene->Step(0.01);
+    }
+  }
+  ActorHandle const nestedSoft = actors.skinned->GetNestedSoftActors(ExpectOK{})[0];
+
+  auto tempDir = CreateTempDirectory("export_displacement_round_trip", ExpectOK{});
+  auto const prefabFile =
+      ExportScene(_scene, "displacements", tempDir.Path(), {.exportCurrentPose = true});
+  auto const exported = prefab::ShallowLoadFromFile(prefabFile.string(), ExpectOK{});
+  ASSERT_EQ(1, isize(exported.actors.soft));
+  EXPECT_TRUE(exported.actors.soft[0].nodeDisplacements.has_value());
+  ASSERT_EQ(1, isize(exported.actors.articulated));
+  EXPECT_TRUE(exported.actors.articulated[0].jointPose.has_value());
+  ASSERT_EQ(1, isize(exported.actors.softSkinned));
+  auto const& exportedSkinned = exported.actors.softSkinned[0];
+  EXPECT_TRUE(exportedSkinned.skeletonParams.jointPose.has_value());
+  // Under gravity the nested soft only follows its bone, so its elastic deformation may be zero.
+  if (GetParam() == PoseSource::SetDirectly) {
+    EXPECT_TRUE(exportedSkinned.softParams[0].nodeDisplacements.has_value());
+  }
+
+  auto* reloaded = _mochiContext->CreateScene("reloaded");
+  MOCHI_DEFER(_mochiContext->DestroyScene(reloaded));
+  auto const result =
+      prefab::AddToScene(prefabFile.string(), tempDir.Path().string(), reloaded, ExpectOK{});
+  auto const softs = result.Filter(ActorType::Soft);
+  auto const articulated = result.Filter(ActorType::Articulated);
+  ASSERT_EQ(1, isize(softs));
+  ASSERT_EQ(2, isize(articulated));
+  auto findArticulated = [&](char const* name) -> Actor const* {
+    auto const* it = std::ranges::find_if(
+        articulated, [&](Actor const* a) { return std::string_view(a->GetName()) == name; });
+    return it == articulated.end() ? nullptr : *it;
+  };
+  Actor const* reloadedChain = findArticulated("Chain");
+  Actor const* reloadedSkinned = findArticulated("Skeleton");
+  ASSERT_NE(nullptr, reloadedChain);
+  ASSERT_NE(nullptr, reloadedSkinned);
+
+  real constexpr kTol = 1e-5_r;
+  EXPECT_TRUE(NearEqualSpan(
+      actors.soft->GetDisplacements(ExpectOK{}), softs[0]->GetDisplacements(ExpectOK{}), kTol));
+  EXPECT_NEAR_TOL(actors.soft->GetRootTransform(), softs[0]->GetRootTransform(), kTol);
+  EXPECT_TRUE(NearEqualSpan(GetPose(actors.articulated), GetPose(reloadedChain), kTol));
+  EXPECT_NEAR_TOL(actors.articulated->GetRootTransform(), reloadedChain->GetRootTransform(), kTol);
+  EXPECT_TRUE(NearEqualSpan(GetPose(actors.skinned), GetPose(reloadedSkinned), kTol));
+  EXPECT_NEAR_TOL(actors.skinned->GetRootTransform(), reloadedSkinned->GetRootTransform(), kTol);
+  EXPECT_TRUE(NearEqualSpan(
+      GetElasticDisplacements(_scene, nestedSoft),
+      GetElasticDisplacements(reloaded, reloadedSkinned->GetNestedSoftActors(ExpectOK{})[0]),
+      kTol));
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    PrefabExport,
+    PrefabExportCurrentPoseRoundTrip,
+    ::testing::Values(PoseSource::SetDirectly, PoseSource::SteppedUnderGravity));
+
+// ExportActor honors ExportParams::exportCurrentPose and serializes the current pose.
+TEST_IF_F(MOCHI_USE_HDF5, PrefabExportCurrentPoseTest, ExportActor_CurrentPose) {
+  SetExportActorPoses(_scene, actors);
+  auto tempDir = CreateTempDirectory("export_actor_current_pose", ExpectOK{});
+
+  auto exportActor = [&](Actor const* actor, char const* name, prefab::ExportParams const& params) {
+    prefab::ExportActor(actor, name, tempDir.Path().string(), params, ExpectOK{});
+    return prefab::ShallowLoadFromFile(
+        (tempDir.Path() / name / (std::string(name) + ".mochi_scene")).string(), ExpectOK{});
+  };
+
+  auto const soft = exportActor(actors.soft, "soft", {.exportCurrentPose = true});
+  auto const chain = exportActor(actors.articulated, "chain", {.exportCurrentPose = true});
+  ASSERT_EQ(1, isize(soft.actors.soft));
+  ASSERT_EQ(1, isize(chain.actors.articulated));
+  ASSERT_TRUE(soft.actors.soft[0].nodeDisplacements.has_value());
+  ASSERT_TRUE(chain.actors.articulated[0].jointPose.has_value());
+  EXPECT_SPAN_EQ(actors.soft->GetDisplacements(ExpectOK{}), *soft.actors.soft[0].nodeDisplacements);
+  EXPECT_SPAN_EQ(GetPose(actors.articulated), *chain.actors.articulated[0].jointPose);
+
+  auto const softRest = exportActor(actors.soft, "soft_rest", {});
+  auto const chainRest = exportActor(actors.articulated, "chain_rest", {});
+  ASSERT_EQ(1, isize(softRest.actors.soft));
+  ASSERT_EQ(1, isize(chainRest.actors.articulated));
+  EXPECT_FALSE(softRest.actors.soft[0].nodeDisplacements.has_value());
+  EXPECT_FALSE(chainRest.actors.articulated[0].jointPose.has_value());
+}
+
+#if MOCHI_USE_HDF5 && MOCHI_ENABLE_ROM_ACTORS
+#define MOCHI_HDF5_AND_ROM 1
+#else
+#define MOCHI_HDF5_AND_ROM 0
+#endif
+
+// ROM soft actors recompute displacements from their reduced state, so none are exported.
+TEST_IF(MOCHI_HDF5_AND_ROM, PrefabExport, ExportScene_RomSoftActorExportsNoDisplacements) {
+  auto* context = CreateContext(0);
+  MOCHI_DEFER(DestroyContext(context));
+  auto* scene = context->CreateScene("rom");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  SoftActorParams softParams;
+  softParams.name = "RomSoft";
+  softParams.shape = CreateUnitCubeTetMeshShape(context);
+  experimental::ExperimentalSoftActorParams experimentalParams;
+  experimentalParams.rom = experimental::RomParams{.source = "polynomial_crom_order_1"};
+  Actor* rom = experimental::CreateSoftActor(scene, softParams, experimentalParams, ExpectOK{});
+  for (int i = 0; i < 5; ++i) {
+    scene->Step(0.01);
+  }
+  auto const displacements = rom->GetDisplacements(ExpectOK{});
+  ASSERT_TRUE(std::ranges::any_of(displacements, [](real d) { return d != 0_r; }));
+
+  auto tempDir = CreateTempDirectory("export_rom_displacements", ExpectOK{});
+  auto const exported = ExportAndLoad(scene, tempDir.Path(), {.exportCurrentPose = true});
+  ASSERT_EQ(1, isize(exported.actors.soft));
+  EXPECT_FALSE(exported.actors.soft[0].nodeDisplacements.has_value());
+}
+
+#undef MOCHI_HDF5_AND_ROM

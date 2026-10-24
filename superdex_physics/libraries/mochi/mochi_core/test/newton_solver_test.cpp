@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
+#include <mochi_core/solvers/line_search.h>
 #include <mochi_core/solvers/newton_solver.h>
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/sparsity_utils.h>
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <limits>
 #include <tuple>
@@ -309,7 +311,7 @@ TEST(NewtonSolver, SmoothLocalMinimum) {
         EXPECT_TRUE(result.convergence == ConvergenceStatus::Converged);
         if (params.lineSearch.type == LineSearchType::None ||
             params.lineSearch.type == LineSearchType::ResidualNorm) {
-          // kNone and kResidualNorm do not update the objective
+          // None and ResidualNorm do not update the objective
           EXPECT_NEAR(result.merit, 0_r, kAbsTol);
         } else {
           EXPECT_NEAR(result.merit, obj, kAbsTol);
@@ -344,6 +346,17 @@ TEST(NewtonSolver, SmoothLocalMinimum) {
         EXPECT_EQ(result.numIterDone, resultBis.numIterDone);
         EXPECT_EQ(result.numLastLSIterDone, resultBis.numLastLSIterDone);
         EXPECT_EQ(result.totalNumLinearIterDone, resultBis.totalNumLinearIterDone);
+
+        // The stored increment must be the step taken, also when the line search fails and the
+        // solve keeps its last trial. With these parameters, Armijo and Wolfe reject both trials.
+        params.maxIter = 1;
+        params.lineSearch.maxIter = 2;
+        params.lineSearch.alpha = 0.5_r;
+        params.lineSearch.wolfe1 = 0.75_r;
+        solver.SetParams(params);
+        problem.SetSolution(x0);
+        solver.Solve(problem);
+        EXPECT_NEAR(problem.GetIncrement()[0], problem.GetSolution()[0] - x0[0], kAbsTol);
       }
     }
   }
@@ -555,9 +568,10 @@ TEST(NewtonSolver, LinearToleranceStrategy2) {
     EXPECT_NEAR(resultEW2.merit, 0_r, kAbsTol);
   }
 
-  // Check the total number of linear iterations is smaller with Eisenstat-Walker strategies.
-  EXPECT_LT(resultEW1.totalNumLinearIterDone, resultConstant.totalNumLinearIterDone);
-  EXPECT_LT(resultEW2.totalNumLinearIterDone, resultConstant.totalNumLinearIterDone);
+  // This structured problem can converge in one CG iteration per Newton step for every strategy.
+  // Eisenstat-Walker must not require more linear iterations, but may tie the constant strategy.
+  EXPECT_LE(resultEW1.totalNumLinearIterDone, resultConstant.totalNumLinearIterDone);
+  EXPECT_LE(resultEW2.totalNumLinearIterDone, resultConstant.totalNumLinearIterDone);
 
   ColumnVector<real> xref(n);
   xref.SetConstant(-Sqrt(2_r));
@@ -738,4 +752,161 @@ TEST(NewtonSolver, PerActorWeighted_FallbackToGlobal) {
 
   EXPECT_EQ(ConvergenceStatus::Converged, status.convergence); // Solver converged.
   EXPECT_TRUE(status.actorConvergence.empty()); // Empty after fallback.
+}
+
+// ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+
+/**
+ * The full step lands where the residual is NaN and the objective is NaN or −∞, and must be
+ * rejected. The half step is acceptable to every line search.
+ */
+TEST(NewtonSolver, LineSearchRejectsNonFiniteTrial) {
+  real invalidObjective = 0_r;
+  auto residual = ColumnVector<real>::Zero(2);
+  SnleProblemFunctions<real> functions;
+  functions.assemble = [&invalidObjective, &residual](
+                           SnleProblem<real>& problem, AssemblyParams const& params) {
+    auto const x = problem.GetSolution();
+    bool const isInvalid = x[0] < -1_r;
+    if (params.assemObj) {
+      problem.objective = isInvalid ? invalidObjective : 0.5 * x.Dot(x);
+    }
+    if (params.assemRes) {
+      residual = x;
+      if (isInvalid) {
+        residual.SetConstant(std::numeric_limits<real>::quiet_NaN());
+      }
+      problem.actorResiduals = {{0, &residual}};
+    }
+  };
+  functions.onPostNewIncrement = [](SnleProblem<real>& p) { p.solution += p.increment; };
+  SnleProblem<real> problem{2, 2, std::move(functions)};
+
+  using Ls = LineSearch<real>;
+  for (real const objective :
+       {std::numeric_limits<real>::quiet_NaN(), -std::numeric_limits<real>::infinity()}) {
+    invalidObjective = objective;
+    for (auto const& [type, search] :
+         {std::pair{LineSearchType::Simple, &Ls::Simple},
+          std::pair{LineSearchType::Armijo, &Ls::Armijo},
+          std::pair{LineSearchType::WolfeWeak, &Ls::WolfeWeak},
+          std::pair{LineSearchType::WolfeStrong, &Ls::WolfeStrong},
+          std::pair{LineSearchType::ResidualNorm, &Ls::ResidualNorm},
+          std::pair{LineSearchType::ArmijoOrResidualNorm, &Ls::ArmijoOrResidualNorm}}) {
+      problem.SetSolution(ColumnVector<real>({{1_r, 1_r}}));
+      problem.increment.SetConstant(-3_r);
+      problem.UpdateObjResDRes({.assemObj = true, .assemRes = true});
+      NewtonSolverStatus<real> status;
+      status.merit = problem.GetObjective();
+
+      LineSearchParams const params{
+          .type = type,
+          .maxIter = 2,
+          .alpha = 0.5_r,
+          .wolfe1 = 1e-4_r,
+          .wolfe2 = 0.9_r,
+          .maxRelIncrease = 0_r};
+      EXPECT_TRUE(search(problem, status, params));
+      EXPECT_EQ(status.numLastLSIterDone, 1);
+    }
+  }
+}
+
+/**
+ * Two-DoF problem for the step dx = (1, 0) from the zero solution, where the objective is merit0
+ * and the residual (startSlope, 0). Elsewhere, the residual is (slope, 1), and the objective is
+ * merit0 + |merit0| at the first two trials, dx and dx / 2, and merit0 + rise at the third, dx / 4.
+ */
+static SnleProblem<real>
+GetLineSearchTrialProblem(double merit0, real startSlope, double rise, real slope) {
+  auto residual = ColumnVector<real>{2};
+  auto assembleFn = [=](SnleProblem<real>& problem, AssemblyParams const& params) mutable {
+    real const x = problem.GetSolution()[0];
+    if (params.assemObj) {
+      problem.objective = (x == 0_r) ? merit0
+          : (x == 0.25_r)            ? merit0 + rise
+                                     : merit0 + Abs(merit0);
+    }
+    if (params.assemRes) {
+      residual[0] = (x == 0_r) ? startSlope : slope;
+      residual[1] = (x == 0_r) ? 0_r : 1_r;
+      problem.actorResiduals.resize(1);
+      problem.actorResiduals[0] = std::make_pair(0, &residual);
+    }
+  };
+
+  SnleProblemFunctions<real> functions;
+  functions.assemble = std::move(assembleFn);
+  functions.onPostNewIncrement = [](SnleProblem<real>& problem) {
+    problem.solution += problem.increment;
+  };
+  int constexpr kNumDofs = 2;
+  return SnleProblem<real>{kNumDofs, kNumDofs, std::move(functions)};
+}
+
+// A merit-based line search treats a trial that fails its merit test, but changes the merit by no
+// more than the band, as passing that test if its slope passes the merit test's Armijo condition;
+// the Wolfe searches still apply their curvature test. Out of the band, and for trials that pass
+// the merit test, the slope test doesn't apply. The first two trials rise by |merit0|, which every
+// merit test and the band reject, so the third, at step scale 1/4, decides, unless the
+// residual-norm branch of ArmijoOrResidualNorm accepts earlier.
+TEST(NewtonSolver, MeritRoundingErrorBand) {
+  using Search = bool (*)(SnleProblem<real>&, NewtonSolverStatus<real>&, LineSearchParams const&);
+  std::array<std::pair<LineSearchType, Search>, 5> constexpr kSearches = {
+      {{LineSearchType::Simple, &LineSearch<real>::Simple},
+       {LineSearchType::Armijo, &LineSearch<real>::Armijo},
+       {LineSearchType::WolfeWeak, &LineSearch<real>::WolfeWeak},
+       {LineSearchType::WolfeStrong, &LineSearch<real>::WolfeStrong},
+       {LineSearchType::ArmijoOrResidualNorm, &LineSearch<real>::ArmijoOrResidualNorm}}};
+  real constexpr kEps = std::numeric_limits<real>::epsilon();
+  // Rises and slopes are in units of |merit0|, so the band is 2000 kEps. The start slope -kG is
+  // small enough that a merit drop of kEps passes every merit test, in both precisions.
+  real constexpr kG = 1000_r * kEps;
+  double constexpr kNaN = std::numeric_limits<double>::quiet_NaN();
+  struct Case {
+    double rise{};
+    real startSlope{};
+    real slope{};
+    std::array<bool, 5> accepted{}; // In the order of kSearches
+  };
+  for (double const merit0 : {4.0, -0.25}) {
+    real const unit = Abs(real(merit0));
+    for (Case const& c :
+         {Case{1500 * kEps, -kG, -0.5_r * kG, {true, true, true, true, true}},
+          Case{1500 * kEps, -kG, 1.5_r * kG, {false, false, false, false, false}},
+          Case{1500 * kEps, -kG, 0.9999_r * kG, {true, false, false, false, false}}, // c1 = 0
+          Case{1500 * kEps, -kG, -0.95_r * kG, {true, true, false, false, true}}, // Wolfe expands
+          Case{1500 * kEps, -kG, -kInf, {false, false, false, false, false}},
+          Case{1500 * kEps, -kInf, -0.5_r * kG, {false, false, false, false, true}}, // RN passes
+          Case{4000 * kEps, -kG, -0.5_r * kG, {false, false, false, false, false}}, // Out of band
+          // Out-of-band drop that fails the Armijo test
+          Case{-3000 * kEps, -2e8_r * kEps, -4e8_r * kEps, {true, false, false, false, false}},
+          // In-band drop that fails the Armijo test
+          Case{-10 * kEps, -1e6_r * kEps, -0.5e6_r * kEps, {true, true, true, true, true}},
+          Case{-10 * kEps, -kG, 2_r * kG, {true, true, true, false, true}}, // Merit test passes
+          Case{kNaN, -kG, -0.5_r * kG, {false, false, false, false, false}}}) { // NaN merit
+      std::array<bool, 5> accepted{};
+      for (int i = 0; i < isize(kSearches); ++i) {
+        auto const [type, search] = kSearches[i];
+        SnleProblem<real> problem =
+            GetLineSearchTrialProblem(merit0, unit * c.startSlope, unit * c.rise, unit * c.slope);
+        problem.SetSolution(ColumnVector<real>::Zero(2));
+        problem.UpdateObjResDRes({.assemObj = true, .assemRes = true});
+        problem.increment[0] = 1_r;
+        problem.increment[1] = 0_r;
+        NewtonSolverStatus<real> status;
+        status.merit = problem.GetObjective();
+        accepted[i] = search(
+            problem,
+            status,
+            {.type = type,
+             .maxIter = 3,
+             .alpha = 0.5_r,
+             .wolfe1 = 1e-4_r,
+             .wolfe2 = 0.9_r,
+             .maxRelIncrease = 0_r});
+      }
+      EXPECT_EQ(accepted, c.accepted);
+    }
+  }
 }

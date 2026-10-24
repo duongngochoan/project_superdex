@@ -22,6 +22,7 @@
 #include "mochi_contact_filter.h"
 #include "mochi_deformable.h"
 #include "mochi_island.h"
+#include "mochi_linear_contact_skin.h"
 #include "mochi_scene_recorder.h"
 #include "mochi_simulation.h"
 #include "mochi_snle.h"
@@ -38,7 +39,6 @@
 #include <mochi_physics/mochi_physics_experimental.h>
 
 #include <memory>
-#include <type_traits>
 #include <utility>
 
 #include <entt/entity/view.hpp>
@@ -57,6 +57,10 @@ static void EmplaceSoftActorDiscretization(
 
   if (shape->GetVisualMesh() && shape->GetVisualEmbedding()) {
     reg.emplace<CVisualMesh>(e, shape->GetVisualMesh(), shape->GetVisualEmbedding());
+  }
+
+  if (shape->GetContactSkin()) {
+    reg.emplace<CContactSkinMesh>(e, shape->GetContactSkin(), shape->GetContactSkinEmbedding());
   }
 }
 
@@ -132,8 +136,7 @@ static void EmplaceSoftActorContact(
     std::shared_ptr<TetrahedralMeshShape const> shape,
     Error& error,
     std::shared_ptr<DeepFlowShape const> flow) {
-  reg.emplace<CBoundingVolume<TimeStep::Current>>(e, shape->GetMesh()->GetObb());
-  reg.emplace<CBoundingVolume<TimeStep::Previous>>(e, shape->GetMesh()->GetObb());
+  reg.emplace<CBoundingVolume>(e, shape->GetMesh()->GetObb());
   auto& collider = reg.emplace<CColliderInfo>(e);
 
   static_assert(
@@ -171,7 +174,7 @@ static void EmplaceSoftActorContact(
 
   // Components to detect and compute contact against other actors
   if (useContact) {
-    deformable::EmplaceContactComponents(reg, e, numCollidingSamples);
+    deformable::EmplaceContactComponents(reg, e, numCollidingSamples, /*numContactPartitions*/ 1);
     reg.emplace<CDeformablePointAsyncCollisionsResponse>(e);
   }
   if (collider.type != ColliderType::None) {
@@ -185,15 +188,15 @@ static void EmplaceSoftActorRigidPivotAndRecentering(
     entt::registry& reg,
     entt::entity e,
     TetrahedralMesh const& solverMesh,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc) {
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc) {
   Real3 rigidPivotPos = {};
   int rigidPivotEleIdx = -1;
 
   bool pivotFound = solverMesh.GetRigidPivot(rigidPivotEleIdx, rigidPivotPos);
   MOCHI_ASSERT(pivotFound, "No recentering pivot; something went wrong");
   MOCHI_ASSERT(rigidPivotEleIdx >= 0);
-  MOCHI_ASSERT(rigidPivotEleIdx < (int)femLowVolDisc.femElements.size());
-  auto const& pivotElement = femLowVolDisc.femElements[rigidPivotEleIdx];
+  MOCHI_ASSERT(rigidPivotEleIdx < isize(femVolDisc.femElements));
+  auto const& pivotElement = femVolDisc.femElements[rigidPivotEleIdx];
   auto const& rigidTransformEvalPoint =
       reg.emplace_or_replace<CRigidTransformEvalPoint>(e, pivotElement, rigidPivotPos);
   MOCHI_ASSERT(
@@ -213,23 +216,33 @@ void mochi::InitSoftActor(
     SoftActorParams const& params,
     ExperimentalSoftActorParams const& experimentalParams,
     bool useContact,
-    bool isSkinned,
+    bool isNestedSoft,
     std::shared_ptr<TetrahedralMeshShape const> shapePtr,
     std::shared_ptr<DeepFlowShape const> flow,
     Error& error) {
   MOCHI_ERROR_IF(
-      !isSkinned && !params.hasInertia && !params.hasGravity && !params.hasStress,
+      !isNestedSoft && !params.hasInertia && !params.hasGravity && !params.hasStress,
       error,
       "Soft actors must have at least one of inertia, gravity or stress enabled.");
   ValidateSoftMaterialParams(params.material, error);
   ValidateContactParams(params.contact, error);
+  MOCHI_ERROR_IF(
+      params.useContactSkin && experimentalParams.rom,
+      error,
+      "useContactSkin is not supported for ROM soft actors.");
+  MOCHI_ERROR_IF(
+      params.useContactSkin && isNestedSoft,
+      error,
+      "useContactSkin is not supported for nested soft actors.");
+  MOCHI_ERROR_IF(
+      params.useContactSkin && !shapePtr->GetContactSkin(),
+      error,
+      "useContactSkin requires a soft shape with a contact skin.");
+  MOCHI_ERROR_IF(
+      shapePtr->GetMesh()->GetNumActiveNodes() != shapePtr->GetMesh()->GetNumNodes(),
+      error,
+      "Soft mesh must not contain nodes that are unreferenced by its tetrahedra.");
   MOCHI_ERROR_RETURN(error);
-  if (!params.hasInertia && params.material.massDampingCoefficient > 0_r) {
-    MOCHI_LOG_WARNING("Nonzero soft mass damping inactive because hasInertia is false.");
-  }
-  if (!params.hasStress && params.material.stiffnessDampingCoefficient > 0_r) {
-    MOCHI_LOG_WARNING("Nonzero soft stiffness damping inactive because hasStress is false.");
-  }
 
   // Identification
   reg.emplace<TagSoftActor>(e);
@@ -272,6 +285,11 @@ void mochi::InitSoftActor(
   // by default, no energy is evaluated on skinned positions
   reg.emplace<CSkinnedEnergy>(e);
 
+  // Nested soft actors warn in skinned::InitSkinnedActor, once both bodies' terms are known.
+  if (!isNestedSoft) {
+    WarnIfSoftDampingInactive(reg, e);
+  }
+
   EmplaceSoftActorDiscretization(reg, e, shapePtr);
   reg.emplace<CDirichletBC<real>>(e);
 
@@ -308,94 +326,89 @@ void mochi::InitSoftActor(
   l2g = &reg.emplace<CLocal2GlobalMap>(e);
   l2g->InitializeFromMeshAndBasis(&actorTetMesh, basis, 3);
 
-  // Sparsity pattern.
-  auto& fullSparsity = reg.emplace<CFullSparsityPattern>(e, MakeSparsityGraph(*l2g, actorMeshDofs));
-
-  // DResidual Matrix
-  int const numRows = isize(fullSparsity.graph.GetPointers()) - 1;
-  int const numCols = numRows; // Symmetrical
-  DynamicArray<real> values(fullSparsity.graph.NumTargets());
-  auto actorDResFullSparse = SparseMatrixView<real const>(
-      numCols, fullSparsity.graph.GetPointers(), fullSparsity.graph.GetTargets(), MakeSpan(values));
-  auto blockStructure = BlockedStructure<3>(actorDResFullSparse);
-  BlockSparseMatrix<real, 3> actorDRes(
-      blockStructure.nBlockCols,
-      std::move(blockStructure.ptr),
-      std::move(blockStructure.ndIndices),
-      std::move(values));
-
   // Actor SNLE data.
-  auto const& actorSnle = reg.emplace<CActorSnle>(e, std::move(actorDRes));
+  reg.emplace<CActorSnle>(e, BlockSparseMatrix<real, 3>(actorTetMesh.GetNumNodes(), nbs.GetNToN()));
 
   // Non-linear solver convergence weights (lazily initialized).
   reg.emplace<CActorConvergenceWeights>(e);
 
-  // Volume discretizations
-  auto& femLowVolDisc = reg.emplace<CFemVolumeDiscretizationP1Q1>(e);
-  auto& femHighVolDisc = reg.emplace<CFemVolumeDiscretizationP1Q4>(e);
+  // Volume discretization
+  auto& femVolDisc = reg.emplace<CFemVolumeDiscretizationP1Q1>(e);
   {
-    femLowVolDisc.femElements.reserve(actorTetMesh.GetNumElements());
-    femHighVolDisc.femElements.reserve(actorTetMesh.GetNumElements());
+    femVolDisc.femElements.reserve(actorTetMesh.GetNumElements());
     auto const meshCoords = actorTetMesh.GetNodeCoordinates();
     auto const meshConnec = actorTetMesh.GetElementConnectivity();
     int const meshNumEle = actorTetMesh.GetNumElements();
     for (int i = 0; i < meshNumEle; ++i) {
-      femLowVolDisc.femElements.emplace_back(
-          i, meshCoords, meshConnec, tetrahedral::kTetrahedralQuadrature1);
-      femHighVolDisc.femElements.emplace_back(
-          i, meshCoords, meshConnec, tetrahedral::kTetrahedralQuadrature4);
+      femVolDisc.femElements.emplace_back(i, meshCoords, meshConnec);
     }
   }
 
   // Initialize recentering
   if (experimentalParams.useRecentering) {
-    EmplaceSoftActorRigidPivotAndRecentering(reg, e, actorTetMesh, femLowVolDisc);
+    EmplaceSoftActorRigidPivotAndRecentering(reg, e, actorTetMesh, femVolDisc);
   }
 
-  // Boundary discretization
-  auto const& boundaryDisc = reg.emplace<CFemBoundaryDiscretization>(
-      e,
-      CFemBoundaryDiscretization::Create(actorTetMesh, femLowVolDisc, params.boundaryElementType));
-  int const numCollidingSamples = boundaryDisc.GetNumQuadPoints();
+  int numCollidingSamples = 0;
+  if (params.useContactSkin) {
+    auto const& contactSkin = *shapePtr->GetContactSkin();
+    auto const& surfaceDisc = reg.emplace<CFemSurfaceDiscretization>(
+        e, CFemSurfaceDiscretization::Create(params.boundaryElementType, contactSkin));
+    reg.emplace<CFemSurfaceDiscretizationLite>(
+        e, CFemSurfaceDiscretizationLite::Create(params.boundaryElementType, contactSkin));
+    numCollidingSamples = surfaceDisc.GetNumQuadPoints();
+    linear_contact_skin::EmplaceComponents(
+        reg,
+        e,
+        surfaceDisc,
+        contactSkin,
+        *shapePtr->GetContactSkinEmbedding(),
+        actorTetMesh.GetNodeCoordinates());
+  } else {
+    auto const& boundaryDisc = reg.emplace<CFemBoundaryDiscretization>(
+        e,
+        CFemBoundaryDiscretization::Create(actorTetMesh, femVolDisc, params.boundaryElementType));
+    numCollidingSamples = boundaryDisc.GetNumQuadPoints();
 
-  // Boundary-face nodal based structure and L2G.
-  boundaryDisc.Visit([&](auto const& disc) {
-    BoundaryAssemblyData bdData(
-        MakeConstSpan(disc.femElements),
-        actorTetMesh.GetElementConnectivity(),
-        nbs.GetNToN(),
-        /*numFields*/ kSpaceDim3);
-    reg.emplace<CBoundaryNodalBasedStructure>(e, std::move(bdData.nbs));
-    reg.emplace<CBoundaryLocal2GlobalMap>(e, std::move(bdData.l2g));
-  });
+    boundaryDisc.Visit([&](auto const& disc) {
+      BoundaryAssemblyData bdData(
+          MakeConstSpan(disc.femElements),
+          actorTetMesh.GetElementConnectivity(),
+          nbs.GetNToN(),
+          /*numFields*/ kSpaceDim3);
+      reg.emplace<CBoundaryNodalBasedStructure>(e, std::move(bdData.nbs));
+      reg.emplace<CBoundaryLocal2GlobalMap>(e, std::move(bdData.l2g));
+    });
+  }
 
   EmplaceSoftActorContact(
       reg, e, params, experimentalParams, useContact, numCollidingSamples, shapePtr, error, flow);
+  MOCHI_ERROR_RETURN(error);
 
-  // bounds
+  if (params.useContactSkin) {
+    ecs::InvokeOnEntity(linear_contact_skin::UpdateBounds<TimeStep::Current>, reg, e);
+  } else {
+    ecs::InvokeOnEntity(soft::UpdateBounds<TimeStep::Current>, reg, e);
+  }
+
+  // Bounds used for collision detection.
   reg.emplace<CConservativeStepBounds>(e);
 
-  // MassMatrix (for inertia)
-  auto& massMatrix = reg.emplace<CMassMatrix>(e);
-  massMatrix.values.resize(GetNumValues(actorSnle.fullDResidual), 0_r);
+  // Lumped mass, for the convergence weights, and the mass matrix of a body with inertia but no
+  // stress. A nested soft actor with posed inertia gets the latter in skinned::InitSkinnedActor.
+  reg.emplace<CLumpedMassMatrix>(e);
+  if (params.hasInertia && !params.hasStress) {
+    reg.emplace<CMassMatrix>(e);
+  }
+  ecs::InvokeOnEntity(&soft::UpdateSoftMass, reg, e);
+}
 
-  // Lumped mass matrix. Computed in UpdateSoftMass.
-  auto& lumpedMass = reg.emplace<CLumpedMassMatrix>(e);
-
-  // Per-element mass matrix
-  // here, rather than hardwiring the template, we can deduce it so
-  // that if that changes this does not have to be modified
-  auto& perElemMass = reg.emplace<CPerElementMassMatrix<std::decay_t<decltype(femHighVolDisc)>>>(e);
-  perElemMass.values.resize(l2g->GetNumElements());
-
-  soft::UpdateSoftMass(
-      actorSnle,
-      *l2g,
-      nbs,
-      material,
-      femHighVolDisc,
-      fullSparsity,
-      massMatrix,
-      perElemMass,
-      lumpedMass);
+void mochi::WarnIfSoftDampingInactive(entt::registry const& reg, entt::entity e) {
+  auto const& material = reg.get<CSoftMaterialParams const>(e);
+  if (!reg.all_of<TagUseInertia>(e) && material.massDampingCoefficient > 0_r) {
+    MOCHI_LOG_WARNING("Nonzero soft mass damping inactive because hasInertia is false.");
+  }
+  if (!reg.all_of<TagUseStress>(e) && material.stiffnessDampingCoefficient > 0_r) {
+    MOCHI_LOG_WARNING("Nonzero soft stiffness damping inactive because hasStress is false.");
+  }
 }

@@ -206,19 +206,20 @@ template <typename... Policies, typename SystemT, typename... ExternalT>
 bool TryInvokeOnEntity(SystemT system, entt::registry& reg, entt::entity e, ExternalT... extParams);
 
 /*
-If the system can be invoked on the entity, then increment the semaphore, schedule an async task,
-and return true. Else, return false without scheduling a task.
+If the system can be invoked on the entity, then Schedule() it with the given semaphore and return
+true. Else, return false without scheduling it. Like Schedule(), this invokes the system immediately
+if no other threads could perform the work concurrently.
 
 Usage:
   Same as InvokeOnEntity (except for the first 2 arguments)
 
 Returns:
-  true if a task was scheduled
+  true if the system was scheduled or invoked
 
 */
 template <typename... Policies, typename SystemT, typename... ExternalT>
 inline bool TryScheduleInvokeOnEntity(
-    TaskSemaphore sem,
+    TaskSemaphore const& sem,
     std::string_view debugLabel,
     SystemT system,
     entt::registry& reg,
@@ -239,7 +240,7 @@ void InvokeGlobal(SystemT system, entt::registry& reg, ExternalT... extParams);
 template <typename... Policies, typename SystemT, typename... ExternalT>
 void InvokeForEachGlobal(SystemT system, entt::registry& reg, ExternalT... extParams);
 
-// Schedule tasks to invoke the system for each matching entity in the global registry
+// Schedule() the system for each matching entity in the global registry
 template <typename... Policies, typename SystemT, typename... ExternalT>
 void ScheduleInvokeForEachGlobal(
     TaskSemaphore& sem,
@@ -265,7 +266,7 @@ void InvokeForEach(
     SubsetT const& entitySet,
     ExternalT... extParams);
 
-// Schedule tasks to invoke the system for each matching entity in a local list/set of entities
+// Schedule() the system for each matching entity in a local list/set of entities
 template <typename... Policies, typename SystemT, typename SubsetT, typename... ExternalT>
 void ScheduleInvokeForEach(
     TaskSemaphore& sem,

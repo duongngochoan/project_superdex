@@ -19,6 +19,7 @@ include_guard(GLOBAL)
 #-----------------------------------------------------------------------------
 
 option(SUPERDEX_BUILD_ROBOTICS "Build the superdex_robotics subproject" ON)
+option(SUPERDEX_BUILD_RECORDER "Build the experimental SuperDex episode recorder" OFF)
 option(SUPERDEX_BUILD_STUDIO "Build the superdex_studio application" OFF)
 
-option(SUPERDEX_BUILD_ALL "Build all SuperDex CMake targets" OFF)
+option(SUPERDEX_BUILD_ALL "Build all SuperDex CMake targets except the opt-in recorder" OFF)

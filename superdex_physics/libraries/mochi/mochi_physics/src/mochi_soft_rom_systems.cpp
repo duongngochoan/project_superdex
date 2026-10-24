@@ -21,6 +21,7 @@
 #include "mochi_discretization_functions.h"
 #include "mochi_integration.h"
 #include "mochi_scene_recorder.h"
+#include "mochi_sleep.h"
 #include "mochi_soft.h"
 #include "mochi_soft_rom_linear_systems.h"
 #include "mochi_soft_rom_neural_net_crom_systems.h"
@@ -69,10 +70,10 @@ static constexpr real kQQTRegularizationCoefficient = 1e-8_r;
   Assemble systems
 */
 
-MOCHI_API void mochi::rom::AssembleFullToReduced(
+void mochi::rom::AssembleFullToReduced(
     AssemblyParams const& params,
     ecs::Included<TagSoftActor, TagRomActor>,
-    ecs::OptionalTag<TagSoftSkinnedActor> isSkinned,
+    ecs::OptionalTag<TagNestedSoftActor> isNestedSoft,
     ecs::OptionalTag<TagUseGravity> hasGravityTag,
     ecs::OptionalTag<TagUseInertia> hasInertiaTag,
     ecs::OptionalTag<TagUseStress> hasStressTag,
@@ -87,7 +88,7 @@ MOCHI_API void mochi::rom::AssembleFullToReduced(
   bool const hasGravity = hasGravityTag && !skinnedEnergy.gravity;
   bool const hasInertia = hasInertiaTag && !skinnedEnergy.inertia;
   bool const hasStress = hasStressTag && !skinnedEnergy.stress;
-  bool const hasContact = hasContactTag && !isSkinned;
+  bool const hasContact = hasContactTag && !isNestedSoft;
   if ( // Nothing to project.
       (!hasGravity && !hasInertia && !hasStress && !hasContact) ||
       // Projection is performed element-by-element. Full actor is not explicitly assembled.
@@ -130,26 +131,24 @@ MOCHI_API void mochi::rom::AssembleFullToReduced(
   }
 }
 
-MOCHI_API void mochi::rom::AssembleAndProjectBody(
+void mochi::rom::AssembleAndProjectBody(
     AssemblyParams const& params, // External parameter
     ecs::Included<TagSoftActor, TagRomActor>,
     ecs::CtxGlobal<CSceneGravity const> sceneGravity,
     ecs::OptionalTag<TagUseGravity> hasGravityTag,
     ecs::OptionalTag<TagUseInertia> hasInertiaTag,
     ecs::OptionalTag<TagUseStress> hasStressTag,
-    [[maybe_unused]] ecs::OptionalTag<TagSoftSkinnedActor> isSkinned,
+    [[maybe_unused]] ecs::OptionalTag<TagNestedSoftActor> isNestedSoft,
     CSkinnedEnergy const& skinnedEnergy,
     CRomProjectionStrategy const& projectionStrategy,
     CLocal2GlobalMap const& l2g,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CRootTransform const& rootTransform,
     CSoftMaterialParams const& materialParams,
     CTimeIntegratorState const& intState,
     CDisplacementSlice<real, TimeStep::Current> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart> const& stageStartDispl,
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
-    CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4> const& perElemMass,
     CRomJacobian const& jacobian,
     CActorSnle& outSnle,
     CActiveVolumeElements const* activeVolElems) {
@@ -163,11 +162,11 @@ MOCHI_API void mochi::rom::AssembleAndProjectBody(
   bool const hasInertia = hasInertiaTag && !skinnedEnergy.inertia;
   bool const hasStress = hasStressTag && !skinnedEnergy.stress;
 
-  // Skinned ROM actors do not currently support element-level projection. If that ever changes, the
-  // "at least one unposed term" assert below must be revisited (a skinned actor with only posed
-  // terms is a legal configuration).
+  // Nested soft ROM actors do not currently support element-level projection. If that ever
+  // changes, the "at least one unposed term" assert below must be revisited (a nested soft actor
+  // with only posed terms is a legal configuration).
   MOCHI_ASSERT_VERBOSE(
-      !isSkinned, "Element-level projection is not supported for soft-skinned ROM actors.");
+      !isNestedSoft, "Element-level projection is not supported for nested soft ROM actors.");
   MOCHI_ASSERT_VERBOSE(
       hasGravity || hasInertia || hasStress,
       "ROM actors with element-level projection must have at least one of inertia, gravity or stress enabled.");
@@ -203,33 +202,16 @@ MOCHI_API void mochi::rom::AssembleAndProjectBody(
 
   auto const dampingScales =
       soft::ComputeSoftDampingScales(materialParams, intState.dtStage, hasInertia, hasStress);
-  real const massScale = dampingScales.massScale;
   real const massDampingScale = dampingScales.massDampingScale;
   real const stiffnessDampingFactor = dampingScales.stiffnessDampingFactor;
   bool const includeStiffnessDampingGeometricTerm =
       dampingScales.includeStiffnessDampingGeometricTerm;
-  // Perform assembly and projection.
-  auto initEleDResFn = [&](auto&& eleDRes, int globalEleIdx) -> bool {
-    // Initialize the element dresidual to the scaled element mass matrix (inertia + mass damping)
-    // if applicable, and to zero otherwise.
-    if (massScale != 0_r) {
-      auto const& elementMass = perElemMass.values[globalEleIdx];
-      int constexpr kNumElemDofs =
-          CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4>::kNumElemDofs;
-      RowMatrixView<real const, kNumElemDofs, kNumElemDofs> matView(&elementMass[0][0]);
 
-      static_assert(
-          krylov::details::MatTraits<decltype(eleDRes)>::kMajorDir ==
-              krylov::details::MatTraits<decltype(matView)>::kMajorDir,
-          "Expected same storage direction for performance reasons.");
-
-      eleDRes = massScale * matView;
-      return true;
-    } else {
-      eleDRes.SetZero();
-      return false;
-    }
-  };
+  // The elements gather the predicted target u₀ + dt·v₀, computed once per assembly.
+  ColumnVector<real> predTarget;
+  if (hasInertia && (bodyParams.assemObj || bodyParams.assemRes)) {
+    predTarget = stageStartDispl.value + intState.dtStage * stageStartVel.value;
+  }
 
   MOCHI_ASSERT_VERBOSE(
       !activeVolElems || !activeVolElems->empty(), "Active volume elements must not be empty.");
@@ -246,8 +228,7 @@ MOCHI_API void mochi::rom::AssembleAndProjectBody(
       materialParams, [&]<typename ParamsT>(auto const& perElem) {
         auto batchedConstitutive = materials::MakeBatchedConstitutiveResponse<ParamsT>(perElem);
         auto bodyOp = soft::MakeBatchedBodyOp(
-            MakeConstSpan(femLowVolDisc.femElements),
-            MakeConstSpan(femHighVolDisc.femElements),
+            MakeConstSpan(femVolDisc.femElements),
             batchedConstitutive,
             materialParams.referenceMaterialStiffness,
             hasStress,
@@ -255,8 +236,8 @@ MOCHI_API void mochi::rom::AssembleAndProjectBody(
             hasInertia,
             gravity,
             materialParams.density,
+            predTarget.GetConstSpan(),
             stageStartDispl.value.GetConstSpan(),
-            stageStartVel.value.GetConstSpan(),
             intState.dtStage,
             massDampingScale,
             stiffnessDampingFactor,
@@ -267,7 +248,6 @@ MOCHI_API void mochi::rom::AssembleAndProjectBody(
             l2g,
             bodyOp,
             activeSubset,
-            initEleDResFn,
             AsConstView(currDispl.value),
             AsConstView(*jacobian.template TryGet<CRomJacobian::DenseT>()),
             outSnle.objective,
@@ -281,7 +261,7 @@ void mochi::rom::AssembleAndProjectAsyncContact(
     AssemblyParams const& params, // External parameter
     entt::entity e,
     ecs::Included<TagSoftActor, TagRomActor, TagUseContact>,
-    ecs::Excluded<TagSoftSkinnedActor>,
+    ecs::Excluded<TagNestedSoftActor>,
     ecs::OptionalTag<TagQueryActiveContacts> queryActiveContacts,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     ContactAssemblyReg reg,
@@ -290,7 +270,7 @@ void mochi::rom::AssembleAndProjectAsyncContact(
     CBoundaryLocal2GlobalMap const& bdL2g,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CRootTransform const& rootTransform,
     CTimeIntegratorState const& intState,
     CRomJacobian const& jacobian,
@@ -335,11 +315,6 @@ void mochi::rom::AssembleAndProjectAsyncContact(
     return;
   }
 
-  auto initEleDResFn = [](auto&& eleDRes, int /*globalEleIdx*/) -> bool {
-    eleDRes.SetZero();
-    return false;
-  };
-
   femBoundaryDisc.Visit([&](auto const& disc) {
     using DiscT = std::decay_t<decltype(disc)>;
     using ElementT = typename DiscT::ElementT;
@@ -355,7 +330,6 @@ void mochi::rom::AssembleAndProjectAsyncContact(
         bdL2g,
         boundaryOp,
         bdActiveSubset,
-        initEleDResFn,
         AsConstView(*jacobian.template TryGet<CRomJacobian::DenseT>()),
         outSnle.objective,
         AsView(outSnle.reducedResidual),
@@ -405,6 +379,8 @@ template std::optional<TransformRT> mochi::rom::GetRigidTransform<TimeStep::Prev
 void mochi::rom::AddRigidContactJacobians(
     RigidTransformRegistryExp reg,
     entt::entity entity,
+    Span<Real3 const> positionsInColliding,
+    TransformRT const& worldFromColliding,
     ContactDetectionResult& outContact) {
   // Confirm if this is a ROM actor
   if (!reg.all_of<TagRomActor>(entity)) {
@@ -441,15 +417,22 @@ void mochi::rom::AddRigidContactJacobians(
   // dp/dtLocal^T = Rroot^T
   // dp/drLocal^T = skew(z) * Rroot^T
 
+  // For a sample q in the colliding frame, p = Rc * q + tc, so
+  // z = (Rroot^T * Rc) * (q - Rc^T * (troot - tc)) - tlocal - v.
+  // Subtracting the root origin before rotating keeps world-space offsets from cancelling after
+  // rounding.
+
   // Prepare common data
-  Vec4r troot = ToSimd(transformRoot.GetTranslation());
-  std::pair<VMatrix3x3r, VMatrix3x3r> Rroot_T =
-      ToVMatrix3x3_WithTranspose(transformRoot.GetRotation());
+  Vec4r const rootInColliding =
+      worldFromColliding.TransformPointInverse(transformRoot.VGetTranslation());
+  VMatrix3x3r const rootFromCollidingRotT = ToVMatrix3x3Transpose(
+      Conjugate(transformRoot.GetRotation()) * worldFromColliding.GetRotation());
+  VMatrix3x3r const RrootT = ToVMatrix3x3Transpose(transformRoot.GetRotation());
   Vec4r tlocalAndPivot = rigidState.VGetTranslation();
   if (pivot) {
     tlocalAndPivot += ToSimd(pivot->position);
   }
-  VMatrix3x3r const& DpDtlocalT = Rroot_T.second;
+  VMatrix3x3r const& DpDtlocalT = RrootT;
 
   // Resize number of DoFs
   int ndofsOld = outContact.ndofs;
@@ -471,11 +454,11 @@ void mochi::rom::AddRigidContactJacobians(
     std::copy_backward(ddef_ddofs, ddef_ddofs + ndofsOld, ddef_ddofs + outContact.ndofs);
 
     // Compute rotated local contact point
-    Vec4r p = ToSimd(outContact.posColliding[s]);
-    Vec4r z = DotVecMat3x3(p - troot, Rroot_T.first) - tlocalAndPivot;
+    Vec4r const q = ToSimd(positionsInColliding[outContact.sampleIndices[s]]);
+    Vec4r z = DotVecMat3x3(q - rootInColliding, rootFromCollidingRotT) - tlocalAndPivot;
 
     // Compute rotation Jacobian
-    VMatrix3x3r DpDRlocalT = Dot3x3(lie::DMultRotVecDRot(-z), Rroot_T.second);
+    VMatrix3x3r DpDRlocalT = Dot3x3(lie::DMultRotVecDRot(-z), RrootT);
 
     // Add translation and rotation Jacobians. Transposed for convenience of the copy.
     std::copy(DpDtlocalT.data(), DpDtlocalT.data() + RigidSize::kDTrans, ddef_ddofs);
@@ -529,8 +512,8 @@ static void ResolveDisplacementAndJacobianOnActiveNodes(
 */
 
 static int CountActiveCollisionPoints(
-    CActiveCollisions<ContactType::Async, TimeStep::Current> const& activeCollisionsAsync,
-    CActiveCollisions<ContactType::Sync, TimeStep::Current> const& activeCollisionsSync) {
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current> const& activeCollisionsAsync,
+    CActiveCollisions</*kIsSync*/ true, TimeStep::Current> const& activeCollisionsSync) {
   int count = 0;
   for (auto const& collisions : activeCollisionsAsync) {
     count += isize(collisions.collisionResult.sampleIndices);
@@ -549,30 +532,6 @@ static void MoveSampleMeshToCache(
   sampleMeshCache.activeVolumeElements = std::make_unique<CActiveVolumeElements>(std::move(ave));
   sampleMeshCache.activeBoundaryFaces = std::make_unique<CActiveBoundaryFaces>(std::move(abf));
   sampleMeshCache.activeNodes = std::make_unique<CActiveUniqueNodes>(std::move(an));
-}
-
-static void SoftMassUpdateRomFomSwitching(
-    CActorSnle const& actorSnle,
-    CSoftMaterialParams const& material,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
-    CLocal2GlobalMap const& l2g,
-    CNodalBasedStructure const& nbs,
-    CFullSparsityPattern const& sparsity,
-    CMassMatrix& massMatrix,
-    CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4>& perElemMass,
-    CLumpedMassMatrix& lumpedMass,
-    CActiveVolumeElements* ave = nullptr) {
-  soft::UpdateSoftMass(
-      actorSnle,
-      l2g,
-      nbs,
-      material,
-      femHighVolDisc,
-      sparsity,
-      massMatrix,
-      perElemMass,
-      lumpedMass,
-      ave);
 }
 
 /// @brief Update components to switch from ROM to FOM.
@@ -598,8 +557,8 @@ static void RomToFomImpl(entt::registry& reg, entt::entity e) {
     // Second, remove sample mesh components.
     reg.remove<CActiveVolumeElements, CActiveBoundaryFaces, CActiveUniqueNodes>(e);
 
-    // Finally, update the mass matrix after the sample mesh has been removed.
-    mochi::ecs::InvokeOnEntity(&SoftMassUpdateRomFomSwitching, reg, e);
+    // Finally, update the soft mass after the sample mesh has been removed.
+    mochi::ecs::InvokeOnEntity(&soft::UpdateSoftMass, reg, e);
   }
 }
 
@@ -624,8 +583,8 @@ static void FomToRomImpl(entt::registry& reg, entt::entity e) {
     reg.emplace<CActiveBoundaryFaces>(e, std::move(*sampleMeshToRestore->activeBoundaryFaces));
     reg.emplace<CActiveUniqueNodes>(e, std::move(*sampleMeshToRestore->activeNodes));
 
-    // Then, update the mass matrix after the sample mesh has been emplaced.
-    mochi::ecs::InvokeOnEntity(&SoftMassUpdateRomFomSwitching, reg, e);
+    // Then, update the soft mass after the sample mesh has been emplaced.
+    mochi::ecs::InvokeOnEntity(&soft::UpdateSoftMass, reg, e);
   }
 }
 
@@ -651,14 +610,14 @@ static bool ShouldSwitchModel(
     SwitchDirection const& direction) {
   MOCHI_ASSERT_VERBOSE(
       (reg.all_of<
-          CActiveCollisions<ContactType::Async, TimeStep::Current>,
-          CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e)),
+          CActiveCollisions</*kIsSync*/ false, TimeStep::Current>,
+          CActiveCollisions</*kIsSync*/ true, TimeStep::Current>>(e)),
       "Missing required components.");
 
   auto const& activeCollisionsAsync =
-      reg.get<CActiveCollisions<ContactType::Async, TimeStep::Current> const>(e);
+      reg.get<CActiveCollisions</*kIsSync*/ false, TimeStep::Current> const>(e);
   auto const& activeCollisionsSync =
-      reg.get<CActiveCollisions<ContactType::Sync, TimeStep::Current> const>(e);
+      reg.get<CActiveCollisions</*kIsSync*/ true, TimeStep::Current> const>(e);
   int const count = CountActiveCollisionPoints(activeCollisionsAsync, activeCollisionsSync);
 
   switch (direction) {
@@ -686,6 +645,7 @@ void mochi::rom::RomFomSwitchingPipeline(
         params.params);
     if (shouldSwitch) {
       RomToFomImpl(reg, e);
+      sleep::WakeUp(reg, e);
     }
   } else {
     bool const shouldSwitch = std::visit(
@@ -695,6 +655,7 @@ void mochi::rom::RomFomSwitchingPipeline(
         params.params);
     if (shouldSwitch) {
       FomToRomImpl(reg, e);
+      sleep::WakeUp(reg, e);
     }
   }
 }
@@ -1157,7 +1118,6 @@ static void SelectActiveBasis(
     CRomCommonProperties& currentRomProps,
     CActorDofInfo& dofInfo,
     CRomJacobian& romJac,
-    CReducedSparsityPattern& reducedSpPattern,
     CActorSnle& actorSnle) {
   MOCHI_PROFILE_SCOPE();
 
@@ -1191,7 +1151,6 @@ static void SelectActiveBasis(
     currentAmpl.value.Resize(currentRomProps.value.baseDim);
     dofInfo.poseSize = reducedPoseDim;
     dofInfo.dofsSize = reducedDofsDim;
-    reducedSpPattern.graph = MakeDenseSparsityGraph(reducedDofsDim, reducedDofsDim);
     romJac.value = CRomJacobian::DenseT::Zero(outputDim, reducedDofsDim);
     actorSnle.reducedResidual.Reset(ColumnVector<real>::Zero(reducedDofsDim));
     MOCHI_ASSERT(
@@ -1361,7 +1320,7 @@ static void EntitySetIncrementWrapper(
       referenceVec, incrementVec, {}, isRigidTransformFixedInSolve, currAmplitudes, rigidTransform);
 }
 
-MOCHI_API void mochi::rom::UpdateCurrentRomVelocity(
+void mochi::rom::UpdateCurrentRomVelocity(
     ecs::Included<TagSoftActor, TagRomActor>,
     ecs::OptionalTag<TagRomActorFixRigidTransformInSolve> isRigidTransformFixedInSolve,
     CRomCommonProperties const& /*props*/,
@@ -1496,8 +1455,8 @@ static void WarnIfUnderdetermined(
 }
 
 static void ClosestDistanceBySamplePoint(
-    CActiveCollisions<ContactType::Async, TimeStep::Current> const& activeCollisionsAsync,
-    CActiveCollisions<ContactType::Sync, TimeStep::Current> const& activeCollisionsSync,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current> const& activeCollisionsAsync,
+    CActiveCollisions</*kIsSync*/ true, TimeStep::Current> const& activeCollisionsSync,
     int numSamples,
     DynamicArray<real>& outDistances) {
   MOCHI_PROFILE_SCOPE();
@@ -1532,8 +1491,8 @@ static void SwapActiveElementsBshStrategy(
     CDisplacementSlice<real, TimeStep::Current> const& displacements,
     CRootTransform const& transform,
     ecs::CtxGlobal<CSceneTime const> time,
-    CActiveCollisions<ContactType::Async, TimeStep::Current> const& activeCollisionsAsync,
-    CActiveCollisions<ContactType::Sync, TimeStep::Current> const& activeCollisionsSync,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current> const& activeCollisionsAsync,
+    CActiveCollisions</*kIsSync*/ true, TimeStep::Current> const& activeCollisionsSync,
     CRequiresFarSdfEvaluation const& farSdfEval,
     rom::hyper::CDynamicSampleMeshBshManager& manager) {
   MOCHI_PROFILE_SCOPE();

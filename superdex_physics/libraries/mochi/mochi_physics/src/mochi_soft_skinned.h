@@ -23,13 +23,15 @@
 
 #include <mochi_core/utils/variant_jacobian.h>
 
+#include <type_traits>
+
 namespace mochi {
 
 // Forwards
 struct CIslandMemberInfo;
 struct CRomProjectionStrategy;
 
-// Actor composition of a soft skinned actor
+// Composition linking a nested soft actor to its articulated parent.
 struct CSkinnedComposition : public NoCopy {
   entt::entity articulated;
   ActorHandle articulatedHandle;
@@ -55,6 +57,12 @@ struct CSoftSkinnedJacobianDynamic : public VariantJacobian {
       : VariantJacobian(isBlockDiag, numRows, numCols) {}
 };
 
+// Jacobians of the skinned mesh wrt bone parameters and wrt articulated DoFs.
+struct CSoftSkinnedJacobianArticulated : public NoCopy {
+  SparseMatrix<real> dBones;
+  RowMatrix<real> dJoints;
+};
+
 // Reusable memory used during skinned::EntityAssembleBody
 struct CSoftSkinnedAssemblyScratchMemory {
   RowMatrix<real> A_Jsoft; // Only needed for ROMs. Will be resized on the fly.
@@ -69,7 +77,7 @@ struct CSoftAttachmentLinks {
 };
 
 /*
-Systems for a soft skinned body
+Nested soft actor systems
 */
 namespace skinned {
 
@@ -86,15 +94,14 @@ void EntityAssembleBody(
     CSkinnedEnergy const& skinnedEnergy,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CSoftMaterialParams const& materialParams,
-    CMassMatrix const& massMatrix,
+    CMassMatrix const* massMatrix,
     CDofOffset const& dofOffset,
     CActiveVolumeElements const* activeVolElems,
     CSkinnedComposition const& composition,
     CTimeIntegratorState const& intState,
-    CArticulatedSkinningData const& skinningData,
+    CSoftSkinnedJacobianArticulated const& jacobianArticulated,
     CSoftSkinnedJacobianDynamic const& jacobianSoft,
     CDisplacementSlice<real, TimeStep::Current, DisplacementLayer::Skinned> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart, DisplacementLayer::Skinned> const&
@@ -104,9 +111,9 @@ void EntityAssembleBody(
     CSoftSkinnedAssemblyScratchMemory& scratchMemory,
     CActorSnle& outSoftSnle,
     CSoftSkinnedUnposedSnle& outSoftSkinnedSnle,
+    CArticulatedSkinnedBodyLinkResidual& outLinkResidual,
     CSkinnedInteractionSnle& outInteractionSnle);
 
-// Method to initialize a soft skinned actor.
 void InitSkinnedActor(
     entt::registry& reg,
     entt::entity e,
@@ -116,15 +123,27 @@ void InitSkinnedActor(
     Error& error);
 
 void EntityIncrementStep(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currVel,
     CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned>& prevVel);
+
+/*
+ * Reconstructs the begin-of-step @ref TimeStep::Previous state from the integration history if
+ * history is present and the integration method allows, otherwise it estimates the state from
+ * constant velocity.
+ */
+void EntityReconstructPreviousStep(
+    ecs::RequiredTag<TagNestedSoftActor>,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned> const& currVel,
+    CIntegrationVelocitySlices<DisplacementLayer::Skinned> const& intVels,
+    CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned>& outPrevVel);
 
 /*
  * Executed before the first time integration stage of the time step.
  */
 void EntityPreFirstStage(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CTimeIntegratorState const& intState,
     CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned> const& prevVel,
     CIntegrationVelocitySlices<DisplacementLayer::Skinned>& intVels);
@@ -139,9 +158,11 @@ void PreStagePipeline(entt::registry& reg, Span<entt::entity const> entities);
  * articulated::compound::PostStagePipeline.
  */
 void EntityPostStage(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CConvergenceStatus const& convergence,
     CTimeIntegratorState const& intState,
+    CDisplacementSlice<real, TimeStep::StageStart, DisplacementLayer::Skinned> const&
+        stageStartDispl,
     CDisplacementSlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currDispl,
     CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currVel,
     CIntegrationVelocitySlices<DisplacementLayer::Skinned>& intVels);
@@ -153,32 +174,50 @@ void EntityPostStage(
 void PostLastStagePipeline(entt::registry& reg, Span<entt::entity const> entities);
 
 /*
+ * Pipeline to resolve current skinning displacements for all nodes, including inactive nodes when
+ * subsampling is enabled.
+ */
+void ResolveAllNodeSkinningDisplacementsPipeline(
+    entt::registry& reg,
+    Span<entt::entity const> entities);
+
+/*
+ * Synchronize a nested soft actor's current skinned displacement and velocity after an external
+ * displacement and velocity change. If it belongs to a blended actor, republishes the parent's
+ * final displacement.
+ */
+void SynchronizeAfterExternalChange(entt::registry& reg, entt::entity e);
+
+// Compute world-space skinning velocity for nested soft actors. The template argument indicates if
+// the system must run on state or non-state velocities.
+template <bool kIsState>
+void UpdateSkinningVelocity(
+    std::conditional_t<
+        kIsState,
+        ecs::Included<CIntegrationVelocitySlices<DisplacementLayer::Skinned>>,
+        ecs::Excluded<CIntegrationVelocitySlices<DisplacementLayer::Skinned>>>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::PartialRegistry<
+        CArticulatedLinkTransforms<TimeStep::Current> const,
+        CArticulatedLinkVels const> reg,
+    CSkinnedComposition const& composition,
+    CVelocitySlice<real, TimeStep::Current> const& softVelocity,
+    CArticulatedSkinningData const& skinningData,
+    CNodePositions const& positions,
+    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& outVelocity);
+
+/*
  * Pipeline to update quantities that are a function of the state (aka derived state) of the
- * soft skinned actor and make them consistent with the state. Must be called after
+ * nested soft actor and make them consistent with the state. Must be called after
  * articulated::compound::UpdateDerivedStatePipeline()
  */
 void UpdateDerivedStatePipeline(entt::registry& reg, Span<entt::entity const> entities);
 
 /*
- * Pipeline to update Jacobians for contact and assembly. Must be called after
+ * Pipeline to update Jacobians for assembly. Must be called after
  * articulated::compound::UpdateJacobiansPipeline()
  */
 void UpdateJacobiansPipeline(entt::registry& reg, Span<entt::entity const> entities);
-
-/*
- * System to compute contact Jacobians as colliding actor. It is called after the collision
- * detection pipeline, within each nonlinear solver iteration.
- */
-void SetupCollidingJacobians(
-    ecs::Included<TagSoftSkinnedActor>,
-    ecs::PartialRegistry<CDofOffset const, CArticulatedLinkTransforms<TimeStep::Current> const> reg,
-    CSkinnedComposition const& composition,
-    CDofOffset const& dofOffset,
-    CContactPartitions const& contactPartitions,
-    CFemBoundaryDiscretization const& discretization,
-    CArticulatedSkinningData const& skinningInfo,
-    rom::CRomJacobian const* romJacobian,
-    CCollJacs<CollRole::Colliding>& outJacobians);
 
 // Call once on startup
 void InitializeOnce(entt::registry& reg);

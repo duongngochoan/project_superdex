@@ -18,20 +18,38 @@
 #include <mochi_core/test/decomposition_utils_test_helpers.h>
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/decomposition_utils.h>
+#include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/matrix_utils.h>
+#include <mochi_core/utils/quaternion_utils.h>
 #include <mochi_core/utils/rand_utils.h>
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <limits>
+#include <optional>
 
 using namespace mochi;
 using namespace mochi::test;
 
 static constexpr auto kScalings =
     kPI * NdArray<real, 9>{1e-12_r, 1e-9_r, 1e-6_r, 1e-3_r, 1e0_r, 1e3_r, 1e6_r, 1e9_r, 1e12_r};
+// kScalings, and a scaling near overflow, at which the entries of some test matrices sum past the
+// largest finite number.
+static constexpr auto kEigenScalings = [] {
+  NdArray<real, 10> scalings{};
+  for (size_t i = 0; i < 9; ++i) {
+    scalings[i] = kScalings[i];
+  }
+  scalings[9] = std::numeric_limits<real>::max() / 16_r;
+  return scalings;
+}();
 static real const eigenRelTol = 10_r * Sqrt(std::numeric_limits<real>::epsilon());
+// The eigendecompositions with eigenvectors are backward stable. Without, the 3x3 closed form
+// resolves the two closest eigenvalues of a clustered spectrum only to O(√ε‖A‖).
+static constexpr real kStableEigenRelTol = 16_r * std::numeric_limits<real>::epsilon();
+static real const clusteredValsOnlyRelTol = 2_r * Sqrt(std::numeric_limits<real>::epsilon());
+static constexpr real kUlpTol = 4_r * std::numeric_limits<real>::epsilon();
 static real const svdRelTol = 50_r * Sqrt(std::numeric_limits<real>::epsilon());
 static constexpr real kPsdRelTol = 2e2_r * std::numeric_limits<real>::epsilon();
 static constexpr real kPsdAbsTol = kPsdRelTol;
@@ -158,14 +176,18 @@ static constexpr real kCholeskyRelTol = 1e2_r * std::numeric_limits<real>::epsil
         Real3{ 1_r,    1_r,    1_r},
         Real3{ 0_r,    0_r,    0_r},
         Real3{-2.5_r, -2.5_r, -2.5_r}},
+    // Inverted and nearly rank-1 (σ ≈ 1, 1e-4, -1e-5): the values-only σ₂ can round to -0.0.
+    Matrix3x3r{
+        Real3{0.116823693_r,  0.540012926_r, 0.640019728_r},
+        Real3{0.0671524922_r, 0.310257392_r, 0.367557496_r},
+        Real3{0.0306674764_r, 0.141722573_r, 0.167986967_r}},
     // Rank-0 cases
     Matrix3x3r{
         Real3{0_r, 0_r, 0_r},
         Real3{0_r, 0_r, 0_r},
         Real3{0_r, 0_r, 0_r}},
-    // Large entries → validates that the fused-SVD path's internal normalization remains
-    // accurate for large inputs. Excluded from split-SVD tests since those paths do not
-    // normalize G = FᵀF and lose accuracy in single precision.
+    // Large entries → validates that the SVDs' internal normalization remains accurate for large
+    // inputs.
     Matrix3x3r{
         Real3{1e5_r, 2e4_r, 3e4_r},
         Real3{4e4_r, 5e5_r, 6e4_r},
@@ -177,12 +199,14 @@ static constexpr Matrix2x2r kTestMatricesSym2x2[] = {
   Matrix2x2r{Real2{1.0_r, 3.0_r}, Real2{3.0_r, 2.0_r}},
   // Rank incomplete.
   Matrix2x2r{Real2{1.0_r, 2.0_r}, Real2{2.0_r, 4.0_r}},
-  // Diagonal (a < b → sort triggers swap).
+  // Diagonal, increasing → the eigenvalues reverse its order.
   Matrix2x2r{Real2{1.0_r, 0.0_r}, Real2{0.0_r, 2.0_r}},
-  // Diagonal (a > b → sort does not swap).
+  // Diagonal, decreasing.
   Matrix2x2r{Real2{2.0_r, 0.0_r}, Real2{0.0_r, 1.0_r}},
-  // Diagonal (a == b → degenerate eigenvalues, sort is a no-op).
+  // Identity.
   Matrix2x2r{Real2{1.0_r, 0.0_r}, Real2{0.0_r, 1.0_r}},
+  // Rank 1, with entries that sum past the largest finite number at the near-overflow scaling.
+  Matrix2x2r{Real2{6.0_r, 6.0_r}, Real2{6.0_r, 6.0_r}},
 };
 
 static constexpr Matrix3x3r kTestMatricesSym3x3[] = {
@@ -192,11 +216,11 @@ static constexpr Matrix3x3r kTestMatricesSym3x3[] = {
   Matrix3x3r{Real3{1.0_r, 2.0_r, 3.0_r}, Real3{2.0_r, 4.0_r, 6.0_r}, Real3{3.0_r, 6.0_r, 9.0_r}},
   // Tri-diagonal.
   Matrix3x3r{Real3{1.0_r, 4.0_r, 0.0_r}, Real3{4.0_r, 2.0_r, 6.0_r}, Real3{0.0_r, 6.0_r, 3.0_r}},
-  // Diagonal (a < b < c → sort triggers all swaps).
+  // Diagonal, increasing → the eigenvalues reverse its order.
   Matrix3x3r{Real3{1.0_r, 0.0_r, 0.0_r}, Real3{0.0_r, 2.0_r, 0.0_r}, Real3{0.0_r, 0.0_r, 3.0_r}},
-  // Diagonal (non-monotonic → sort triggers a partial swap: swaps 2 & 3, not 1).
+  // Diagonal, non-monotonic.
   Matrix3x3r{Real3{2.0_r, 0.0_r, 0.0_r}, Real3{0.0_r, 1.0_r, 0.0_r}, Real3{0.0_r, 0.0_r, 3.0_r}},
-  // Edge case with x2 = 0.
+  // Evenly spaced eigenvalues (cos 3θ = 0).
   Matrix3x3r{Real3{0_r,                  0.3333333333333333_r, 0_r},
              Real3{0.3333333333333333_r, 0_r,                  0_r},
              Real3{0_r,                  0_r,                  1_r}},
@@ -214,29 +238,29 @@ static constexpr Matrix3x3r kTestMatricesSym3x3[] = {
 
 // Adversarial symmetric matrices targeting distinct eigenvalue codepaths for mixed-lane batched tests.
 static constexpr Matrix3x3r kMixedLaneMatsSym3x3[] = {
-  // Diagonal (non-monotonic) → sort within diagonal override.
+  // Diagonal, non-monotonic.
   Matrix3x3r{Real3{1_r, 0_r, 0_r}, Real3{0_r, 3_r, 0_r}, Real3{0_r, 0_r, 2_r}},
-  // Large entries → overflow fallback.
+  // Large entries → normalization.
   Matrix3x3r{
     Real3{1e5_r, 1e4_r, 1e4_r},
     Real3{1e4_r, 2e5_r, 1e4_r},
     Real3{1e4_r, 1e4_r, 3e5_r}},
-  // x₂ = 0 exactly → x2NearZero fallback.
+  // Evenly spaced eigenvalues (cos 3θ = 0).
   Matrix3x3r{
     Real3{0_r,                  0.3333333333333333_r, 0_r},
     Real3{0.3333333333333333_r, 0_r,                  0_r},
     Real3{0_r,                  0_r,                  1_r}},
-  // Cluster at bottom (eigenvalues ≈ 2, 1, 1 after sort) → no flip.
+  // Pair at the bottom (eigenvalues ≈ 2, 1, 1) → the separated eigenvalue is the largest.
   Matrix3x3r{
     Real3{1.0001_r, 1e-4_r,   0_r},
     Real3{1e-4_r,   0.9999_r, 0_r},
     Real3{0_r,      0_r,      2_r}},
-  // Cluster at top (eigenvalues ≈ 2.01, 1.99, 1) → flip.
+  // Pair at the top (eigenvalues ≈ 2.01, 1.99, 1) → the separated eigenvalue is the smallest.
   Matrix3x3r{
     Real3{2_r,    0.01_r, 0_r},
     Real3{0.01_r, 2_r,    0_r},
     Real3{0_r,    0_r,    1_r}},
-  // x₂ < 0 → psi sign correction.
+  // Isolated largest eigenvalue (det(A - qI) > 0).
   Matrix3x3r{
     Real3{4_r,   0.1_r, 0.1_r},
     Real3{0.1_r, 1_r,   0.1_r},
@@ -245,13 +269,13 @@ static constexpr Matrix3x3r kMixedLaneMatsSym3x3[] = {
 
 // Adversarial matrices targeting distinct SVD codepaths for mixed-lane batched tests.
 static constexpr Matrix3x3r kMixedLaneMats3x3[] = {
-  // Rank-0 → u0zero + u1zero, diagonal mask.
+  // Rank-0 → u0zero + u1zero.
   Matrix3x3r{Real3{0_r, 0_r, 0_r}, Real3{0_r, 0_r, 0_r}, Real3{0_r, 0_r, 0_r}},
   // Rank-1 → u1zero fallback.
   Matrix3x3r{Real3{1_r, 0_r, 0_r}, Real3{3_r, 0_r, 0_r}, Real3{0_r, 0_r, 0_r}},
-  // Negative determinant → Sg[2] sign flip, diagonal G → diagonal mask.
+  // Negative determinant → Sg[2] sign flip, diagonal G.
   Matrix3x3r{Real3{-1_r, 0_r, 0_r}, Real3{0_r, 2_r, 0_r}, Real3{0_r, 0_r, 3_r}},
-  // Near-identity → clustered singular values, flip.
+  // Near-identity → clustered singular values.
   Matrix3x3r{
     Real3{1.0001_r, 1e-5_r,    0_r},
     Real3{0_r,      0.99999_r, 0_r},
@@ -292,12 +316,6 @@ static constexpr NdArray<real, 4> kTestMetrics2x2[] = {
 // clang-format on
 
 static constexpr int kNumMats3x3 = isize(kTestMatrices3x3);
-// Excludes the large-entry matrix at the end of kTestMatrices3x3. Use for non-normalizing SVD paths
-// (split vals/vecs).
-static constexpr int kNumMatsNormalized3x3 = kNumMats3x3 - 1;
-static_assert(
-    NormSqr(kTestMatrices3x3[kNumMatsNormalized3x3]) > 1e10_r,
-    "Large-entry matrix must remain last. Please update kNumMatsNormalized3x3.");
 static constexpr int kNumMatsSym3x3 = isize(kTestMatricesSym3x3);
 static constexpr int kNumMixedLaneMatsSym3x3 = isize(kMixedLaneMatsSym3x3);
 static constexpr int kNumMixedLaneMats3x3 = isize(kMixedLaneMats3x3);
@@ -313,28 +331,110 @@ static_assert(kNumMixedLaneMatsPsd2x2 <= kBatchTestMaxSize);
 static_assert(kNumMixedLaneMatsPsd3x3 <= kBatchTestMaxSize);
 static_assert(kNumTestMetrics2x2 <= kBatchTestMaxSize);
 
+// The symmetric test matrices kTestMatricesSym2x2 and kTestMatricesSym3x3, and R·diag(λ)·Rᵀ for
+// random rotations R and clustered spectra λ: pairs, and in 3x3 triple clusters and pairs at either
+// end, of either sign, with gaps from 1e-1 down to 0. In 3x3, also diag(0, tiny, 1), whose Jacobi
+// rotation in the batched solver, which has no diagonal fast path, squares a subnormal
+// half-difference.
+template <size_t N>
+struct SymTestMatrix {
+  NdArray<real, N, N> mat;
+  std::optional<NdArray<real, N>> clusteredEigvals; // In descending order.
+};
+
+static DynamicArray<SymTestMatrix<2>> MakeSymTestMatrices2x2() {
+  DynamicArray<SymTestMatrix<2>> tests;
+  for (auto const& mat : kTestMatricesSym2x2) {
+    tests.push_back({mat, std::nullopt});
+  }
+  auto rng = RandomGenerator(42);
+  for (int k = 1; k <= 16; ++k) {
+    real const gap = k < 16 ? Pow(10_r, -StaticCast<real>(k)) : 0_r;
+    for (Real2 const& eigvals : {Real2{1_r + gap, 1_r}, Real2{-1_r, -1_r - gap}}) {
+      real const angle = RandomUniformValue(rng, -kPI, kPI);
+      Matrix2x2r const R{Real2{Cos(angle), -Sin(angle)}, Real2{Sin(angle), Cos(angle)}};
+      Matrix2x2r mat = Dot(R, Dot(DiagonalMatrix(eigvals), Transpose(R)));
+      mat[1][0] = mat[0][1];
+      tests.push_back({mat, eigvals});
+    }
+  }
+  return tests;
+}
+
+static DynamicArray<SymTestMatrix<3>> MakeSymTestMatrices3x3() {
+  DynamicArray<SymTestMatrix<3>> tests;
+  for (auto const& mat : kTestMatricesSym3x3) {
+    tests.push_back({mat, std::nullopt});
+  }
+  auto rng = RandomGenerator(42);
+  for (int k = 1; k <= 16; ++k) {
+    real const gap = k < 16 ? Pow(10_r, -StaticCast<real>(k)) : 0_r;
+    for (Real3 const& eigvals :
+         {Real3{1_r + gap, 1_r + 0.5_r * gap, 1_r - gap},
+          Real3{-1_r + gap, -1_r - 0.5_r * gap, -1_r - gap},
+          Real3{1_r + gap, 1_r, -1_r},
+          Real3{1_r, -1_r + gap, -1_r},
+          Real3{2_r, gap, 0_r}}) {
+      Real3 axis;
+      SetRandom(rng, -1_r, 1_r, axis);
+      Matrix3x3r const R =
+          ToMatrix3x3(Quaternion::FromAxisAngle(axis, RandomUniformValue(rng, -kPI, kPI)));
+      Matrix3x3r mat = Dot(R, Dot(DiagonalMatrix(eigvals), Transpose(R)));
+      mat[1][0] = mat[0][1];
+      mat[2][0] = mat[0][2];
+      mat[2][1] = mat[1][2];
+      tests.push_back({mat, eigvals});
+    }
+  }
+  real const tiny = Sqrt(std::numeric_limits<real>::denorm_min()) / 4_r;
+  tests.push_back({DiagonalMatrix(Real3{0_r, tiny, 1_r}), Real3{1_r, tiny, 0_r}});
+  return tests;
+}
+
+static DynamicArray<SymTestMatrix<2>> const symTestMatrices2x2 = MakeSymTestMatrices2x2();
+static DynamicArray<SymTestMatrix<3>> const symTestMatrices3x3 = MakeSymTestMatrices3x3();
+
 /**************************************************************************************************
   Verification Helpers
 */
 
-// Verify 2x2 eigendecomposition. Eigenvectors are stored as rows of QT (i.e., QT = Qᵀ).
-static void
-VerifyEigendecomp2x2(Matrix2x2r const& mat, Real2 const& eigvals, Matrix2x2r const& QT) {
-  EXPECT_GE(eigvals[0], eigvals[1]);
-  Matrix2x2r const reconstructed = Dot(Transpose(QT), Dot(DiagonalMatrix(eigvals), QT));
-  EXPECT_LE(Norm(reconstructed - mat), eigenRelTol * Norm(mat));
-  EXPECT_LE(Norm(Dot(QT, Transpose(QT)) - Eye<2>()), eigenRelTol);
+// Verify the eigendecomposition of test.mat * scaling, and its eigenvalues if known. Eigenvectors
+// are stored as rows of QT (i.e., QT = Qᵀ). The checks undo the scaling, since the norm of the
+// scaled matrix may overflow.
+template <size_t N>
+static void VerifyEigendecomp(
+    SymTestMatrix<N> const& test,
+    real scaling,
+    NdArray<real, N> const& eigvals,
+    NdArray<real, N, N> const& QT) {
+  for (size_t i = 1; i < N; ++i) {
+    EXPECT_GE(eigvals[i - 1], eigvals[i]);
+  }
+  NdArray<real, N> const unscaledEigvals = eigvals / scaling;
+  NdArray<real, N, N> const reconstructed =
+      Dot(Transpose(QT), Dot(DiagonalMatrix(unscaledEigvals), QT));
+  EXPECT_LE(Norm(reconstructed - test.mat), kStableEigenRelTol * Norm(test.mat));
+  EXPECT_LE(Norm(Dot(QT, Transpose(QT)) - Eye<N>()), kStableEigenRelTol);
+  EXPECT_NEAR(Det(QT), 1_r, kStableEigenRelTol);
+  if (test.clusteredEigvals) {
+    EXPECT_NEAR_TOL(unscaledEigvals, *test.clusteredEigvals, kStableEigenRelTol * Norm(test.mat));
+  }
 }
 
-// Verify 3x3 eigendecomposition. Eigenvectors are stored as rows of QT (i.e., QT = Qᵀ).
-static void
-VerifyEigendecomp3x3(Matrix3x3r const& mat, Real3 const& eigvals, Matrix3x3r const& QT) {
-  EXPECT_GE(eigvals[0], eigvals[1]);
-  EXPECT_GE(eigvals[1], eigvals[2]);
-  Matrix3x3r const reconstructed = Dot(Transpose(QT), Dot(DiagonalMatrix(eigvals), QT));
-  EXPECT_LE(Norm(reconstructed - mat), eigenRelTol * Norm(mat));
-  EXPECT_LE(Norm(Dot(QT, Transpose(QT)) - Eye<3>()), eigenRelTol);
-  EXPECT_NEAR(Det(QT), 1_r, eigenRelTol);
+// Verify the eigenvalues of test.mat * scaling computed without eigenvectors against those computed
+// with. The 2x2 ones agree to within a few ULP, as codegen (FMA fusion, register allocation) may
+// differ. The 3x3 eigenvector path refines them, so without a clustered spectrum, the 3x3 ones
+// agree to the eigensolver's accuracy. The tolerance has a floor for the zero matrix.
+template <size_t N>
+static void VerifyEigvalsOnly(
+    SymTestMatrix<N> const& test,
+    real scaling,
+    NdArray<real, N> const& valsOnly,
+    NdArray<real, N> const& eigvals) {
+  real const relTol = N == 2  ? kUlpTol
+      : test.clusteredEigvals ? clusteredValsOnlyRelTol
+                              : kStableEigenRelTol;
+  EXPECT_NEAR_TOL(valsOnly, eigvals, relTol * scaling * Max(1_r, Norm(test.mat)));
 }
 
 // Verify SVD result for a single matrix.
@@ -344,18 +444,20 @@ VerifySvd3x3(Matrix3x3r const& mat, Matrix3x3r const& U, Real3 const& sigma, Mat
   EXPECT_GE(Abs(sigma[1]), Abs(sigma[2]));
   EXPECT_GE(Det(U), 0.0_r);
   EXPECT_GE(Det(VT), 0.0_r);
+  // VT diagonalizes FᵀF into diag(σ²) to the eigensolver's accuracy.
+  Matrix3x3r const G = Dot(Transpose(mat), mat);
+  Matrix3x3r D = Dot(VT, Dot(G, Transpose(VT)));
+  for (int i = 0; i < 3; ++i) {
+    D[i][i] -= sigma[i] * sigma[i];
+  }
+  EXPECT_LE(Norm(D), kStableEigenRelTol * Norm(G));
   Matrix3x3r const reconstructed = Dot(U, Dot(DiagonalMatrix(sigma), VT));
   // NOTE: The absolute floor (svdRelTol) handles near-zero matrices at extreme scalings where the
   // relative term vanishes but reconstruction error remains O(eps × singular values).
   real const absTol = svdRelTol;
   EXPECT_LE(Norm(reconstructed - mat), svdRelTol * Norm(mat) + absTol);
-  // Orthogonality check: UᵀU ≈ I and VVᵀ ≈ I. For rank-deficient matrices (|σ₂| ≈ 0), the
-  // null-space columns of U/V are not uniquely determined, so orthogonality may not hold.
-  // TODO: Enable unconditionally once the SVD re-orthogonalizes U for rank-deficient matrices.
-  if (Abs(sigma[2]) > svdRelTol * Abs(sigma[0])) {
-    EXPECT_LE(Norm(Dot(Transpose(U), U) - Eye<3>()), svdRelTol);
-    EXPECT_LE(Norm(Dot(VT, Transpose(VT)) - Eye<3>()), svdRelTol);
-  }
+  EXPECT_LE(Norm(Dot(Transpose(U), U) - Eye<3>()), svdRelTol);
+  EXPECT_LE(Norm(Dot(VT, Transpose(VT)) - Eye<3>()), svdRelTol);
   real const matNorm = Norm(mat);
   if (matNorm > 0_r) {
     real const detF = Det(mat);
@@ -366,6 +468,13 @@ VerifySvd3x3(Matrix3x3r const& mat, Matrix3x3r const& U, Real3 const& sigma, Mat
       EXPECT_GE(sigma[2], 0.0_r);
     }
   }
+}
+
+// Verify values-only singular values against the SVD's sigma. Without singular vectors, their
+// squares, the eigenvalues of FᵀF, are accurate only to O(√ε‖F‖²).
+static void VerifySvdValsOnly(Matrix3x3r const& mat, Real3 const& valsOnly, Real3 const& sigma) {
+  EXPECT_NEAR_TOL(
+      valsOnly * Abs(valsOnly), sigma * Abs(sigma), clusteredValsOnlyRelTol * NormSqr(mat));
 }
 
 static void VerifyPsdWithMetric(
@@ -392,25 +501,28 @@ static void VerifyPsdWithMetric(
 */
 
 TEST(DecompositionUtils, AnalyticalEigendecompSym2x2_Scalar) {
-  for (real scaling : kScalings) {
-    for (auto const& mat0 : kTestMatricesSym2x2) {
-      auto const mat = mat0 * scaling;
-      Real2 eigvals;
+  for (real scaling : kEigenScalings) {
+    for (auto const& test : symTestMatrices2x2) {
+      Real2 eigvals, valsOnly;
       Matrix2x2r QT;
-      AnalyticalEigendecompSym(mat, eigvals, &QT, /*transpose*/ true);
-      VerifyEigendecomp2x2(mat, eigvals, QT);
+      AnalyticalEigendecompSym(test.mat * scaling, eigvals, &QT, /*transpose*/ true);
+      AnalyticalEigendecompSym(test.mat * scaling, valsOnly);
+      VerifyEigendecomp(test, scaling, eigvals, QT);
+      VerifyEigvalsOnly(test, scaling, valsOnly, eigvals);
     }
   }
 }
 
 TEST(DecompositionUtils, AnalyticalEigendecompSym2x2_SIMD) {
-  for (real scaling : kScalings) {
-    for (auto const& mat0 : kTestMatricesSym2x2) {
-      auto const mat = mat0 * scaling;
-      Vec4r vEigvals;
+  for (real scaling : kEigenScalings) {
+    for (auto const& test : symTestMatrices2x2) {
+      auto const sym = ToSimdSymMatrix(test.mat * scaling);
+      Vec4r vEigvals, vValsOnly;
       VMatrix2x2r vEigvecs;
-      AnalyticalEigendecompSym2x2(ToSimdSymMatrix(mat), vEigvals, &vEigvecs);
-      VerifyEigendecomp2x2(mat, ToReal2(vEigvals), ToNdArray2x2(vEigvecs));
+      AnalyticalEigendecompSym2x2(sym, vEigvals, &vEigvecs);
+      AnalyticalEigendecompSym2x2(sym, vValsOnly);
+      VerifyEigendecomp(test, scaling, ToReal2(vEigvals), ToNdArray2x2(vEigvecs));
+      VerifyEigvalsOnly(test, scaling, ToReal2(vValsOnly), ToReal2(vEigvals));
     }
   }
 }
@@ -420,71 +532,28 @@ TEST(DecompositionUtils, AnalyticalEigendecompSym2x2_SIMD) {
 */
 
 TEST(DecompositionUtils, AnalyticalEigendecompSym3x3_Scalar) {
-  for (real scaling : kScalings) {
-    for (auto const& mat0 : kTestMatricesSym3x3) {
-      auto const mat = mat0 * scaling;
-      Real3 eigvals;
+  for (real scaling : kEigenScalings) {
+    for (auto const& test : symTestMatrices3x3) {
+      Real3 eigvals, valsOnly;
       Matrix3x3r QT;
-      AnalyticalEigendecompSym(mat, eigvals, &QT, /*transpose*/ true);
-      VerifyEigendecomp3x3(mat, eigvals, QT);
+      AnalyticalEigendecompSym(test.mat * scaling, eigvals, &QT, /*transpose*/ true);
+      AnalyticalEigendecompSym(test.mat * scaling, valsOnly);
+      VerifyEigendecomp(test, scaling, eigvals, QT);
+      VerifyEigvalsOnly(test, scaling, valsOnly, eigvals);
     }
   }
 }
 
 TEST(DecompositionUtils, AnalyticalEigendecompSym3x3_SIMD) {
-  for (real scaling : kScalings) {
-    for (auto const& mat0 : kTestMatricesSym3x3) {
-      auto const mat = mat0 * scaling;
-      Vec4r vEigvals;
+  for (real scaling : kEigenScalings) {
+    for (auto const& test : symTestMatrices3x3) {
+      auto const sym = ToSimdSymMatrix(test.mat * scaling);
+      Vec4r vEigvals, vValsOnly;
       VMatrix3x3r vEigvecs;
-      AnalyticalEigendecompSym3x3(ToSimdSymMatrix(mat), vEigvals, &vEigvecs);
-      VerifyEigendecomp3x3(mat, ToReal3(vEigvals), ToNdArray3x3(vEigvecs));
-    }
-  }
-}
-
-/**************************************************************************************************
-  Eigendecomposition: Eigenvalues-only (eigvecs == nullptr)
-*/
-
-TEST(DecompositionUtils, EigendecompSym_ValsOnly) {
-  // Eigenvalues are semantically identical with and without eigenvectors, but codegen (FMA
-  // fusion, register allocation) may differ, so the two paths agree only to within a few ULP.
-  // The error of a floating-point eigenvalue scales with the eigenvalue itself, so the tolerance
-  // is relative to Norm(mat), an upper bound on |lambda_max| for a symmetric matrix; `scaling`
-  // is the floor, for the zero matrix.
-  real constexpr kUlpTol = 4_r * std::numeric_limits<real>::epsilon();
-
-  for (real scaling : kScalings) {
-    for (auto const& mat0 : kTestMatricesSym2x2) {
-      auto const mat = mat0 * scaling;
-      real const tol = kUlpTol * Max(scaling, Norm(mat));
-      Real2 fullEigvals, valsOnly;
-      Matrix2x2r eigvecs;
-      AnalyticalEigendecompSym(mat, fullEigvals, &eigvecs);
-      AnalyticalEigendecompSym(mat, valsOnly);
-      EXPECT_NEAR_TOL(valsOnly, fullEigvals, tol);
-
-      Vec4r vFull, vOnly;
-      VMatrix2x2r vEigvecs;
-      AnalyticalEigendecompSym2x2(ToSimdSymMatrix(mat), vFull, &vEigvecs);
-      AnalyticalEigendecompSym2x2(ToSimdSymMatrix(mat), vOnly);
-      EXPECT_NEAR_TOL(ToReal2(vOnly), ToReal2(vFull), tol);
-    }
-    for (auto const& mat0 : kTestMatricesSym3x3) {
-      auto const mat = mat0 * scaling;
-      real const tol = kUlpTol * Max(scaling, Norm(mat));
-      Real3 fullEigvals, valsOnly;
-      Matrix3x3r eigvecs;
-      AnalyticalEigendecompSym(mat, fullEigvals, &eigvecs);
-      AnalyticalEigendecompSym(mat, valsOnly);
-      EXPECT_NEAR_TOL(valsOnly, fullEigvals, tol);
-
-      Vec4r vFull, vOnly;
-      VMatrix3x3r vEigvecs;
-      AnalyticalEigendecompSym3x3(ToSimdSymMatrix(mat), vFull, &vEigvecs);
-      AnalyticalEigendecompSym3x3(ToSimdSymMatrix(mat), vOnly);
-      EXPECT_NEAR_TOL(ToReal3(vOnly), ToReal3(vFull), tol);
+      AnalyticalEigendecompSym3x3(sym, vEigvals, &vEigvecs);
+      AnalyticalEigendecompSym3x3(sym, vValsOnly);
+      VerifyEigendecomp(test, scaling, ToReal3(vEigvals), ToNdArray3x3(vEigvecs));
+      VerifyEigvalsOnly(test, scaling, ToReal3(vValsOnly), ToReal3(vEigvals));
     }
   }
 }
@@ -494,7 +563,6 @@ TEST(DecompositionUtils, EigendecompSym_ValsOnly) {
 */
 
 TEST(DecompositionUtils, EigendecompSym_TransposeFlag) {
-  real constexpr kUlpTol = 4_r * std::numeric_limits<real>::epsilon();
   for (real scaling : kScalings) {
     for (auto const& mat0 : kTestMatricesSym2x2) {
       auto const mat = mat0 * scaling;
@@ -524,65 +592,33 @@ TEST(DecompositionUtils, EigendecompSym_TransposeFlag) {
 }
 
 /**************************************************************************************************
-  SVD: Fused
+  SVD
 */
 
 TEST(DecompositionUtils, RotationVariantSvd3x3_Scalar) {
-  // TODO: Make RotationVariantSvd3x3 robust to arbitrary scales and enable kScalings loop.
+  // TODO: Consider a scale-relative rank threshold in the scalar SVD, then enable the kScalings
+  // loop.
   for (auto const& mat : kTestMatrices3x3) {
-    Real3 sigma;
+    Real3 sigma, valsOnly;
     Matrix3x3r U, VT;
     RotationVariantSvd(mat, U, sigma, VT);
+    RotationVariantSvdVals(mat, valsOnly);
     VerifySvd3x3(mat, U, sigma, VT);
+    VerifySvdValsOnly(mat, valsOnly, sigma);
   }
 }
 
 TEST(DecompositionUtils, RotationVariantSvd3x3_SIMD) {
-  // TODO: Make RotationVariantSvd3x3 robust to arbitrary scales and enable kScalings loop.
+  // TODO: Consider Gram-Schmidt on U's rows and a scale-relative rank threshold in the SVDs, then
+  // enable the kScalings loop.
   for (auto const& mat : kTestMatrices3x3) {
-    Vec4r sigma;
-    VMatrix3x3r U, VT;
-    RotationVariantSvd3x3(ToSimdMatrix(mat), U, sigma, VT);
-    VerifySvd3x3(mat, ToNdArray3x3(U), ToReal3(sigma), ToNdArray3x3(VT));
-  }
-}
-
-/**************************************************************************************************
-  SVD: Split Vals/Vecs
-*/
-
-TEST(DecompositionUtils, RotationVariantSvd3x3_SplitValsVecs_Scalar) {
-  // TODO: Make RotationVariantSvd3x3 robust to arbitrary scales and enable kScalings loop.
-  // NOTE: Uses kNumMatsNormalized3x3. The split path does not normalize G, so the large-entry
-  // matrix produces inaccurate results.
-  for (int m = 0; m < kNumMatsNormalized3x3; ++m) {
-    auto const& mat = kTestMatrices3x3[m];
-    Real3 sigma;
-    Int3 order;
-    RotationVariantSvdVals(mat, sigma, order);
-
-    Matrix3x3r U, VT;
-    RotationVariantSvdVecs(mat, order, sigma, U, VT);
-
-    VerifySvd3x3(mat, U, sigma, VT);
-  }
-}
-
-TEST(DecompositionUtils, RotationVariantSvd3x3_SplitValsVecs_SIMD) {
-  // TODO: Make RotationVariantSvd3x3 robust to arbitrary scales and enable kScalings loop.
-  // NOTE: Uses kNumMatsNormalized3x3 — the split path does not normalize G, so the large-entry
-  // matrix produces inaccurate results in single precision.
-  for (int m = 0; m < kNumMatsNormalized3x3; ++m) {
-    auto const& mat = kTestMatrices3x3[m];
     VMatrix3x3r const F = ToSimdMatrix(mat);
-    Vec4r sigma;
-    Int3 order;
-    RotationVariantSvdVals3x3(F, sigma, order);
-
+    Vec4r sigma, valsOnly;
     VMatrix3x3r U, VT;
-    RotationVariantSvdVecs3x3(F, order, sigma, U, VT);
-
+    RotationVariantSvd3x3(F, U, sigma, VT);
+    RotationVariantSvdVals3x3(F, valsOnly);
     VerifySvd3x3(mat, ToNdArray3x3(U), ToReal3(sigma), ToNdArray3x3(VT));
+    VerifySvdValsOnly(mat, ToReal3(valsOnly), ToReal3(sigma));
   }
 }
 
@@ -591,9 +627,7 @@ TEST(DecompositionUtils, RotationVariantSvd3x3_SplitValsVecs_SIMD) {
 */
 
 TEST(DecompositionUtils, LeftPolarDecomposition3x3) {
-  real const relTol = 50_r * Sqrt(std::numeric_limits<real>::epsilon());
-  // TODO: Make LeftPolarDecomposition3x3 robust to arbitrary scales and enable kScalings loop.
-  for (auto const& mat : kTestMatrices3x3) {
+  auto const verify = [](Matrix3x3r const& mat, real relTol) {
     VMatrix3x3r A = ToSimdMatrix(mat);
     VMatrix3x3r U, P;
     LeftPolarDecomposition3x3(A, U, P);
@@ -609,6 +643,17 @@ TEST(DecompositionUtils, LeftPolarDecomposition3x3) {
     Vec4r eigsP;
     AnalyticalEigendecompSym3x3(SimdFullToSym(P), eigsP, /*Q*/ nullptr);
     EXPECT_GE(HMin<3>(eigsP), -relTol * Norm3x3(P)); // PSD to within tolerance.
+  };
+  // TODO: Consider Gram-Schmidt on U's rows and a scale-relative rank threshold in the SVDs, then
+  // enable the kScalings loop.
+  for (auto const& mat : kTestMatrices3x3) {
+    verify(mat, 50_r * Sqrt(std::numeric_limits<real>::epsilon()));
+  }
+  // Clustered singular values away from zero, where the SVD is backward stable.
+  for (auto const& test : symTestMatrices3x3) {
+    if (test.clusteredEigvals && Min(Abs(*test.clusteredEigvals)) > 0.5_r) {
+      verify(test.mat, kStableEigenRelTol);
+    }
   }
 }
 
@@ -684,6 +729,13 @@ TEST(DecompositionUtils, IsSpd) {
 }
 
 TEST(DecompositionUtils, ProjectSymPsd2x2) {
+  // A separated spectrum, and the clustered ones of symTestMatrices2x2.
+  DynamicArray<Real2> spectra = {Real2{1_r, -2_r}};
+  for (auto const& test : symTestMatrices2x2) {
+    if (test.clusteredEigvals) {
+      spectra.push_back(*test.clusteredEigvals);
+    }
+  }
   for (real scaling : kScalings) {
     for (auto const& mat : kTestMatricesSym2x2) {
       // Perform eigendecomposition to get an orthogonal matrix.
@@ -693,26 +745,26 @@ TEST(DecompositionUtils, ProjectSymPsd2x2) {
       Matrix2x2r QT;
       AnalyticalEigendecompSym(mat, sv, &QT, true);
 
-      // Create a symmetric matrix with known eigenvalues: A = Q * D * Q^T = Q^T^T * D * Q^T
-      Real2 const eigs = scaling * Real2{1_r, -2_r};
-      Matrix2x2r const input = Dot(Transpose(QT), Dot(DiagonalMatrix(eigs), QT));
-      real const inputNorm = Norm(input);
+      for (Real2 const& spectrum : spectra) {
+        // Create a symmetric matrix with known eigenvalues: A = Q * D * Q^T = Q^T^T * D * Q^T
+        Real2 const eigs = scaling * spectrum;
+        Matrix2x2r const input = Dot(Transpose(QT), Dot(DiagonalMatrix(eigs), QT));
+        real const tol = kStableEigenRelTol * Norm(input);
 
-      // Compute expected result: same eigenvectors, eigenvalues clamped to eps.
-      real const eps = scaling * kPsdRelTol;
-      Real2 const clampedEigs{Max(eigs[0], eps), Max(eigs[1], eps)};
-      Matrix2x2r const expected = Dot(Transpose(QT), Dot(DiagonalMatrix(clampedEigs), QT));
+        // Compute expected result: same eigenvectors, eigenvalues clamped to eps.
+        real const eps = scaling * kPsdRelTol;
+        Real2 const clampedEigs{Max(eigs[0], eps), Max(eigs[1], eps)};
+        Matrix2x2r const expected = Dot(Transpose(QT), Dot(DiagonalMatrix(clampedEigs), QT));
 
-      // Check the projection matches the expected value.
-      VMatrix2x2r computed = ToSimdMatrix(input);
-      ProjectSymPsd(computed, eps);
-      EXPECT_NEAR_TOL(ToNdArray2x2(computed), expected, kPsdRelTol * inputNorm);
+        // Check the projection matches the expected value.
+        VMatrix2x2r computed = ToSimdMatrix(input);
+        ProjectSymPsd(computed, eps);
+        EXPECT_NEAR_TOL(ToNdArray2x2(computed), expected, tol);
 
-      // Check the projection is idempotent.
-      VMatrix2x2r const beforeSecondProjection = computed;
-      ProjectSymPsd(computed, eps);
-      EXPECT_NEAR_TOL(
-          ToNdArray2x2(computed), ToNdArray2x2(beforeSecondProjection), kPsdRelTol * inputNorm);
+        // Check the projection is idempotent.
+        ProjectSymPsd(computed, eps);
+        EXPECT_NEAR_TOL(ToNdArray2x2(computed), expected, tol);
+      }
     }
   }
 
@@ -726,6 +778,14 @@ TEST(DecompositionUtils, ProjectSymPsd2x2) {
 }
 
 TEST(DecompositionUtils, ProjectSymPsd3x3) {
+  // A separated spectrum, and the clustered ones of symTestMatrices3x3 away from zero: the SPD fast
+  // path leaves an eigenvalue in (0, eps) unclamped.
+  DynamicArray<Real3> spectra = {Real3{1_r, -2_r, 3_r}};
+  for (auto const& test : symTestMatrices3x3) {
+    if (test.clusteredEigvals && Min(Abs(*test.clusteredEigvals)) > 0.5_r) {
+      spectra.push_back(*test.clusteredEigvals);
+    }
+  }
   for (real scaling : kScalings) {
     for (auto const& mat : kTestMatricesSym3x3) {
       // Use the SVD to create an orthogonal matrix.
@@ -733,21 +793,23 @@ TEST(DecompositionUtils, ProjectSymPsd3x3) {
       VMatrix3x3r U, VT;
       RotationVariantSvd3x3(ToSimdMatrix(mat), U, sv, VT);
 
-      // Create a symmetric matrix with known eigenvalues.
-      Vec4r const eigs = scaling * Vec4r{1_r, -2_r, 3_r};
-      VMatrix3x3r computed = Dot3x3(U, Dot3x3(VDiagonalMatrix<3>(eigs), Transpose3x3(U)));
+      for (Real3 const& spectrum : spectra) {
+        // Create a symmetric matrix with known eigenvalues.
+        Vec4r const eigs = scaling * ToSimd(spectrum);
+        VMatrix3x3r computed = Dot3x3(U, Dot3x3(VDiagonalMatrix<3>(eigs), Transpose3x3(U)));
+        real const tol = kStableEigenRelTol * Norm3x3(computed);
 
-      // Check the projection matches the expected value.
-      ProjectSymPsd(computed, scaling * kPsdRelTol);
-      VMatrix3x3r const expected =
-          Dot3x3(U, Dot3x3(VDiagonalMatrix<3>(Max(eigs, SimdZero<Vec4r>())), Transpose3x3(U)));
-      EXPECT_NEAR_TOL(
-          ToNdArray3x3(computed), ToNdArray3x3(expected), kPsdRelTol * Norm3x3(expected));
+        // Check the projection matches the expected value.
+        real const eps = scaling * kPsdRelTol;
+        ProjectSymPsd(computed, eps);
+        VMatrix3x3r const expected =
+            Dot3x3(U, Dot3x3(VDiagonalMatrix<3>(Max(eigs, Vec4r{eps})), Transpose3x3(U)));
+        EXPECT_NEAR_TOL(ToNdArray3x3(computed), ToNdArray3x3(expected), tol);
 
-      // Check the projection is idempotent.
-      ProjectSymPsd(computed, scaling * kPsdRelTol);
-      EXPECT_NEAR_TOL(
-          ToNdArray3x3(computed), ToNdArray3x3(expected), kPsdRelTol * Norm3x3(expected));
+        // Check the projection is idempotent.
+        ProjectSymPsd(computed, eps);
+        EXPECT_NEAR_TOL(ToNdArray3x3(computed), ToNdArray3x3(expected), tol);
+      }
     }
   }
 
@@ -929,58 +991,31 @@ TEST(DecompositionUtils, ProjectPsdWithMetric) {
 
 template <int kBatchSize>
 static void TestBatchedEigendecompSym3x3() {
-  for (real scaling : kScalings) {
-    std::array<Matrix3x3r, kBatchSize> mats{};
-    for (int i = 0; i < kBatchSize; ++i) {
-      mats[i] = kTestMatricesSym3x3[i % kNumMatsSym3x3] * scaling;
-    }
+  int const numTests = isize(symTestMatrices3x3);
+  for (real scaling : kEigenScalings) {
+    for (int first = 0; first < numTests; first += kBatchSize) {
+      std::array<Matrix3x3r, kBatchSize> mats{};
+      for (int i = 0; i < kBatchSize; ++i) {
+        mats[i] = symTestMatrices3x3[(first + i) % numTests].mat * scaling;
+      }
 
-    std::array<Real3, kBatchSize> eigvals{};
-    std::array<Matrix3x3r, kBatchSize> eigvecs{};
-    BatchedAnalyticalEigendecompSym3x3<kBatchSize>(
-        MakeConstSpan(mats), MakeSpan(eigvals), MakeSpan(eigvecs));
+      std::array<Real3, kBatchSize> eigvals{}, valsOnly{};
+      std::array<Matrix3x3r, kBatchSize> eigvecs{};
+      BatchedAnalyticalEigendecompSym3x3<kBatchSize>(
+          MakeConstSpan(mats), MakeSpan(eigvals), MakeSpan(eigvecs));
+      BatchedAnalyticalEigendecompSym3x3<kBatchSize>(
+          MakeConstSpan(mats), MakeSpan(valsOnly), Span<Matrix3x3r>{});
 
-    for (int i = 0; i < kBatchSize; ++i) {
-      VerifyEigendecomp3x3(mats[i], eigvals[i], eigvecs[i]);
-    }
-  }
-}
-
-MOCHI_BATCH_TEST(DecompositionUtils, BatchedEigendecompSym3x3, TestBatchedEigendecompSym3x3)
-
-template <int kBatchSize>
-static void TestBatchedEigendecompSym3x3ValsOnly() {
-  for (real scaling : kScalings) {
-    std::array<Matrix3x3r, kBatchSize> mats{};
-    for (int i = 0; i < kBatchSize; ++i) {
-      mats[i] = kTestMatricesSym3x3[i % kNumMatsSym3x3] * scaling;
-    }
-
-    // Compute with eigenvectors (reference).
-    std::array<Real3, kBatchSize> refEigvals{};
-    std::array<Matrix3x3r, kBatchSize> refEigvecs{};
-    BatchedAnalyticalEigendecompSym3x3<kBatchSize>(
-        MakeConstSpan(mats), MakeSpan(refEigvals), MakeSpan(refEigvecs));
-
-    // Compute vals-only (empty eigvecs span).
-    std::array<Real3, kBatchSize> eigvals{};
-    BatchedAnalyticalEigendecompSym3x3<kBatchSize>(
-        MakeConstSpan(mats), MakeSpan(eigvals), Span<Matrix3x3r>{});
-
-    // Vals-only must match the full version exactly (both code paths share the same eigenvalue
-    // computation).
-    for (int i = 0; i < kBatchSize; ++i) {
-      for (int j = 0; j < 3; ++j) {
-        EXPECT_EQ(eigvals[i][j], refEigvals[i][j]);
+      for (int i = 0; i < kBatchSize; ++i) {
+        auto const& test = symTestMatrices3x3[(first + i) % numTests];
+        VerifyEigendecomp(test, scaling, eigvals[i], eigvecs[i]);
+        VerifyEigvalsOnly(test, scaling, valsOnly[i], eigvals[i]);
       }
     }
   }
 }
 
-MOCHI_BATCH_TEST(
-    DecompositionUtils,
-    BatchedEigendecompSym3x3_ValsOnly,
-    TestBatchedEigendecompSym3x3ValsOnly)
+MOCHI_BATCH_TEST(DecompositionUtils, BatchedEigendecompSym3x3, TestBatchedEigendecompSym3x3)
 
 template <int kBatchSize>
 static void TestBatchedEigendecompSym3x3MixedLane() {
@@ -995,7 +1030,7 @@ static void TestBatchedEigendecompSym3x3MixedLane() {
       MakeConstSpan(mats), MakeSpan(eigvals), MakeSpan(eigvecs));
 
   for (int i = 0; i < kBatchSize; ++i) {
-    VerifyEigendecomp3x3(mats[i], eigvals[i], eigvecs[i]);
+    VerifyEigendecomp(SymTestMatrix<3>{mats[i], std::nullopt}, 1_r, eigvals[i], eigvecs[i]);
   }
 }
 
@@ -1010,7 +1045,8 @@ MOCHI_BATCH_TEST(
 
 template <int kBatchSize>
 static void TestBatchedSvd3x3() {
-  // TODO: Make BatchedRotationVariantSvd3x3 robust to arbitrary scales and enable kScalings loop.
+  // TODO: Consider Gram-Schmidt on U's rows and a scale-relative rank threshold in the SVDs, then
+  // enable the kScalings loop.
   for (int batch = 0; batch < kNumMats3x3; batch += kBatchSize) {
     std::array<Matrix3x3r, kBatchSize> mats{};
     for (int i = 0; i < kBatchSize; ++i) {
@@ -1021,44 +1057,17 @@ static void TestBatchedSvd3x3() {
     std::array<Real3, kBatchSize> sigma{};
     BatchedRotationVariantSvd3x3<kBatchSize>(
         MakeConstSpan(mats), MakeSpan(U), MakeSpan(sigma), MakeSpan(VT));
+    std::array<Real3, kBatchSize> valsOnly{};
+    BatchedRotationVariantSvdVals3x3<kBatchSize>(MakeConstSpan(mats), MakeSpan(valsOnly));
 
     for (int i = 0; i < kBatchSize; ++i) {
       VerifySvd3x3(mats[i], U[i], sigma[i], VT[i]);
+      VerifySvdValsOnly(mats[i], valsOnly[i], sigma[i]);
     }
   }
 }
 
 MOCHI_BATCH_TEST(DecompositionUtils, BatchedSvd3x3, TestBatchedSvd3x3)
-
-template <int kBatchSize>
-static void TestBatchedSvd3x3ValsVecs() {
-  // TODO: Make BatchedRotationVariantSvd3x3 robust to arbitrary scales and enable kScalings loop.
-  for (int batch = 0; batch < kNumMats3x3; batch += kBatchSize) {
-    std::array<Matrix3x3r, kBatchSize> mats{};
-    for (int i = 0; i < kBatchSize; ++i) {
-      mats[i] = kTestMatrices3x3[(batch + i) % kNumMats3x3];
-    }
-
-    std::array<Matrix3x3r, kBatchSize> U{}, VT{};
-    std::array<Real3, kBatchSize> sigma{};
-    BatchedRotationVariantSvdValsVecs3x3<kBatchSize>(
-        MakeConstSpan(mats), MakeSpan(U), MakeSpan(sigma), MakeSpan(VT));
-
-    for (int i = 0; i < kBatchSize; ++i) {
-      VerifySvd3x3(mats[i], U[i], sigma[i], VT[i]);
-    }
-
-    // Check the 2-argument overload of BatchedRotationVariantSvdVals3x3.
-    std::array<Real3, kBatchSize> sigmaValsOnly{};
-    BatchedRotationVariantSvdVals3x3<kBatchSize>(MakeConstSpan(mats), MakeSpan(sigmaValsOnly));
-
-    for (int i = 0; i < kBatchSize; ++i) {
-      EXPECT_NEAR_EQ(sigma[i], sigmaValsOnly[i]);
-    }
-  }
-}
-
-MOCHI_BATCH_TEST(DecompositionUtils, BatchedSvd3x3_ValsVecs, TestBatchedSvd3x3ValsVecs);
 
 template <int kBatchSize>
 static void TestBatchedSvd3x3MixedLane() {
@@ -1067,7 +1076,6 @@ static void TestBatchedSvd3x3MixedLane() {
     mats[i] = kMixedLaneMats3x3[i % kNumMixedLaneMats3x3];
   }
 
-  // Fused path.
   std::array<Matrix3x3r, kBatchSize> U{}, VT{};
   std::array<Real3, kBatchSize> sigma{};
   BatchedRotationVariantSvd3x3<kBatchSize>(
@@ -1075,23 +1083,6 @@ static void TestBatchedSvd3x3MixedLane() {
 
   for (int i = 0; i < kBatchSize; ++i) {
     VerifySvd3x3(mats[i], U[i], sigma[i], VT[i]);
-  }
-
-  // Split vals/vecs path.
-  std::array<Matrix3x3r, kBatchSize> USplit{}, VTSplit{};
-  std::array<Real3, kBatchSize> sigmaSplit{};
-  BatchedRotationVariantSvdValsVecs3x3<kBatchSize>(
-      MakeConstSpan(mats), MakeSpan(USplit), MakeSpan(sigmaSplit), MakeSpan(VTSplit));
-
-  for (int i = 0; i < kBatchSize; ++i) {
-    VerifySvd3x3(mats[i], USplit[i], sigmaSplit[i], VTSplit[i]);
-  }
-
-  // Cross-validate: fused and split paths must produce the same singular values.
-  for (int i = 0; i < kBatchSize; ++i) {
-    for (int k = 0; k < 3; ++k) {
-      EXPECT_NEAR(sigma[i][k], sigmaSplit[i][k], svdRelTol * Abs(sigma[i][k]) + svdRelTol);
-    }
   }
 }
 
@@ -1225,7 +1216,8 @@ TEST(DecompositionUtils, BatchedEigendecompSym3x3_CrossValidation) {
   }
 }
 
-// TODO: Make RotationVariantSvd3x3 robust to arbitrary scales and enable kScalings loop.
+// TODO: Consider Gram-Schmidt on U's rows and a scale-relative rank threshold in the SVDs, then
+// enable the kScalings loop.
 TEST(DecompositionUtils, BatchedSvd3x3_CrossValidation) {
   constexpr int kBatch = 4;
   for (int batch = 0; batch < kNumMats3x3; batch += kBatch) {
@@ -1391,65 +1383,5 @@ TEST(DecompositionUtils, BatchedProjectPsdWithMetric_CrossValidation) {
             Max(kPsdRelTol * Abs(scalarResult[i][k]), kPsdAbsTol));
       }
     }
-  }
-}
-
-/**************************************************************************************************
-  Overflow-Path Coverage
-
-  The overflow branch in ComputePsiSym3x3 (scalar) guards `x1 > 1e10 || |x2| > 1e10`. This condition
-  is only ever true when the detail function receives an unnormalized G = 𝐅ᵀ𝐅 with very large
-  entries — the public eigendecomp APIs normalize before calling detail, so the overflow path is
-  unreachable through them. It is reachable only through the scalar and SIMD split-SVD paths
-  (RotationVariantSvdVals, RotationVariantSvdVals3x3), which call the detail function directly on
-  raw G. The batched split path normalizes G first, so its detail function has no overflow branch.
-
-  These tests invoke the split paths on a large-entry F (entries ~O(1e5)) so that G = 𝐅ᵀ𝐅 has
-  entries ~O(1e10) and thus x₁ ~O(1e20) >> 1e10. The fused SVD (which normalizes G internally,
-  avoiding the overflow path) serves as the reference. Individual singular values from the
-  split path are cross-validated against this reference.
-*/
-
-// Relative tolerance for cross-validating overflow-path singular values against the fused SVD
-// reference.
-static constexpr real kOverflowSvdTol = MOCHI_USE_DOUBLE_PRECISION ? 1e-10_r : 5e-2_r;
-
-TEST(DecompositionUtils, SplitSvd_OverflowPath_Scalar) {
-  auto const& F = kTestMatrices3x3[kNumMats3x3 - 1];
-  EXPECT_GE(Norm(F), 1e5_r); // Confirm F has large entries.
-
-  // Split path (non-normalizing → triggers overflow guard in ComputePsiSym3x3).
-  Real3 sigma;
-  Int3 order;
-  RotationVariantSvdVals(F, sigma, order);
-  EXPECT_TRUE(IsFinite(sigma));
-
-  // Cross-validate against fused path (normalizes internally → avoids overflow).
-  Real3 refSigma;
-  Matrix3x3r U, VT;
-  RotationVariantSvd(F, U, refSigma, VT);
-  for (int j = 0; j < 3; ++j) {
-    EXPECT_NEAR(sigma[j], refSigma[j], kOverflowSvdTol * Abs(refSigma[j]));
-  }
-}
-
-TEST(DecompositionUtils, SplitSvd_OverflowPath_SIMD) {
-  auto const& F = kTestMatrices3x3[kNumMats3x3 - 1];
-  EXPECT_GE(Norm(F), 1e5_r); // Confirm F has large entries.
-
-  // Split path.
-  Vec4r sigma;
-  Int3 order;
-  RotationVariantSvdVals3x3(ToSimdMatrix(F), sigma, order);
-  Real3 const s = ToReal3(sigma);
-  EXPECT_TRUE(IsFinite(s));
-
-  // Cross-validate against fused path.
-  Vec4r refSigma;
-  VMatrix3x3r U, VT;
-  RotationVariantSvd3x3(ToSimdMatrix(F), U, refSigma, VT);
-  Real3 const ref = ToReal3(refSigma);
-  for (int j = 0; j < 3; ++j) {
-    EXPECT_NEAR(s[j], ref[j], kOverflowSvdTol * Abs(ref[j]));
   }
 }

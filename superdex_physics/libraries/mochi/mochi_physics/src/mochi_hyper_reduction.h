@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include "mochi_contact.h"
 #include "mochi_ecs.h"
 
 #include <mochi_physics/mochi_physics.h>

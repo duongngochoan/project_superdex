@@ -8,9 +8,11 @@
 using NXOpen;
 using NXOpen.BlockStyler;
 using CADRobotExporter.RobotDescription;
+using CADRobotExporter.UI.ViewModels;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Export = CADRobotExporter.Export;
 using Joint = CADRobotExporter.RobotDescription.Joint;
 
 namespace NXRobotExporter.CAD.NX
@@ -49,6 +51,7 @@ namespace NXRobotExporter.CAD.NX
         private const string DataKeyPureVisual = "PureVisual";
         private const string DataKeyPureInertial = "PureInertial";
         private const string DataKeyIsSite = "IsSite";
+        private const string DataKeyMeshingOverride = "MeshingOverride";
 
         private const string DataKeyLimitUpper = "LimitUpper";
         private const string DataKeyLimitLower = "LimitLower";
@@ -56,12 +59,11 @@ namespace NXRobotExporter.CAD.NX
         private const string DataKeyLimitVelocity = "LimitVelocity";
         private const string DataKeyDynamicsDamping = "DynamicsDamping";
         private const string DataKeyDynamicsFriction = "DynamicsFriction";
-        private const string DataKeyVisualMeshLinear = "VisualMeshLinear";
-        private const string DataKeyVisualMeshAngular = "VisualMeshAngular";
-        private const string DataKeyVisualMeshScale = "VisualMeshScale";
-        private const string DataKeyCollisionMeshLinear = "CollisionMeshLinear";
-        private const string DataKeyCollisionMeshAngular = "CollisionMeshAngular";
-        private const string DataKeyCollisionMeshScale = "CollisionMeshScale";
+
+        private static readonly MeshingOptionsData VisualMeshData =
+            new MeshingOptionsData("VisualMesh", linearDeflection: 0.1, angularDeflection: 0.5);
+        private static readonly MeshingOptionsData CollisionMeshData =
+            new MeshingOptionsData("CollisionMesh", linearDeflection: 0.5, angularDeflection: 0.75);
 
         private static readonly string[] JointTypes = { "revolute", "continuous", "prismatic", "fixed", "floating", "planar" };
 
@@ -96,6 +98,7 @@ namespace NXRobotExporter.CAD.NX
             data.AddInteger(DataKeyPureVisual, 0);
             data.AddInteger(DataKeyPureInertial, 0);
             data.AddInteger(DataKeyIsSite, 0);
+            data.AddInteger(DataKeyMeshingOverride, 0);
 
             data.AddDouble(DataKeyLimitUpper, double.NaN);
             data.AddDouble(DataKeyLimitLower, double.NaN);
@@ -104,12 +107,8 @@ namespace NXRobotExporter.CAD.NX
             data.AddDouble(DataKeyDynamicsDamping, double.NaN);
             data.AddDouble(DataKeyDynamicsFriction, double.NaN);
 
-            data.AddDouble(DataKeyVisualMeshLinear, 0.1);
-            data.AddDouble(DataKeyVisualMeshAngular, 0.5);
-            data.AddDouble(DataKeyVisualMeshScale, 1.0);
-            data.AddDouble(DataKeyCollisionMeshLinear, 0.5);
-            data.AddDouble(DataKeyCollisionMeshAngular, 0.75);
-            data.AddDouble(DataKeyCollisionMeshScale, 1.0);
+            VisualMeshData.Register(data);
+            CollisionMeshData.Register(data);
         }
 
         /// <summary>
@@ -257,40 +256,25 @@ namespace NXRobotExporter.CAD.NX
             set => SetNullableDouble(DataKeyDynamicsFriction, value);
         }
 
-        public double VisualMeshLinear
+        public Export.MeshingOptions VisualMeshingOptions
         {
-            get => GetDouble(DataKeyVisualMeshLinear, 0.1);
-            set => SetDouble(DataKeyVisualMeshLinear, value);
+            get => VisualMeshData.Read(this);
+            set => VisualMeshData.Write(this, value);
         }
 
-        public double VisualMeshAngular
+        public Export.MeshingOptions CollisionMeshingOptions
         {
-            get => GetDouble(DataKeyVisualMeshAngular, 0.5);
-            set => SetDouble(DataKeyVisualMeshAngular, value);
+            get => CollisionMeshData.Read(this);
+            set => CollisionMeshData.Write(this, value);
         }
 
-        public double VisualMeshScale
+        /// <summary>
+        /// Whether the link's own meshing options are used instead of the robot-wide ones.
+        /// </summary>
+        public bool MeshingOverride
         {
-            get => GetDouble(DataKeyVisualMeshScale, 1.0);
-            set => SetDouble(DataKeyVisualMeshScale, value);
-        }
-
-        public double CollisionMeshLinear
-        {
-            get => GetDouble(DataKeyCollisionMeshLinear, 0.5);
-            set => SetDouble(DataKeyCollisionMeshLinear, value);
-        }
-
-        public double CollisionMeshAngular
-        {
-            get => GetDouble(DataKeyCollisionMeshAngular, 0.75);
-            set => SetDouble(DataKeyCollisionMeshAngular, value);
-        }
-
-        public double CollisionMeshScale
-        {
-            get => GetDouble(DataKeyCollisionMeshScale, 1.0);
-            set => SetDouble(DataKeyCollisionMeshScale, value);
+            get => GetInteger(DataKeyMeshingOverride, 0) == 1;
+            set => SetInteger(DataKeyMeshingOverride, value ? 1 : 0);
         }
 
         #endregion
@@ -479,18 +463,9 @@ namespace NXRobotExporter.CAD.NX
             if (DynamicsDamping.HasValue) link.Joint.Dynamics.Damping = DynamicsDamping.Value;
             if (DynamicsFriction.HasValue) link.Joint.Dynamics.Friction = DynamicsFriction.Value;
 
-            link.visualMeshingOptions = new CADRobotExporter.Export.MeshingOptions
-            {
-                linearDeflection = VisualMeshLinear,
-                angularDeflection = VisualMeshAngular,
-                scale = VisualMeshScale
-            };
-            link.collisionMeshingOptions = new CADRobotExporter.Export.MeshingOptions
-            {
-                linearDeflection = CollisionMeshLinear,
-                angularDeflection = CollisionMeshAngular,
-                scale = CollisionMeshScale
-            };
+            link.visualMeshingOptions = VisualMeshingOptions;
+            link.collisionMeshingOptions = CollisionMeshingOptions;
+            link.meshingOverride = MeshingOverride;
 
             return link;
         }
@@ -532,17 +507,15 @@ namespace NXRobotExporter.CAD.NX
 
             if (link.visualMeshingOptions != null)
             {
-                VisualMeshLinear = link.visualMeshingOptions.linearDeflection;
-                VisualMeshAngular = link.visualMeshingOptions.angularDeflection;
-                VisualMeshScale = link.visualMeshingOptions.scale;
+                VisualMeshingOptions = link.visualMeshingOptions;
             }
 
             if (link.collisionMeshingOptions != null)
             {
-                CollisionMeshLinear = link.collisionMeshingOptions.linearDeflection;
-                CollisionMeshAngular = link.collisionMeshingOptions.angularDeflection;
-                CollisionMeshScale = link.collisionMeshingOptions.scale;
+                CollisionMeshingOptions = link.collisionMeshingOptions;
             }
+
+            MeshingOverride = link.meshingOverride;
 
             VisualBodiesHandles = link.NXVisualBodiesHandles?.ToArray();
             CollisionBodiesHandles = link.NXCollisionBodiesHandles?.ToArray();
@@ -648,5 +621,87 @@ namespace NXRobotExporter.CAD.NX
         }
 
         #endregion
+
+        /// <summary>
+        /// One meshing column's DataContainer keys, their defaults, and the conversion to and from
+        /// <see cref="Export.MeshingOptions"/>.
+        /// </summary>
+        private sealed class MeshingOptionsData
+        {
+            private readonly string linearKey;
+            private readonly string angularKey;
+            private readonly string scaleKey;
+            private readonly string backendKey;
+            private readonly string edgeSamplingKey;
+            private readonly string targetEdgeLengthKey;
+            private readonly string edgeLengthFractionKey;
+            private readonly Export.MeshingOptions defaults;
+
+            public MeshingOptionsData(string prefix, double linearDeflection, double angularDeflection)
+            {
+                linearKey = prefix + "Linear";
+                angularKey = prefix + "Angular";
+                scaleKey = prefix + "Scale";
+                backendKey = prefix + "Backend";
+                edgeSamplingKey = prefix + "EdgeSampling";
+                targetEdgeLengthKey = prefix + "TargetEdgeLength";
+                edgeLengthFractionKey = prefix + "EdgeLengthFraction";
+
+                defaults = new Export.MeshingOptions
+                {
+                    linearDeflection = linearDeflection,
+                    angularDeflection = angularDeflection,
+                    scale = 1.0,
+                };
+            }
+
+            public void Register(DataContainer data)
+            {
+                data.AddDouble(linearKey, defaults.linearDeflection);
+                data.AddDouble(angularKey, defaults.angularDeflection);
+                data.AddDouble(scaleKey, defaults.scale);
+                data.AddInteger(backendKey, MeshingSettings.IndexFromBackend(defaults.backend));
+                data.AddInteger(
+                    edgeSamplingKey, MeshingSettings.IndexFromEdgeSampling(defaults.edgeSampling));
+                data.AddDouble(targetEdgeLengthKey, defaults.targetEdgeLength);
+                data.AddDouble(edgeLengthFractionKey, defaults.targetEdgeLengthFraction);
+            }
+
+            public Export.MeshingOptions Read(NXLinkNode node)
+            {
+                return new Export.MeshingOptions
+                {
+                    linearDeflection = node.GetDouble(linearKey, defaults.linearDeflection),
+                    angularDeflection = node.GetDouble(angularKey, defaults.angularDeflection),
+                    scale = node.GetDouble(scaleKey, defaults.scale),
+                    backend = MeshingSettings.BackendFromIndex(node.GetInteger(
+                        backendKey, MeshingSettings.IndexFromBackend(defaults.backend))),
+                    edgeSampling = MeshingSettings.EdgeSamplingFromIndex(node.GetInteger(
+                        edgeSamplingKey,
+                        MeshingSettings.IndexFromEdgeSampling(defaults.edgeSampling))),
+                    targetEdgeLength =
+                        node.GetDouble(targetEdgeLengthKey, defaults.targetEdgeLength),
+                    targetEdgeLengthFraction = node.GetDouble(
+                        edgeLengthFractionKey, defaults.targetEdgeLengthFraction),
+                };
+            }
+
+            public void Write(NXLinkNode node, Export.MeshingOptions options)
+            {
+                if (options == null)
+                {
+                    return;
+                }
+
+                node.SetDouble(linearKey, options.linearDeflection);
+                node.SetDouble(angularKey, options.angularDeflection);
+                node.SetDouble(scaleKey, options.scale);
+                node.SetInteger(backendKey, MeshingSettings.IndexFromBackend(options.backend));
+                node.SetInteger(
+                    edgeSamplingKey, MeshingSettings.IndexFromEdgeSampling(options.edgeSampling));
+                node.SetDouble(targetEdgeLengthKey, options.targetEdgeLength);
+                node.SetDouble(edgeLengthFractionKey, options.targetEdgeLengthFraction);
+            }
+        }
     }
 }

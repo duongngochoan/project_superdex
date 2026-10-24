@@ -17,6 +17,7 @@
 #include "simd_test.h"
 
 #include <array>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -266,13 +267,7 @@ TEST(Vec4i, Get) {
   EXPECT_EQ(3, Get<2>(a));
   EXPECT_EQ(4, Get<3>(a));
 
-  // Slower runtime version
-  EXPECT_EQ(1, Get(a, 0));
-  EXPECT_EQ(2, Get(a, 1));
-  EXPECT_EQ(3, Get(a, 2));
-  EXPECT_EQ(4, Get(a, 3));
-
-  // Same but with operator[] (read only)
+  // Runtime version
   EXPECT_EQ(1, a[0]);
   EXPECT_EQ(2, a[1]);
   EXPECT_EQ(3, a[2]);
@@ -322,6 +317,7 @@ TEST(Vec4i, GreaterEqual) {
 
 TEST(Vec4i, HMax) {
   auto a = Vec4i{1, 2, 3, 4};
+  EXPECT_EQ(1, HMax<1>(a));
   EXPECT_EQ(2, HMax<2>(a));
   EXPECT_EQ(3, HMax<3>(a));
   EXPECT_EQ(4, HMax(a));
@@ -329,6 +325,7 @@ TEST(Vec4i, HMax) {
 
 TEST(Vec4i, HMin) {
   auto a = Vec4i{4, 3, 2, 1};
+  EXPECT_EQ(4, HMin<1>(a));
   EXPECT_EQ(3, HMin<2>(a));
   EXPECT_EQ(2, HMin<3>(a));
   EXPECT_EQ(1, HMin(a));
@@ -336,9 +333,15 @@ TEST(Vec4i, HMin) {
 
 TEST(Vec4i, HSum) {
   auto a = Vec4i{1, 2, 3, 4};
+  EXPECT_EQ(1, HSum<1>(a));
   EXPECT_EQ(3, HSum<2>(a));
   EXPECT_EQ(6, HSum<3>(a));
   EXPECT_EQ(10, HSum(a));
+}
+
+TEST(Vec4i, HSumEach) {
+  auto const a = Vec4i{1, 2, 3, 4};
+  EXPECT_VEC4I(10, 100, 1000, 10000, HSumEach(a, 10 * a, 100 * a, 1000 * a));
 }
 
 TEST(Vec4i, Less) {
@@ -431,6 +434,7 @@ TEST(Vec4i, Load) {
   EXPECT_VEC4I(1, 2, 3, 4, (Load<4, Vec4i>(values + 1)));
   EXPECT_VEC4I(1, 2, 3, 4, (Load<Vec4i>(values + 1)));
 
+  EXPECT_VEC4I(0, 0, 0, 0, (Load<Vec4i>(values + 1, 0)));
   EXPECT_VEC4I(1, 0, 0, 0, (Load<Vec4i>(values + 1, 1)));
   EXPECT_VEC4I(1, 2, 0, 0, (Load<Vec4i>(values + 1, 2)));
   EXPECT_VEC4I(1, 2, 3, 0, (Load<Vec4i>(values + 1, 3)));
@@ -538,26 +542,7 @@ TEST(Vec4i, Shuffle) {
 MOCHI_SIMD_TEST_UNARY_FN_EXACT(Vec4i, Sqr, ([](auto a) { return a * a; }));
 
 TEST(Vec4i, Store) {
-  std::vector<int> result(
-      5); // NOTE: Changed from an array on the stack to work around an MSVC optimizer bug.
-  auto const v = Vec4i{1, 2, 3, 4};
-  Store<0>((int*)nullptr, v);
-  Store<0>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 4>{0, 0, 0, 0}), Span(&result[1], 4));
-  Store<1>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 4>{1, 0, 0, 0}), Span(&result[1], 4));
-  Store<2>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 4>{1, 2, 0, 0}), Span(&result[1], 4));
-  Store<3>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 4>{1, 2, 3, 0}), Span(&result[1], 4));
-  Store<4>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 4>{1, 2, 3, 4}), Span(&result[1], 4));
-  result.clear();
-  result.resize(5);
-  Store(&result[1], v, 0);
-  EXPECT_SPAN_EQ((std::array<int, 4>{0, 0, 0, 0}), Span(&result[1], 4));
-  Store(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 4>{1, 2, 3, 4}), Span(&result[1], 4));
+  TestStore(Vec4i{1, 2, 3, 4});
 }
 
 TEST(Vec4i, StoreSelected) {
@@ -648,7 +633,19 @@ TEST(Vec4i, ShiftLeft) {
 }
 
 TEST(Vec4i, ShiftRight) {
+  static constexpr int kSingleBitShift = 1;
+  static constexpr int kHalfWidthShift = 8 * sizeof(Vec4i::Scalar) / 2;
+  static constexpr int kHalfWidthScale = 1 << kHalfWidthShift;
+  static constexpr int kIntMin = std::numeric_limits<int>::min();
+  static constexpr int kNegativeSample = -100;
+  static constexpr int kPositiveSample = 100;
+
   Vec4i v(8, 40, 56, 88);
   EXPECT_VEC4I(1, 5, 7, 11, ShiftRight<3>(v));
   EXPECT_EQ(v, ShiftRight<0>(v));
+  // Shift by one catches logical shifts; half-width catches multi-bit sign fill.
+  // clang-format off
+  EXPECT_VEC4I(-1, -2, 2, 0, ShiftRight<kSingleBitShift>(Vec4i{-1, -3, 4, 1}));
+  EXPECT_VEC4I(-1, kIntMin / kHalfWidthScale, -1, 0, ShiftRight<kHalfWidthShift>(Vec4i{-1, kIntMin, kNegativeSample, kPositiveSample}));
+  // clang-format on
 }

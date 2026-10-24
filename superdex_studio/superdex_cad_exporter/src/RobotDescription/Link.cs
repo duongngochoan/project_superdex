@@ -79,6 +79,11 @@ namespace CADRobotExporter.RobotDescription
         [DataMember]
         public bool IsIncomplete;
 
+        /// <summary>
+        /// Human-readable explanation of why this link is incomplete.
+        /// </summary>
+        public string WhyIncomplete;
+
         [DataMember]
         public bool isFixedFrame;
 
@@ -93,6 +98,9 @@ namespace CADRobotExporter.RobotDescription
 
         [DataMember]
         public MeshingOptions collisionMeshingOptions;
+
+        [DataMember]
+        public bool meshingOverride;
 
         [DataMember]
         public bool exportCollision;
@@ -113,6 +121,17 @@ namespace CADRobotExporter.RobotDescription
         [DataMember]
         public List<byte[]> SWInertialComponentPIDs;
 
+        // Solidworks only bodies. Used instead of the component PIDs above when the
+        // configuration lives in a part document, where there are no components.
+        [DataMember]
+        public List<byte[]> SWVisualBodyPIDs;
+
+        [DataMember]
+        public List<byte[]> SWCollisionBodyPIDs;
+
+        [DataMember]
+        public List<byte[]> SWInertialBodyPIDs;
+
         // NX only components
         [DataMember]
         public List<string> NXVisualBodiesHandles;
@@ -127,6 +146,10 @@ namespace CADRobotExporter.RobotDescription
         public List<Component2> SWVisualComponents;
         public List<Component2> SWCollisionComponents;
         public List<Component2> SWInertialComponents;
+
+        public List<Body2> SWVisualBodies;
+        public List<Body2> SWCollisionBodies;
+        public List<Body2> SWInertialBodies;
 #endif
 
         public enum ComponentType
@@ -177,10 +200,18 @@ namespace CADRobotExporter.RobotDescription
             SWCollisionComponentPIDs = new List<byte[]>();
             SWInertialComponentPIDs = new List<byte[]>();
 
+            SWVisualBodyPIDs = new List<byte[]>();
+            SWCollisionBodyPIDs = new List<byte[]>();
+            SWInertialBodyPIDs = new List<byte[]>();
+
 #if SOLIDWORKS
             SWVisualComponents = new List<Component2>();
             SWCollisionComponents = new List<Component2>();
             SWInertialComponents = new List<Component2>();
+
+            SWVisualBodies = new List<Body2>();
+            SWCollisionBodies = new List<Body2>();
+            SWInertialBodies = new List<Body2>();
 #endif
             NXVisualBodiesHandles = new List<string>();
             NXCollisionBodiesHandles = new List<string>();
@@ -196,7 +227,7 @@ namespace CADRobotExporter.RobotDescription
             foreach (Link child in Children)
             {
                 Link clonedChild = child.Clone();
-                clonedChild.Parent = this;
+                clonedChild.Parent = cloned;
                 cloned.Children.Add(clonedChild);
             }
             return cloned;
@@ -243,10 +274,18 @@ namespace CADRobotExporter.RobotDescription
             SWCollisionComponentPIDs = new List<byte[]>();
             SWInertialComponentPIDs = new List<byte[]>();
 
+            SWVisualBodyPIDs = new List<byte[]>();
+            SWCollisionBodyPIDs = new List<byte[]>();
+            SWInertialBodyPIDs = new List<byte[]>();
+
 #if SOLIDWORKS
             SWVisualComponents = new List<Component2>();
             SWCollisionComponents = new List<Component2>();
             SWInertialComponents = new List<Component2>();
+
+            SWVisualBodies = new List<Body2>();
+            SWCollisionBodies = new List<Body2>();
+            SWInertialBodies = new List<Body2>();
 #endif
 
             NXVisualBodiesHandles = new List<string>();
@@ -292,8 +331,10 @@ namespace CADRobotExporter.RobotDescription
             visualsOnly = externalLink.visualsOnly;
             inertialsOnly = externalLink.inertialsOnly;
 
-            visualMeshingOptions = externalLink.visualMeshingOptions;
-            collisionMeshingOptions = externalLink.collisionMeshingOptions;
+            // Must be clone otherwise edits will stomp external reference
+            meshingOverride = externalLink.meshingOverride;
+            visualMeshingOptions = externalLink.visualMeshingOptions?.Clone();
+            collisionMeshingOptions = externalLink.collisionMeshingOptions?.Clone();
 
             if (visualMeshingOptions == null)
             {
@@ -388,6 +429,27 @@ namespace CADRobotExporter.RobotDescription
             {
                 SWInertialComponentPIDs = new List<byte[]>();
             }
+
+            SWVisualBodies = externalLink.SWVisualBodies != null
+                ? new List<Body2>(externalLink.SWVisualBodies)
+                : new List<Body2>();
+            SWVisualBodyPIDs = externalLink.SWVisualBodyPIDs != null
+                ? new List<byte[]>(externalLink.SWVisualBodyPIDs)
+                : new List<byte[]>();
+
+            SWCollisionBodies = externalLink.SWCollisionBodies != null
+                ? new List<Body2>(externalLink.SWCollisionBodies)
+                : new List<Body2>();
+            SWCollisionBodyPIDs = externalLink.SWCollisionBodyPIDs != null
+                ? new List<byte[]>(externalLink.SWCollisionBodyPIDs)
+                : new List<byte[]>();
+
+            SWInertialBodies = externalLink.SWInertialBodies != null
+                ? new List<Body2>(externalLink.SWInertialBodies)
+                : new List<Body2>();
+            SWInertialBodyPIDs = externalLink.SWInertialBodyPIDs != null
+                ? new List<byte[]>(externalLink.SWInertialBodyPIDs)
+                : new List<byte[]>();
         }
 #endif
 
@@ -423,6 +485,16 @@ namespace CADRobotExporter.RobotDescription
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Checks only this link's own fields, ignoring its children. Callers validating a whole
+        /// subtree want <see cref="AreRequiredFieldsSatisfied"/>; callers that need to name the
+        /// specific offending link want this.
+        /// </summary>
+        public bool AreOwnRequiredFieldsSatisfied()
+        {
+            return base.AreRequiredFieldsSatisfied();
         }
 
         public bool HasValidInertialProperties()
@@ -469,6 +541,40 @@ namespace CADRobotExporter.RobotDescription
                     return null;
             }
         }
+
+        /// <summary>
+        /// Body-level counterpart of <see cref="GetComponents"/>, populated
+        /// when the configuration lives in a part document.
+        /// </summary>
+        public List<Body2> GetBodies(ComponentType componentType)
+        {
+            switch (componentType)
+            {
+                case ComponentType.Visual:
+                    return SWVisualBodies;
+                case ComponentType.Collision:
+                    return SWCollisionBodies;
+                case ComponentType.Inertial:
+                    return SWInertialBodies;
+                default:
+                    return null;
+            }
+        }
+
+        public List<byte[]> GetBodyPIDs(ComponentType componentType)
+        {
+            switch (componentType)
+            {
+                case ComponentType.Visual:
+                    return SWVisualBodyPIDs;
+                case ComponentType.Collision:
+                    return SWCollisionBodyPIDs;
+                case ComponentType.Inertial:
+                    return SWInertialBodyPIDs;
+                default:
+                    return null;
+            }
+        }
 #endif
 #if NX
         public List<string> GetComponents(ComponentType componentType)
@@ -491,11 +597,18 @@ namespace CADRobotExporter.RobotDescription
         {
 #if SOLIDWORKS
             List<Component2> components = GetComponents(componentType);
+            if (components != null && components.Count > 0)
+            {
+                return true;
+            }
+
+            List<Body2> bodies = GetBodies(componentType);
+            return bodies != null && bodies.Count > 0;
 #endif
 #if NX
             List<string> components = GetComponents(componentType);
-#endif
             return components != null && components.Count > 0;
+#endif
         }
 
         public bool HasVisualComponents()

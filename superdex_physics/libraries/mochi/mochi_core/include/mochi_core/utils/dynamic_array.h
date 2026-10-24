@@ -133,11 +133,12 @@ class DynamicArray {
    * @param allocator Pointer to a polymorphic allocator. Must outlive this DynamicArray object.
    */
   explicit DynamicArray(size_type size, Allocator* allocator = GetDefaultAllocator())
-      : _begin(static_cast<T*>(allocator->allocate(size * sizeof(T), alignof(T)))),
-        _end(_begin + size),
-        _endCapacity(_end),
-        _allocator(allocator) {
-    DefaultConstructRange(_begin, _end);
+      : _allocator(allocator) {
+    if (size > 0) {
+      _begin = static_cast<T*>(allocator->allocate(size * sizeof(T), alignof(T)));
+      _end = _endCapacity = _begin + size;
+      DefaultConstructRange(_begin, _end);
+    }
   }
 
   /**
@@ -153,11 +154,12 @@ class DynamicArray {
       size_type size,
       FromT const& defaultValue,
       Allocator* allocator = GetDefaultAllocator())
-      : _begin(static_cast<T*>(allocator->allocate(size * sizeof(T), alignof(T)))),
-        _end(_begin + size),
-        _endCapacity(_end),
-        _allocator(allocator) {
-    CopyConstructRangeFromValue(_begin, _end, defaultValue);
+      : _allocator(allocator) {
+    if (size > 0) {
+      _begin = static_cast<T*>(allocator->allocate(size * sizeof(T), alignof(T)));
+      _end = _endCapacity = _begin + size;
+      CopyConstructRangeFromValue(_begin, _end, defaultValue);
+    }
   }
 
   /**
@@ -178,9 +180,11 @@ class DynamicArray {
       : _allocator(allocator) {
     MOCHI_DARRAY_ASSERT_FORWARD_ITERATOR(InputIt);
     auto size = static_cast<size_type>(std::distance(rangeBegin, rangeEnd));
-    _begin = static_cast<T*>(allocator->allocate(size * sizeof(T), alignof(T)));
-    _end = _endCapacity = _begin + size;
-    CopyConstructRange(_begin, rangeBegin, rangeEnd);
+    if (size > 0) {
+      _begin = static_cast<T*>(allocator->allocate(size * sizeof(T), alignof(T)));
+      _end = _endCapacity = _begin + size;
+      CopyConstructRange(_begin, rangeBegin, rangeEnd);
+    }
   }
 
   /**
@@ -230,22 +234,20 @@ class DynamicArray {
    * @brief Construct a DynamicArray by moving memory or values from another one.
    *
    * @remarks If the allocators are equal, then array memory ownership will be transferred from
-   * the other array to this one. Otherwise, new memory will be allocated for this array and then
-   * the other array's values will be moved into it. Either way, the other array will be empty
-   * after this call.
+   * the other array to this one. Otherwise, new memory will be allocated for this array (if
+   * necessary) and then the other array's values will be moved into it. Either way, the other
+   * array will be empty after this call.
    *
    * @param other Another DynamicArray from which memory or values will be moved
    * @param allocator Pointer to a polymorphic allocator. Must outlive this DynamicArray object.
    */
   DynamicArray(DynamicArray&& other, Allocator* allocator) : _allocator(allocator) {
-    if (other._allocator->is_equal(*_allocator))
-      MOCHI_LIKELY {
-        _begin = other._begin;
-        _end = other._end;
-        _endCapacity = other._endCapacity;
-        other._begin = other._end = other._endCapacity = nullptr;
-      }
-    else {
+    if (other._allocator->is_equal(*_allocator)) MOCHI_LIKELY {
+      _begin = other._begin;
+      _end = other._end;
+      _endCapacity = other._endCapacity;
+      other._begin = other._end = other._endCapacity = nullptr;
+    } else if (!other.empty()) {
       auto size = other.size();
       _begin = static_cast<T*>(_allocator->allocate(size * sizeof(T), alignof(T)));
       _end = _begin;
@@ -563,10 +565,9 @@ class DynamicArray {
             "Consider pushing a copy of the value instead.");
       }
     }
-    if (_endCapacity == _end)
-      MOCHI_UNLIKELY {
-        GrowCapacity(GetNextCapacity(size() + 1));
-      }
+    if (_endCapacity == _end) MOCHI_UNLIKELY {
+      GrowCapacity(GetNextCapacity(size() + 1));
+    }
     new (_end) T(std::forward<Args>(args)...);
     ++_end;
   }
@@ -801,10 +802,9 @@ class DynamicArray {
     MOCHI_DARRAY_ASSERT(count >= 0, "Invalid input range");
     auto prevSize = size();
     auto newSize = prevSize + count;
-    if (newSize > capacity())
-      MOCHI_UNLIKELY {
-        GrowCapacity(GetNextCapacity(newSize));
-      }
+    if (newSize > capacity()) MOCHI_UNLIKELY {
+      GrowCapacity(GetNextCapacity(newSize));
+    }
     _end = _begin + newSize;
     CopyConstructRange(_begin + prevSize, rangeBegin, rangeEnd);
   }
@@ -855,10 +855,9 @@ class DynamicArray {
    * @return *this
    */
   DynamicArray& operator=(DynamicArray const& other) {
-    if (&other != this)
-      MOCHI_LIKELY {
-        assign(other.begin(), other.end());
-      }
+    if (&other != this) MOCHI_LIKELY {
+      assign(other.begin(), other.end());
+    }
     return *this;
   }
 
@@ -875,38 +874,35 @@ class DynamicArray {
    * @return *this
    */
   DynamicArray& operator=(DynamicArray&& other) {
-    if (&other != this)
-      MOCHI_LIKELY {
-        clear();
-        if (_allocator->is_equal(*other._allocator))
-          MOCHI_LIKELY {
-            // Release any previously allocated memory
-            if (_begin != nullptr) {
-              _allocator->deallocate(_begin, capacity() * sizeof(T), alignof(T));
-            }
-            // Move ownership of the other memory to this array
-            _begin = other._begin;
-            _end = other._end;
-            _endCapacity = other._endCapacity;
-            other._begin = other._end = other._endCapacity = nullptr;
-          }
-        else if (!other.empty()) {
-          // Ensure sufficient capacity using our allocator
-          auto const newSize = other.size();
-          if (newSize > capacity()) {
-            GrowCapacity(newSize);
-          }
-          // Move construct each element individually, advancing _end after each successful
-          // construction. If T's move constructor throws, the destructor will only destroy elements
-          // that were successfully constructed.
-          for (auto src = other._begin; src < other._end; ++src, ++_end) {
-            new (_end) T(std::move(*src)); // Move construct
-          }
-          // Destroy the elements in the rhs array, which have already been moved.
-          // No need to release memory in the rhs array at this time.
-          other.clear();
+    if (&other != this) MOCHI_LIKELY {
+      clear();
+      if (_allocator->is_equal(*other._allocator)) MOCHI_LIKELY {
+        // Release any previously allocated memory
+        if (_begin != nullptr) {
+          _allocator->deallocate(_begin, capacity() * sizeof(T), alignof(T));
         }
+        // Move ownership of the other memory to this array
+        _begin = other._begin;
+        _end = other._end;
+        _endCapacity = other._endCapacity;
+        other._begin = other._end = other._endCapacity = nullptr;
+      } else if (!other.empty()) {
+        // Ensure sufficient capacity using our allocator
+        auto const newSize = other.size();
+        if (newSize > capacity()) {
+          GrowCapacity(newSize);
+        }
+        // Move construct each element individually, advancing _end after each successful
+        // construction. If T's move constructor throws, the destructor will only destroy elements
+        // that were successfully constructed.
+        for (auto src = other._begin; src < other._end; ++src, ++_end) {
+          new (_end) T(std::move(*src)); // Move construct
+        }
+        // Destroy the elements in the rhs array, which have already been moved.
+        // No need to release memory in the rhs array at this time.
+        other.clear();
       }
+    }
     return *this;
   }
 
@@ -1041,8 +1037,13 @@ class DynamicArray {
     }
   }
 
+#if MOCHI_COMPILER_MSVC
+#if _MSC_VER < 1944
+  // [T255431885] MSVC versions before 19.44 can drop the final copy of an inlined loop.
+  MOCHI_NO_INLINE
+#endif
+#endif
   static void CopyConstructRangeFromValue(T* rangeBegin, T const* rangeEnd, T const& value) {
-    // TODO: Use mochi::Fill for cases where copy construction is equivalent to copy assignment.
     for (auto* it = rangeBegin; it < rangeEnd; ++it) {
       new (it) T(value); // Copy construct
     }
@@ -1067,10 +1068,9 @@ class DynamicArray {
 
   static void MoveConstructRange(T* dstBegin, T* srcBegin, size_type count) {
     if constexpr (std::is_trivially_move_constructible_v<T>) {
-      if (count > 0)
-        MOCHI_LIKELY {
-          memcpy(dstBegin, srcBegin, count * sizeof(T));
-        }
+      if (count > 0) MOCHI_LIKELY {
+        memcpy(dstBegin, srcBegin, count * sizeof(T));
+      }
     } else {
       for (auto i = 0; i < count; ++i) {
         new (&dstBegin[i]) T(std::move(srcBegin[i])); // Move construct
@@ -1087,15 +1087,14 @@ class DynamicArray {
 
   static void DestroyRange(T* rangeBegin, T const* rangeEnd) {
     if constexpr (!std::is_trivially_destructible_v<T>) {
-      if (rangeEnd > rangeBegin)
-        MOCHI_LIKELY {
-          // Destroy in reverse order in case of FILO allocator used within element
-          auto* it = const_cast<T*>(rangeEnd);
-          while (it != rangeBegin) {
-            --it;
-            it->~T();
-          }
+      if (rangeEnd > rangeBegin) MOCHI_LIKELY {
+        // Destroy in reverse order in case of FILO allocator used within element
+        auto* it = const_cast<T*>(rangeEnd);
+        while (it != rangeBegin) {
+          --it;
+          it->~T();
         }
+      }
     }
     DebugFillWithNaN(rangeBegin, rangeEnd);
   }

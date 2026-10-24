@@ -21,10 +21,13 @@
 #include "mochi_contact_filter.h"
 #include "mochi_differentiable.h"
 #include "mochi_ecs.h"
+#include "mochi_ecs_utils.h"
 #include "mochi_simulation.h"
+#include "mochi_sleep.h"
 #include "mochi_snle.h"
 
 #include <mochi_core/utils/array_utils.h>
+#include <mochi_core/utils/dynamic_array.h>
 
 #include <algorithm>
 #include <functional>
@@ -40,6 +43,10 @@ namespace {
 struct CTempIslandPartitioningData {
   std::vector<entt::entity> islands;
   std::vector<int> actorPartitions;
+  // memberIndices[p] is the index, among the members of the island being partitioned, of the
+  // entity at position p of the CIslandMemberInfo storage. Entries of other entities are stale or
+  // uninitialized.
+  DynamicArray<int> memberIndices;
 };
 
 // Global context component with special support for unit tests
@@ -146,6 +153,7 @@ entt::entity island::CreateEmpty(entt::registry& reg) {
   reg.emplace<CIslandPreconditioner>(
       island, std::make_shared<PreconditionerRecyclingManager<real>>());
   reg.emplace<CIslandSolverStats>(island);
+  sleep::InitIsland(reg, island);
   if (reg.try_ctx<TagDifferentiableScene>()) {
     InitDifferentiableIsland(reg, island);
   }
@@ -327,13 +335,14 @@ static void MergeIslandPair(entt::registry& reg, entt::entity srcIsland, entt::e
 
 static void TryMergeIslands(entt::registry& reg) {
   MOCHI_PROFILE_SCOPE();
+  auto const& memberInfos = reg.storage<CIslandMemberInfo>();
   // If any dynamic actor has a potential collider
   for (auto&& [e, syncColls, membership] :
-       reg.view<CConservativePotentialColliders<ContactType::Sync> const, CIslandMemberInfo const>()
+       reg.view<CConservativePotentialColliders</*kIsSync*/ true> const, CIslandMemberInfo const>()
            .each()) {
     entt::entity dstIsland = membership.island;
-    for (auto const& col : syncColls) {
-      auto const* memberInfo = reg.try_get<CIslandMemberInfo const>(col.entity);
+    for (entt::entity const col : syncColls) {
+      auto const* memberInfo = TryGet(memberInfos, col);
       if (memberInfo) {
         entt::entity srcIsland = memberInfo->island;
         if (srcIsland != dstIsland) {
@@ -358,6 +367,16 @@ static void TrySplitIslands(entt::registry& reg) {
       islands.push_back(e);
     }
   }
+  if (islands.empty()) {
+    return;
+  }
+
+  auto const& syncColliders = reg.storage<CConservativePotentialColliders</*kIsSync*/ true>>();
+  auto const& memberInfos = reg.storage<CIslandMemberInfo>();
+  auto const& groupMemberInfos = reg.storage<CGroupMemberInfo>();
+  // Splitting only edits CIslandMemberInfo in place, so positions in its storage don't change.
+  auto& memberIndices = ctx.memberIndices;
+  memberIndices.resize_noinit(memberInfos.size());
 
   // For each island
   int const numIslandsBeforeAnySplits = isize(islands);
@@ -369,6 +388,10 @@ static void TrySplitIslands(entt::registry& reg) {
     // actorPartitions[i] is the partition index for actor i
     actorPartitions.clear();
     actorPartitions.resize(members.size(), -1);
+
+    for (int i = 0; i < isize(members); ++i) {
+      memberIndices[memberInfos.index(members[i])] = i;
+    }
 
     // We will partition the actors by walking the graph of potential colliders.
     // Actors in the same partition must remain in the same island.
@@ -386,19 +409,16 @@ static void TrySplitIslands(entt::registry& reg) {
 
       // Find all entities that might collide with iActor, or with any of iActor's descendants.
       ForEntityAndEachDescendant(reg, iActor, [&](entt::entity e) {
-        if (auto const* potentialColliders =
-                reg.try_get<CConservativePotentialColliders<ContactType::Sync>>(e)) {
-          for (auto const& jCollider : *potentialColliders) {
-            entt::entity jActor = jCollider.entity;
-
-            auto const* jInfo = &reg.get<CIslandMemberInfo const>(jActor);
+        if (auto const* potentialColliders = TryGet(syncColliders, e)) {
+          for (entt::entity jActor : *potentialColliders) {
+            auto const* jInfo = &memberInfos.get(jActor);
             MOCHI_ASSERT_VERBOSE(
                 jInfo->island == island, "These islands should have already merged");
 
             // If the other actor is nested in a group, then find the parent group instead.
             while (jInfo->isNested) {
-              jActor = reg.get<CGroupMemberInfo const>(jActor).group;
-              jInfo = &reg.get<CIslandMemberInfo const>(jActor);
+              jActor = groupMemberInfos.get(jActor).group;
+              jInfo = &memberInfos.get(jActor);
               MOCHI_ASSERT_VERBOSE(
                   jInfo->island == island, "These islands should have already merged");
             }
@@ -407,12 +427,10 @@ static void TrySplitIslands(entt::registry& reg) {
               continue; // Self contact
             }
 
-            // Find the index of jActor in this island. This will be fast for small islands.
-            // If islands become large, then it might be worth caching this index with
-            // CIslandMemberInfo.
-            auto itr = std::find(members.begin(), members.end(), jActor);
-            MOCHI_ASSERT_VERBOSE(itr != members.end(), "CIslandMemberInfo must be out-of-sync");
-            int j = static_cast<int>(itr - members.begin());
+            int const j = memberIndices[memberInfos.index(jActor)];
+            MOCHI_ASSERT_VERBOSE(
+                0 <= j && j < isize(members) && members[j] == jActor,
+                "CIslandMemberInfo is out of sync");
 
             if (actorPartitions[j] != actorPartitions[i]) {
               if (actorPartitions[j] == -1) {
@@ -536,9 +554,10 @@ static bool UpdateForceGlobalIsland(entt::registry& reg) {
       global.forceSingleIslandByUserRequest || !reg.view<TagForceSingleIsland>().empty();
 
   if (needsGlobalIsland) {
-    // Ensure that the global island exists
-    if (!reg.valid(global.island)) {
-      global.island = island::CreateEmpty(reg);
+    // Ensure that the global island exists, unless it would be empty. The handle may outlive the
+    // island, and once the entity's version wraps around, it can refer to an unrelated entity.
+    if (!reg.valid(global.island) || !reg.all_of<TagIsland>(global.island)) {
+      global.island = reg.view<TagIsland>().empty() ? entt::null : island::CreateEmpty(reg);
     }
 
     // Merge any other islands into it
@@ -585,6 +604,11 @@ static void UpdateIslandDescendants(
     if (reg.any_of<TagRigidActor>(e)) {
       outDescendants.rigidActors.push_back(e);
     }
+    if (reg.any_of<TagArticulatedLinkActor>(e)) {
+      MOCHI_ASSERT_VERBOSE(
+          reg.all_of<TagRigidActor>(e), "An articulated link must also be a rigid actor.");
+      outDescendants.articulatedLinkActors.push_back(e);
+    }
     if (reg.any_of<TagSoftActor>(e)) {
       outDescendants.softActors.push_back(e);
     }
@@ -594,8 +618,8 @@ static void UpdateIslandDescendants(
     if (reg.any_of<TagRodActor>(e)) {
       outDescendants.rodActors.push_back(e);
     }
-    if (reg.any_of<TagSoftSkinnedActor>(e)) {
-      outDescendants.skinnedActors.push_back(e);
+    if (reg.any_of<TagNestedSoftActor>(e)) {
+      outDescendants.nestedSoftActors.push_back(e);
     }
     if (reg.any_of<TagBlendedActor>(e)) {
       outDescendants.blendedActors.push_back(e);
@@ -603,7 +627,7 @@ static void UpdateIslandDescendants(
   });
 }
 
-MOCHI_API void island::PreStep(entt::registry& reg) {
+void island::PreStep(entt::registry& reg) {
   MOCHI_PROFILE_SCOPE();
 
   // Unit test support
@@ -616,11 +640,11 @@ MOCHI_API void island::PreStep(entt::registry& reg) {
   bool hasGlobalIsland = UpdateForceGlobalIsland(reg);
 
   if (!hasGlobalIsland) {
-    // Merge islands if they contain actors that might interact with ContactType::Sync
+    // Merge islands if they contain actors that might interact with sync contact
     TryMergeIslands(reg);
 
     // Split islands if we can find a subset of the actors that do not interact with the others via
-    // ContactType::Sync
+    // sync contact
     TrySplitIslands(reg);
   }
 
@@ -651,8 +675,13 @@ MOCHI_API void island::PreStep(entt::registry& reg) {
     UpdateIslandDifferentiabilityInfo(reg, members, dofs, input);
   }
 
-  // All islands are now up-to-date
+  for (entt::entity island : reg.view<TagIslandCompositionChanged>()) {
+    reg.emplace_or_replace<TagWakeUp>(island);
+  }
   reg.clear<TagIslandCompositionChanged>();
+
+  // Apply wake requests, then put islands at rest to sleep.
+  sleep::PreStep(reg);
 
   // Unit test support
   if (testConfig && testConfig->postIslandUpdateCallback) {
@@ -668,13 +697,11 @@ void mochi::island::SetForceSingleIsland(entt::registry& reg, bool forceSingleIs
   reg.ctx<CGlobalIsland>().forceSingleIslandByUserRequest = forceSingleIsland;
 }
 
-MOCHI_API void mochi::island::SetTestCallback_PreIslandUpdate(
-    entt::registry& reg,
-    std::function<void()> fn) {
+void mochi::island::SetTestCallback_PreIslandUpdate(entt::registry& reg, std::function<void()> fn) {
   reg.ctx_or_set<CIslandTestConfig>().preIslandUpdateCallback = std::move(fn);
 }
 
-MOCHI_API void mochi::island::SetTestCallback_PostIslandUpdate(
+void mochi::island::SetTestCallback_PostIslandUpdate(
     entt::registry& reg,
     std::function<void()> fn) {
   reg.ctx_or_set<CIslandTestConfig>().postIslandUpdateCallback = std::move(fn);

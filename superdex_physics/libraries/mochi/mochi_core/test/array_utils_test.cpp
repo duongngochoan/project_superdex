@@ -25,9 +25,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <numeric>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 using namespace mochi;
@@ -359,7 +361,7 @@ TEST(ArrayUtils, ArrayScales) {
 template <bool kSingleThreaded>
 static void TestArrayTransformPoints() {
   // Generate several arbitrary points
-  int constexpr kNumPoints = 100;
+  int constexpr kNumPoints = 101;
   std::vector<Real3> points;
   points.resize(kNumPoints);
   for (int i = 0; i < kNumPoints; ++i) {
@@ -430,7 +432,7 @@ TEST(ArrayUtils, ArrayTransformPoints) {
 template <bool kSingleThreaded>
 static void TestArrayTransformDisplacements() {
   // Generate several arbitrary displacements
-  int constexpr kNumPoints = 100;
+  int constexpr kNumPoints = 101;
   std::vector<Real3> displacements;
   displacements.resize(kNumPoints);
   for (int i = 0; i < kNumPoints; ++i) {
@@ -519,7 +521,7 @@ TEST(ArrayUtils, ArrayTransformDisplacements) {
 template <bool kSingleThreaded>
 static void TestArrayRotateVectors() {
   // Generate several arbitrary points
-  int constexpr kNumPoints = 100;
+  int constexpr kNumPoints = 101;
   std::vector<Real3> points;
   points.resize(kNumPoints);
   for (int i = 0; i < kNumPoints; ++i) {
@@ -583,6 +585,100 @@ TEST(ArrayUtils, ArrayRotateVectors) {
   TestArrayRotateVectors<true>();
 }
 
+// Expects all copies of a point in an array to be transformed with identical bits, whether they
+// fall in a full SIMD batch, the tail, or a multithreaded partition. Outputs are compared within a
+// single call, because the compiler may contract multiply-adds differently in separately inlined
+// calls. transform(singleThreaded, dst, src) transforms src into dst.
+template <class TransformFn>
+static void ExpectIndependentOfPosition(Real3 const& point, TransformFn const& transform) {
+  int constexpr kBatchSize = Simd<real>::kSize;
+  // Large enough that multithreaded partitions are not batch-aligned, so they have their own tails.
+  int constexpr kLargeCount = 7 * 8 * 1024 + 1;
+  auto check = [&](auto singleThreaded) {
+    for (int base : {0, kLargeCount}) {
+      for (int count = base + 1; count <= base + 2 * kBatchSize; ++count) {
+        DynamicArray<Real3> const src(count, point);
+        DynamicArray<Real3> dst(count);
+        transform(singleThreaded, MakeSpan(dst), MakeConstSpan(src));
+        EXPECT_EQ(count, std::ranges::count(dst, dst[0]))
+            << "count=" << count << " singleThreaded=" << singleThreaded();
+      }
+    }
+  };
+  check(std::true_type{});
+  TaskScheduler scheduler(2);
+  check(std::false_type{});
+}
+
+TEST(ArrayUtils, ArrayTransformsIndependentOfPosition) {
+  // Large values with full mantissas, so fused and unfused multiply-adds round differently.
+  Real3 const point{1234.5678_r, -8765.4321_r, 3141.5927_r};
+  Real3 const refPoint{-54321.987_r, 12345.678_r, 98765.432_r};
+  Quaternion const rotation = Quaternion::FromAxisAngle(Normalize(Real3{1_r, 2_r, 3_r}), kPI / 4_r);
+  Real3 const translation{1e5_r, -2e5_r, 3e5_r};
+  TransformSRT const transformSRT{1.37_r, rotation, translation};
+  TransformRT const transformRT{rotation, translation};
+
+  ExpectIndependentOfPosition(
+      point, [&](auto singleThreaded, Span<Real3> dst, Span<Real3 const> pts) {
+        ArrayTransformPoints<singleThreaded>(dst, pts, transformSRT);
+      });
+  ExpectIndependentOfPosition(
+      point, [&](auto singleThreaded, Span<Real3> dst, Span<Real3 const> pts) {
+        DynamicArray<Real3> const refs(pts.size(), refPoint);
+        ArrayTransformDisplacements<singleThreaded>(dst, pts, MakeConstSpan(refs), transformRT);
+      });
+  ExpectIndependentOfPosition(
+      point, [&](auto singleThreaded, Span<Real3> dst, Span<Real3 const> pts) {
+        ArrayRotateVectors<singleThreaded>(dst, pts, rotation);
+      });
+}
+
+// Each element must round like the fused multiply-adds of the batch helpers, in full batches and in
+// every tail, so that other code can reproduce the results bit for bit.
+TEST(ArrayUtils, ArrayTransformsMatchFusedReference) {
+  // Full-mantissa values far from the origin, so fused and unfused multiply-adds round differently.
+  std::mt19937 rng(5);
+  std::uniform_real_distribution<real> unit(-1_r, 1_r);
+  auto randomReal3 = [&](real scale) { return Real3{unit(rng), unit(rng), unit(rng)} * scale; };
+  VMatrix4x4r matT;
+  for (int row = 0; row < 4; ++row) {
+    matT[row] = ToSimd(randomReal3(row < 3 ? 1_r : 32_r), 0_r);
+  }
+  auto rotate = [&](Real3 const& v) {
+    Real3 result;
+    for (int j = 0; j < 3; ++j) {
+      result[j] = std::fma(v[2], matT[2][j], std::fma(v[0], matT[0][j], v[1] * matT[1][j]));
+    }
+    return result;
+  };
+  auto transform = [&](Real3 const& p) { return rotate(p) + ToReal3(matT[3]); };
+
+  // Cover full batches followed by every tail size.
+  for (int count = 0; count < 3 * Simd<real>::kSize; ++count) {
+    DynamicArray<Real3> src(count), refs(count), dst(count), expected(count);
+    for (int i = 0; i < count; ++i) {
+      src[i] = randomReal3(32_r);
+      refs[i] = randomReal3(32_r);
+    }
+
+    std::ranges::transform(src, expected.begin(), transform);
+    ArrayTransformPoints_MatT<true>(MakeSpan(dst), MakeConstSpan(src), matT);
+    EXPECT_SPAN_EQ(dst, expected) << "TransformPoints, count=" << count;
+
+    for (int i = 0; i < count; ++i) {
+      expected[i] = transform(src[i] + refs[i]) - refs[i];
+    }
+    ArrayTransformDisplacements_MatT<true>(
+        MakeSpan(dst), MakeConstSpan(src), MakeConstSpan(refs), matT);
+    EXPECT_SPAN_EQ(dst, expected) << "TransformDisplacements, count=" << count;
+
+    std::ranges::transform(src, expected.begin(), rotate);
+    ArrayRotateVectors_MatT<true>(MakeSpan(dst), MakeConstSpan(src), matT);
+    EXPECT_SPAN_EQ(dst, expected) << "RotateVectors, count=" << count;
+  }
+}
+
 TEST(ArrayUtils, MinMax) {
   constexpr std::array<real, 21> kValues = {
       -5, 6,   -7, -1, 2,  0,   -9, 8, 12,  -13, 4,
@@ -642,6 +738,46 @@ TEST(ArrayUtils, MaxAbs) {
       }
     }
   }
+}
+
+template <int kStride>
+static void TestMaxPackedVector3Norm() {
+  // Cover every tail size more than once, for batches of up to 64 points (e.g. 4 x Vec16r).
+  int constexpr kMaxCount = 129;
+  std::mt19937 rng(123);
+  std::uniform_real_distribution<real> dist(-1_r, 1_r);
+  std::vector<real> values;
+  for (int count = 0; count <= kMaxCount; ++count) {
+    values.resize(count * kStride);
+    for (int i = 0; i < count * kStride; ++i) {
+      // Extra components beyond the 3D vector must be ignored.
+      values[i] = (i % kStride < 3) ? dist(rng) : 1000_r;
+    }
+    // Make each point the largest in turn, so every SIMD lane, including tail lanes, is checked.
+    for (int iMax = 0; iMax < count; ++iMax) {
+      std::vector<real> modified = values;
+      modified[iMax * kStride + 0] = 2_r;
+      modified[iMax * kStride + 1] = -3_r;
+      modified[iMax * kStride + 2] = 6_r;
+      EXPECT_NEAR_EQ(7_r, MaxPackedVector3Norm<kStride>(MakeConstSpan(modified)))
+          << "count=" << count << " iMax=" << iMax;
+    }
+  }
+}
+
+TEST(ArrayUtils, MaxPackedVector3Norm) {
+  EXPECT_EQ(0_r, MaxPackedVector3Norm<3>({}));
+  EXPECT_EQ(0_r, MaxPackedVector3Norm<4>({}));
+
+  std::array<real, 9> const packed3 = {1_r, 2_r, 2_r, 0_r, 0_r, 0_r, 3_r, -4_r, 0_r};
+  EXPECT_NEAR_EQ(5_r, MaxPackedVector3Norm<3>(MakeConstSpan(packed3)));
+
+  std::array<real, 8> const packed4 = {1_r, 2_r, 2_r, 1000_r, 3_r, -4_r, 0_r, -1000_r};
+  EXPECT_NEAR_EQ(5_r, MaxPackedVector3Norm<4>(MakeConstSpan(packed4)));
+
+  TestMaxPackedVector3Norm<3>();
+  TestMaxPackedVector3Norm<4>();
+  TestMaxPackedVector3Norm<5>();
 }
 
 TEST(ArrayUtils, MaxAbsDifference) {

@@ -20,33 +20,39 @@ from typing import Callable, TypeAlias
 import numpy as np
 import numpy.typing as npt
 from superdex.lab.gym.envs.mochi_env import MochiEnv
+from superdex.lab.gym.utils.registry import MochiGymEnv
 from superdex.physics.viewer.utils import AnimationWriter
 
 logger = logging.getLogger(__name__)
 
 ########################################################################################
 
-ActionSampler: TypeAlias = Callable[[MochiEnv], npt.NDArray[float]]
-"""Type alias for a function that samples actions given a MochiEnv environment."""
+ActionSampler: TypeAlias = Callable[[MochiGymEnv, MochiEnv], npt.NDArray[float]]
+"""Type alias for an action sampler using wrapped and Mochi environment APIs."""
 
 ########################################################################################
 
 
-def zero_action(env: MochiEnv) -> npt.NDArray[float]:
+def zero_action(env: MochiGymEnv, _mochi_env: MochiEnv) -> npt.NDArray[float]:
     """Return a zero action vector for the given environment."""
     return np.zeros(env.action_space.shape, dtype=np.float32)
 
 
-def random_action(env: MochiEnv) -> npt.NDArray[float]:
+def random_action(env: MochiGymEnv, _mochi_env: MochiEnv) -> npt.NDArray[float]:
     """Return a random action sampled from the environment's action space."""
     return env.action_space.sample()
 
 
-def sweep_action(env: MochiEnv) -> npt.NDArray[float]:
+def sweep_action(
+    env: MochiGymEnv,
+    mochi_env: MochiEnv,
+) -> npt.NDArray[float]:
     """Generate a sweeping sinusoidal action that cycles through action dimensions.
     This function creates an action where only one dimension is active at a time,
-    cycling through all dimensions with a sinusoidal value over time."""
-    time = env._step_count * env._control_dt
+    cycling through all dimensions with a sinusoidal value over time.
+
+    The website env previews use this sampler. Render them again if you change it."""
+    time = mochi_env._step_count * mochi_env._control_dt
     action_shape = env.action_space.shape
     period_length = 4.0
     index = int(time / period_length) % action_shape[0]
@@ -60,7 +66,8 @@ def sweep_action(env: MochiEnv) -> npt.NDArray[float]:
 
 
 def sample_runner(
-    env: MochiEnv,
+    env: MochiGymEnv,
+    mochi_env: MochiEnv,
     action_sampler: ActionSampler = sweep_action,
     num_episodes: int = 10,
     animation_writer: AnimationWriter | None = None,
@@ -78,9 +85,10 @@ def sample_runner(
     if animation_writer:
         animation_writer.add(env.render())
 
-    while episode < num_episodes:
+    # Also stop early if the user closes the interactive window (render_mode="human").
+    while episode < num_episodes and not mochi_env.user_requested_close():
         # Sample an action from the given action sampler.
-        action = action_sampler(env)
+        action = action_sampler(env, mochi_env)
 
         # Send the computed action to the env.
         _, reward, terminated, truncated, info = env.step(action)
@@ -105,6 +113,8 @@ def sample_runner(
                 animation_writer.write(f"video_{episode:03d}")
                 animation_writer.add(env.render())
 
+    if mochi_env.user_requested_close():
+        logger.info("Viewer window closed by the user; stopping early.")
     logger.info(f"Done running {episode} episodes.")
     env.close()
 

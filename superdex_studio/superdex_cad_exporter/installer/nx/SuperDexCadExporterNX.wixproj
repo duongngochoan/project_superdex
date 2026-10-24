@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (c) Meta Platforms, Inc. and affiliates.
+
+     This source code is licensed under the MIT license found in the
+     LICENSE file in the root directory of this source tree. -->
+<Project Sdk="WixToolset.Sdk/6.0.2">
+
+  <PropertyGroup>
+    <OutputName>SuperDexCadExporterNXSetup</OutputName>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <OutputPath>..\output\</OutputPath>
+    <IntermediateOutputPath>obj\</IntermediateOutputPath>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <CommitVersion Condition="'$(CommitVersion)' == ''">unknown</CommitVersion>
+    <ExporterBinDir Condition="'$(ExporterBinDir)' == ''">$(MSBuildThisFileDirectory)..\..\bin\Release</ExporterBinDir>
+    <NXSourceDir>$(MSBuildThisFileDirectory)..\..\src\CAD\NX</NXSourceDir>
+    <DefineConstants>BinDir=$(ExporterBinDir);NXSourceDir=$(NXSourceDir);CommitVersion=$(CommitVersion)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="6.0.2" />
+  </ItemGroup>
+
+  <Target Name="EnsureExporterBuilt" BeforeTargets="BeforeBuild">
+    <Error Condition="!Exists('$(ExporterBinDir)\NXRobotExporter.dll')"
+           Text="$(ExporterBinDir)\NXRobotExporter.dll not found. Build NXRobotExporter (Release) before building the installer." />
+  </Target>
+
+</Project>

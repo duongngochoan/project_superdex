@@ -22,6 +22,7 @@
 
 SR_WARNING_PUSH()
 SR_WARNING_IGNORE_MSVC(4459) // declaration of 'last' hides global declaration
+SR_WARNING_IGNORE_MSVC(4706) // assignment within conditional expression
 #include <picojson/picojson.h> // picojson (third-party)
 SR_WARNING_POP()
 
@@ -79,7 +80,7 @@ static void ExpectJson(std::string const& expectedJson, std::string const& actua
 // Example Usage Syntax
 ///////////////////////////////////////////////////////////////////////////////////////////////
 
-enum class MyFruit { Apple, Orange, Kumquat };
+enum class MyFruit : int32_t { Apple, Orange, Kumquat };
 
 } // namespace SReflectTest
 
@@ -93,6 +94,15 @@ SR_EnumItem(Kumquat);
 SR_EndEnum();
 
 namespace SReflectTest {
+
+// Prove that we can access type information at static initialization time.
+static const bool kTypeInfoSuccessfullyAccessedBeforeMain = []() {
+  auto const& enumInfo = SReflect::GetTypeInfo<MyFruit>();
+  char const* enumName = enumInfo._nameWithNamespace;
+  char const* innerName = enumInfo._innerTypeInfo ? enumInfo._innerTypeInfo->_name : nullptr;
+  return enumName && (std::string_view{enumName} == "SReflectTest::MyFruit") && innerName &&
+      (std::string_view{innerName} == "int32");
+}();
 
 struct MyPoint {
   int x = 0;
@@ -138,6 +148,10 @@ class MyDerivedClass : public MyClass {
   SR_EndClass();
 };
 
+TEST(SReflect, GetTypeInfoBeforeMain) {
+  EXPECT_TRUE(kTypeInfoSuccessfullyAccessedBeforeMain);
+}
+
 TEST(SReflect, Example1) {
   static_assert(sizeof(MyPoint) == 2 * sizeof(int), "No v-table. No padding");
 
@@ -153,7 +167,7 @@ TEST(SReflect, Example1) {
   // Deserialize from JSON
   int numIssuesDetected = 0;
   SReflect::FromJsonString(
-      pt, "{\"y\":987,\"x\":654}", SReflect::DeserializeFlags::MaximumWarnings, numIssuesDetected);
+      pt, R"({"y":987,"x":654})", SReflect::DeserializeFlags::MaximumWarnings, numIssuesDetected);
   EXPECT_EQ(0, numIssuesDetected);
   EXPECT_EQ(654, pt.x);
   EXPECT_EQ(987, pt.y);
@@ -587,7 +601,7 @@ TEST(SReflect, std_vector) {
     std::vector<SRTestValue<VecType>> testValues = {
         {VecType{}, "[]"},
         {VecType{"one"}, "[\"one\"]"},
-        {VecType{"one", "two", "three"}, "[\"one\", \"two\", \"three\"]"},
+        {VecType{"one", "two", "three"}, R"(["one", "two", "three"])"},
     };
     TestAnyType<VecType>(
         "vector<string>", "std::vector<std::string>", SReflect::CoreType::CT_array, testValues);
@@ -611,9 +625,9 @@ TEST(SReflect, std_array) {
   {
     using ArrType = std::array<std::string, 2>;
     std::vector<SRTestValue<ArrType>> testValues = {
-        SRTestValue<ArrType>{{"", "word"}, "[\"\", \"word\"]"},
-        SRTestValue<ArrType>{{"word", ""}, "[\"word\", \"\"]"},
-        SRTestValue<ArrType>{{"one", "two"}, "[\"one\", \"two\"]"},
+        SRTestValue<ArrType>{{"", "word"}, R"(["", "word"])"},
+        SRTestValue<ArrType>{{"word", ""}, R"(["word", ""])"},
+        SRTestValue<ArrType>{{"one", "two"}, R"(["one", "two"])"},
     };
     TestAnyType<ArrType>(
         "array<string,2>", "std::array<std::string,2>", SReflect::CoreType::CT_array, testValues);
@@ -643,9 +657,9 @@ TEST(SReflect, c_array) {
       char const* valueAsJson = "";
     };
     std::vector<ArrTestValue> testValues = {
-        ArrTestValue{{"", "word"}, "[\"\", \"word\"]"},
-        ArrTestValue{{"word", ""}, "[\"word\", \"\"]"},
-        ArrTestValue{{"one", "two"}, "[\"one\", \"two\"]"},
+        ArrTestValue{{"", "word"}, R"(["", "word"])"},
+        ArrTestValue{{"word", ""}, R"(["word", ""])"},
+        ArrTestValue{{"one", "two"}, R"(["one", "two"])"},
     };
     TestAnyType<std::string[2], ArrTestValue>(
         "string[2]", "std::string[2]", SReflect::CoreType::CT_array, testValues);
@@ -695,7 +709,7 @@ TEST(SReflect, std_optional) {
         OptionalTestValue{{std::vector<std::string>{}}, "[]"}, // empty array
         OptionalTestValue{{std::vector<std::string>{"one"}}, "[\"one\"]"},
         OptionalTestValue{
-            {std::vector<std::string>{"one", "two", "three"}}, "[\"one\",\"two\",\"three\"]"},
+            {std::vector<std::string>{"one", "two", "three"}}, R"(["one","two","three"])"},
     };
     TestAnyType<std::optional<std::vector<std::string>>, OptionalTestValue>(
         "optional<vector<string>>",
@@ -715,13 +729,13 @@ TEST(SReflect, std_optional) {
         OptionalTestValue{StructWithOptionals{42, std::nullopt, std::nullopt}, "{\"myInt\":42}"},
         OptionalTestValue{
             StructWithOptionals{std::nullopt, std::vector<std::string>{"one", "two"}, std::nullopt},
-            "{\"myStringVector\":[\"one\",\"two\"]}"},
+            R"({"myStringVector":["one","two"]})"},
         OptionalTestValue{
             StructWithOptionals{std::nullopt, std::nullopt, MyPoint{9, 11}},
-            "{\"myPoint\":{\"x\":9,\"y\":11}}"},
+            R"({"myPoint":{"x":9,"y":11}})"},
         OptionalTestValue{
             StructWithOptionals{42, std::nullopt, MyPoint{9, 11}},
-            "{\"myInt\":42,\"myPoint\":{\"x\":9,\"y\":11}}"},
+            R"({"myInt":42,"myPoint":{"x":9,"y":11}})"},
     };
     TestAnyType<StructWithOptionals, OptionalTestValue>(
         "StructWithOptionals",
@@ -803,7 +817,7 @@ TEST(SReflect, picojson_value) {
     std::vector<TestValue> testValues = {
         TestValue{picojson::value{}, "null"},
         TestValue{picojson::object{}, "{}"},
-        TestValue{picojson::object{{"test", "1"}}, "{\"test\":\"1\"}"},
+        TestValue{picojson::object{{"test", "1"}}, R"({"test":"1"})"},
         TestValue{picojson::array{}, "[]"},
         TestValue{picojson::array{{"1"}}, "[\"1\"]"},
     };
@@ -848,11 +862,10 @@ struct MyStructWithMixedFields {
 TEST(SReflect, Struct) {
   std::vector<SRTestValue<MyStructWithMixedFields>> testValues = {
       SRTestValue<MyStructWithMixedFields>{
-          {0, "", {0}, {}},
-          "{\"myByte\":0, \"myString\":\"\", \"myStruct\":{\"x\":0}, \"myStructVec\":[]}"},
+          {0, "", {0}, {}}, R"({"myByte":0, "myString":"", "myStruct":{"x":0}, "myStructVec":[]})"},
       SRTestValue<MyStructWithMixedFields>{
           {123, "zoink", {456}, {{1}, {2}}},
-          "{\"myByte\":123, \"myString\":\"zoink\", \"myStruct\":{\"x\":456}, \"myStructVec\":[{\"x\":1}, {\"x\":2}]}"},
+          R"({"myByte":123, "myString":"zoink", "myStruct":{"x":456}, "myStructVec":[{"x":1}, {"x":2}]})"},
   };
 
   // Run generic tests using these sample values.
@@ -1046,9 +1059,9 @@ TEST(SReflect, DerivedClass) {
 
   std::vector<SRTestValue<MyDerived>> testValues = {
       SRTestValue<MyDerived>{
-          {"one", true, -3}, "{\"baseBool\":true, \"baseInt\":-3, \"derivedStr\":\"one\"}"},
+          {"one", true, -3}, R"({"baseBool":true, "baseInt":-3, "derivedStr":"one"})"},
       SRTestValue<MyDerived>{
-          {"two", false, 9}, "{\"baseBool\":false, \"baseInt\":9, \"derivedStr\":\"two\"}"},
+          {"two", false, 9}, R"({"baseBool":false, "baseInt":9, "derivedStr":"two"})"},
   };
 
   // NOTE: The full name of a function-local struct is implementation defined
@@ -1645,7 +1658,7 @@ TEST(SReflect, DeserializeMissingFields) {
   int numIssuesDetected = 0;
   SReflect::FromJsonString(
       obj,
-      "{\"second\":8.0,\"inner\":{\"third\":9},\"sixth\":\"ten\"}",
+      R"({"second":8.0,"inner":{"third":9},"sixth":"ten"})",
       SReflect::DeserializeFlags::MaximumWarnings,
       numIssuesDetected);
 
@@ -1665,7 +1678,7 @@ TEST(SReflect, DeserializeExtraFields) {
   int numIssuesDetected = 0;
   SReflect::FromJsonString(
       obj,
-      "{\"second1\":8.0,\"inner\":{\"third2\":9},\"sixth\":\"ten\"}",
+      R"({"second1":8.0,"inner":{"third2":9},"sixth":"ten"})",
       SReflect::DeserializeFlags::MaximumWarnings,
       numIssuesDetected);
 
@@ -2423,7 +2436,7 @@ bool operator==(MapSortedKeys const& a, MapSortedKeys const& b) {
 }
 
 TEST(SReflect, Serde_MapSortedKeys) {
-  constexpr size_t kCount = 5;
+  constexpr int kCount = 5;
 
   // Initial version
   MapSortedKeys v;
@@ -2565,12 +2578,12 @@ struct DoNotSerializeDefaults_Struct {
   std::string str = "hello";
   int value = 123;
   DoNotSerializeDefaults_Nested nested;
-  DoNotSerializeDefaults_Nested nestedOurDefaults = {"Bob", {911}};
+  DoNotSerializeDefaults_Nested nestedOurDefaults = {"Bob", {911}, {}, {}};
   std::array<std::string, 2> arrayOfStr = {"one", "two"};
   std::vector<std::string> vectorOfStr;
   std::array<DoNotSerializeDefaults_Nested, 2> arrayOfNested = {
-      DoNotSerializeDefaults_Nested{"Fred", {42}},
-      DoNotSerializeDefaults_Nested{"Fred's friend", {43}}};
+      DoNotSerializeDefaults_Nested{"Fred", {42}, {}, {}},
+      DoNotSerializeDefaults_Nested{"Fred's friend", {43}, {}, {}}};
   std::vector<DoNotSerializeDefaults_Nested> vectorOfNested;
 
   bool operator==(DoNotSerializeDefaults_Struct const& other) const {
@@ -2594,8 +2607,8 @@ struct DoNotSerializeDefaults_Struct {
 };
 
 struct DoNotSerializeDefaults_PerField {
-  DoNotSerializeDefaults_Nested nested1 = {"Billy", {11}};
-  DoNotSerializeDefaults_Nested nested2 = {"Bilbo", {111}};
+  DoNotSerializeDefaults_Nested nested1 = {"Billy", {11}, {}, {}};
+  DoNotSerializeDefaults_Nested nested2 = {"Bilbo", {111}, {}, {}};
 
   bool operator==(DoNotSerializeDefaults_PerField const& other) const {
     return nested1 == other.nested1 && nested2 == other.nested2;
@@ -2711,11 +2724,12 @@ TEST(SReflect, SRA_DoNotSerializeDefaults_Struct) {
   // Non-default within a std::vector of nested structs (defaults come from
   // DoNotSerializeDefaults_Nested)
   obj = {};
-  obj.vectorOfNested.emplace_back(DoNotSerializeDefaults_Nested{"Nancy", {}}); // Non-default name
   obj.vectorOfNested.emplace_back(
-      DoNotSerializeDefaults_Nested{"nested", {555}}); // Non-default deeper.magic
+      DoNotSerializeDefaults_Nested{"Nancy", {}, {}, {}}); // Non-default name
   obj.vectorOfNested.emplace_back(
-      DoNotSerializeDefaults_Nested{"George", {666}}); // Non-default both
+      DoNotSerializeDefaults_Nested{"nested", {555}, {}, {}}); // Non-default deeper.magic
+  obj.vectorOfNested.emplace_back(
+      DoNotSerializeDefaults_Nested{"George", {666}, {}, {}}); // Non-default both
   ExpectJsonRoundTrip(
       obj,
       R"({"vectorOfNested":[{"name":"Nancy"},{"deeper":{"magic":555}},{"deeper":{"magic":666},"name":"George"}]})");
@@ -3090,9 +3104,8 @@ class TestMatrix {
   bool operator==(TestMatrix const& rhs) const {
     return (layout._numRows == rhs.layout._numRows) &&
         (layout._numColumns == rhs.layout._numColumns) &&
-        (layout._leadingDim == rhs.layout._leadingDim ||
-         !(layout._leadingDim *
-           rhs.layout._leadingDim)) && // Allow inequality if leading dim is auto-calculated
+        (layout._leadingDim == rhs.layout._leadingDim || layout._leadingDim == 0 ||
+         rhs.layout._leadingDim == 0) && // Allow inequality if leading dim is auto-calculated
         (data == rhs.data);
   }
 };
@@ -3817,13 +3830,13 @@ static void TestMatrixRoundTrip() {
       m1.data = src.data;
       if constexpr (kIsRowMajor) {
         m1.layout._leadingDim = m1.layout._numColumns + 1;
-        for (int r = 0; r < m1.layout._numRows; ++r) {
+        for (size_t r = 0; r < m1.layout._numRows; ++r) {
           // Insert a 42 after each row, as padding.
           m1.data.insert(m1.data.begin() + m1.layout._numColumns + r * m1.layout._leadingDim, 42);
         }
       } else {
         m1.layout._leadingDim = m1.layout._numRows + 1;
-        for (int c = 0; c < m1.layout._numColumns; ++c) {
+        for (size_t c = 0; c < m1.layout._numColumns; ++c) {
           // Insert a 42 after each column, as padding.
           m1.data.insert(m1.data.begin() + m1.layout._numRows + c * m1.layout._leadingDim, 42);
         }
@@ -3980,7 +3993,7 @@ TEST(SReflect, Variant_InnerTypeIndex) {
   constexpr char const* kExpectedDefaultJson[4] = {
       "{\"int32\":0}", // int
       "{\"float\":0}", // float
-      "{\"string\":\"\"}", // std::string
+      R"({"string":""})", // std::string
       "{\"vector<int32>\":[]}"};
   for (size_t i = 0; i < 4; ++i) {
     EXPECT_EQ(true, ti.TrySetInnerTypeIndex(&v, i));

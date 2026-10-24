@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "assets/asset.h"
+#include "assets/asset_types.h"
 
 #include <mochi_core/test/log_suppression.h>
 #include <mochi_core/test/mochi_test_helpers.h>

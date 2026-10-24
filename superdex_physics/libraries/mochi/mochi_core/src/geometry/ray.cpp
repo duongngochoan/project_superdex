@@ -66,10 +66,9 @@ Vec4r mochi::BarycentricCoordinates(Triangle const& triangle, Vec4r const& point
 
   real const scale = dot00 * dot11;
   real const denom = scale - dot01 * dot01;
-  if (NearZero(denom, kDefaultNearEqualEpsilon<real> * scale))
-    MOCHI_UNLIKELY {
-      return {-1_r, -1_r, -1_r};
-    }
+  if (NearZero(denom, kDefaultNearEqualEpsilon<real> * scale)) MOCHI_UNLIKELY {
+    return {-1_r, -1_r, -1_r};
+  }
 
   real const invDenom = 1_r / denom;
   real const u = (dot11 * dot02 - dot01 * dot12) * invDenom;

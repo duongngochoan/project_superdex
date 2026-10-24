@@ -19,10 +19,10 @@
 #include <mochi_core/element_operations/fem_traction.h>
 #include <mochi_core/elements/tetrahedral/finite_element.h>
 #include <mochi_core/elements/tetrahedral/finite_element_trace.h>
-#include <mochi_core/elements/tetrahedral/simplex_quadrature.h>
 #include <mochi_core/geometry/tetrahedral_mesh.h>
 #include <mochi_core/utils/batch_config.h>
 #include <mochi_core/utils/batch_types.h>
+#include <mochi_core/utils/constants.h>
 #include <mochi_core/utils/dynamic_array.h>
 
 #include <functional>
@@ -82,19 +82,12 @@ static void BenchmarkTractionWork(benchmark::State& state) {
       Real3{0_r, 0_r, 0_r}, Real3{1_r, 0_r, 0_r}, Real3{0_r, 1_r, 0_r}, Real3{0_r, 0_r, 1_r}};
   constexpr Int4 kConnectivity[] = {Int4{0, 1, 2, 3}};
   TetrahedralMesh mesh(kCoordinates, kConnectivity);
-  VolumeElement volumeElement(
-      0,
-      mesh.GetNodeCoordinates(),
-      mesh.GetElementConnectivity(),
-      tetrahedral::kTetrahedralQuadrature1);
+  VolumeElement volumeElement(0, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity());
 
   DynamicArray<TraceElement> traces;
   traces.reserve(kNumTraceElements);
-  constexpr auto kTraceQuadrature = tetrahedral::details::MakeTetrahedralTraceQuadrature<
-      triangular::TriangleQuadrature<kNumQuadPoints>>();
   for (int i = 0; i < kNumTraceElements; ++i) {
-    int const face = i % isize(kTraceQuadrature);
-    traces.emplace_back(volumeElement, face, kTraceQuadrature[face]);
+    traces.emplace_back(volumeElement, i % isize(TetFaces::kIndices));
   }
 
   NdArray<int, kBatchSize> elementIndices{};

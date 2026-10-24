@@ -67,15 +67,23 @@ struct CDofOffset : NoCopy {
 // Cleared at the end of mochi::PreStepEcs.
 struct TagGlobalDofsChanged {};
 
-/*
-  Stores the actor's mass matrix. This is pre-computed so that the per-step assembly doesn't have to
-  assemble the inertia dresidual element-by-element every time. Instead, we can simply copy the
-  values of this matrix and scale them by (1 / dt^2).
-*/
+/**
+ * @brief Stores the mass matrix of an actor.
+ *
+ * @details Only soft actors with inertia but no stress store one. Soft-skinned actors also store
+ * one if their inertia is posed and their stress unposed, or vice versa, because posed and unposed
+ * terms are assembled separately. Without stress, the assembled dresidual is the mass matrix times
+ * (1 / dt^2 + alpha / dt), with dt the stage time step and alpha the mass-damping coefficient, so
+ * the full-order assembly copies the scaled values instead of adding the mass element by element.
+ * When inertia and stress are assembled together, the mass is added in the element loop.
+ */
 struct CMassMatrix : public NoCopy {
   // Storing a SparseMatrix or BlockSparseMatrix here would require us to duplicate the indicies of
   // the actor's dresidual matrix. Instead, we store just the value array. It must match the number
   // of non-zeros stored in CActorSnle::fullDResidual.
+  // TODO: Explore storing one value per 3x3 block. Each block of the consistent mass is m_ij·I₃:
+  // its off-diagonal entries are zero and its diagonal entries are equal. The array, and the reads
+  // of its copy into the dresidual, would be 9x smaller.
   DynamicArray<real> values;
 };
 
@@ -85,27 +93,6 @@ struct CMassMatrix : public NoCopy {
  */
 struct CLumpedMassMatrix : public NoCopy {
   DynamicArray<real> values;
-};
-
-/*
-  The following component stores the per-element mass matrix.
-
-  This is used in two places:
-  - inside mochi::soft::UpdateSoftMass: it serves as auxiliary data
-    that is computed/updated and then used to update the CMassMatrix
-
-  - in the ROM code, when doing the per-element assembly and project,
-    it is used directly to initialize the per-element DRes
-
-  Note: templated on the fem volume discretization type to make the dependency explicit.
-  This allows to set kNumEleDofs correctly for a generic discretization type rather
-  than hardwiring it, even if currently in mochi the most likely type used for this is
-  CFemVolumeDiscretizationP1Q4.
-*/
-template <typename CFemVolumeDiscretizationType>
-struct CPerElementMassMatrix : public NoCopy {
-  static int constexpr kNumElemDofs = CFemVolumeDiscretizationType::kNumEleDofs;
-  DynamicArray<NdArray<real, kNumElemDofs, kNumElemDofs>> values;
 };
 
 /*
@@ -138,14 +125,16 @@ struct CDofPositionsBC : public NoCopy {
   /// dof, pose, and colValue arrays.
   DynamicArray<PermanentRange> permanentRanges;
 
-  void Clear() {
+  // Removes all non-permanent boundary conditions. Returns true if any were removed.
+  bool Clear() {
     if (permanentRanges.empty()) {
+      bool const hadAny = !dofIndices.empty() || !poseIndices.empty();
       dofIndices.clear();
       poseIndices.clear();
       dofValues.clear();
       poseValues.clear();
       colValueIndices.clear();
-      return;
+      return hadAny;
     }
 
     int permanentDofCount = 0;
@@ -162,7 +151,7 @@ struct CDofPositionsBC : public NoCopy {
         "BC value arrays must stay in lockstep with their index arrays.");
     if (permanentDofCount == isize(dofIndices) && permanentPoseCount == isize(poseIndices) &&
         permanentColValueCount == isize(colValueIndices)) {
-      return;
+      return false;
     }
 
     std::vector<int> newDofIndices;
@@ -219,6 +208,7 @@ struct CDofPositionsBC : public NoCopy {
     poseValues = std::move(newPoseValues);
     colValueIndices = std::move(newColValueIndices);
     permanentRanges = std::move(newPermanentRanges);
+    return true;
   }
 };
 
@@ -294,8 +284,8 @@ struct TagUseNewtonEulerInertia {};
 
 // Get the Newton solver parameters for a simulation island.
 void GetIslandNewtonParams(
-    int numDofs,
-    SolverParams const& simParams,
+    entt::registry const& reg,
+    entt::entity island,
     NewtonSolverParams& outNewtonParams);
 
 // Set Dirichlet BCs on the solution vector. The BC indices must index the solution vector.

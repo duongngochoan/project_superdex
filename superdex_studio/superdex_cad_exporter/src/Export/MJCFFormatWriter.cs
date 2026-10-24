@@ -9,7 +9,6 @@ using System.Collections.Generic;
 using System.Xml;
 
 using CADRobotExporter.RobotDescription;
-using CADRobotExporter.UI;
 
 namespace CADRobotExporter.Export
 {

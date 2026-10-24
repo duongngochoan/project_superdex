@@ -28,7 +28,9 @@
 #include <mochi_physics/dbg/protocol.h>
 
 #include <cinttypes>
+#include <deque>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -58,6 +60,8 @@ struct SceneSyncParams {
                            ///< Ignored if not @ref enabled.
   bool useVisualMesh = true; ///< Prefer actor visual meshes when available. Otherwise, synchronize
                              ///< simulation surface meshes. Requires @ref syncMeshes.
+  bool syncPerformance = false; ///< Should per-step profiling data be included? Ignored if not
+                                ///< @ref enabled. See @ref DebugClient::ReadProfileHistory.
 
   bool operator==(SceneSyncParams const& rhs) const = default;
 };
@@ -67,10 +71,57 @@ struct DebugClientSettings {
   /// @brief Parameters to control automatic synchronization of scene state
   SceneSyncParams sync;
 
+  /// @brief Number of step profiles retained by @ref DebugClient::ReadProfileHistory.
+  int maxProfileHistory = 2500;
+
   bool operator==(DebugClientSettings const& rhs) const = default;
 };
 
 using MeshSyncData = protocol::MeshSyncData;
+
+/// @brief Step profiles retained by the client, oldest first.
+class StepProfileHistory {
+ public:
+  using const_iterator = std::deque<protocol::StepProfileData>::const_iterator;
+  using size_type = std::deque<protocol::StepProfileData>::size_type;
+
+  [[nodiscard]] bool empty() const {
+    return _profiles.empty();
+  }
+  [[nodiscard]] size_type size() const {
+    return _profiles.size();
+  }
+  [[nodiscard]] protocol::StepProfileData const& operator[](size_type index) const {
+    return _profiles[index];
+  }
+  [[nodiscard]] protocol::StepProfileData const& front() const {
+    return _profiles.front();
+  }
+  [[nodiscard]] protocol::StepProfileData const& back() const {
+    return _profiles.back();
+  }
+  [[nodiscard]] const_iterator begin() const {
+    return _profiles.begin();
+  }
+  [[nodiscard]] const_iterator end() const {
+    return _profiles.end();
+  }
+
+  /// @brief Sequence of the oldest retained profile, or zero when empty.
+  [[nodiscard]] uint64_t GetBeginSequence() const;
+
+  /// @brief Sequence one past the newest retained profile, or zero when empty.
+  [[nodiscard]] uint64_t GetEndSequence() const;
+
+ private:
+  friend class DebugClient;
+
+  void Append(DynamicArray<protocol::StepProfileData> const& profiles);
+  void Trim(int maxSize);
+  void Clear();
+
+  std::deque<protocol::StepProfileData> _profiles;
+};
 
 /// @brief A non-owning view into a mesh's data, in actor-local coordinates.
 struct MeshSyncDataView {
@@ -265,6 +316,29 @@ class DebugClient {
   void GetSceneSyncData(std::function<void(SceneSyncData const& data)> const& fn) const;
 
   /**
+   * @brief Access the selected scene's step profile history via callback.
+   *
+   * @param fn Called immediately as `fn(StepProfileHistory const&)`, oldest first, while the client
+   * state is locked. Keep it short: copy what is needed and return.
+   *
+   * @details Samples arrive while @ref SceneSyncParams::syncPerformance is enabled. The history is
+   * cleared when the selected scene changes, on disconnect, and by @ref ClearProfileHistory.
+   */
+  template <class Fn>
+  void ReadProfileHistory(Fn&& fn) const {
+    _state.Read([&](State const& state) { fn(state.profileHistory); });
+  }
+
+  /** @brief Discard all step profile history. */
+  void ClearProfileHistory();
+
+  /**
+   * @brief Return the number of task scheduler worker threads reported by the server. Zero if the
+   * server is single-threaded or this client is not fully connected.
+   */
+  [[nodiscard]] int GetServerNumWorkerThreads() const;
+
+  /**
    * @brief Set the playback mode for all scenes.
    *
    * @details The mode is remembered while disconnected, and is applied to each scene as the
@@ -280,6 +354,54 @@ class DebugClient {
 
   /** @brief Restore the selected scene to its initial debugger snapshot. */
   void RestoreSceneState();
+
+  /**
+   * @brief Get the catalog of debug draw features reported by the server, with the client's
+   * current enable state.
+   *
+   * @return A thread-safe snapshot of the current feature catalog and enable state.
+   */
+  [[nodiscard]] DynamicArray<protocol::DbgDrawFeature> GetDebugDrawFeatures() const;
+
+  /**
+   * @brief Enable or disable one debug draw feature.
+   *
+   * @note An invalid feature name will be ignored (no change).
+   * @note When a feature is enabled, the master enable bool will also be set to true.
+   *
+   * @param featureName Name of a debug draw feature.
+   * @param enable True to enable the Feature. False to disable.
+   *
+   * @see GetDebugDrawFeatures
+   */
+  void EnableDebugDrawFeature(std::string_view featureName, bool enable);
+
+  /** @brief Return the state of the debug draw master switch. */
+  [[nodiscard]] bool IsDebugDrawEnabled() const;
+
+  /** @brief Set the debug draw master switch. */
+  void EnableDebugDraw(bool enable);
+
+  /**
+   * @brief Get the selected scene's @ref experimental::SleepParams.
+   *
+   * @return The client's copy, or nullopt if no scene is selected or the server has not yet
+   * reported the value.
+   *
+   * @details The server's value is requested when a scene is selected, including on connect.
+   * After that, the client's copy is only changed by @ref SetSleepParams. Changes made on the
+   * server by other means are not observed until the next selection.
+   */
+  [[nodiscard]] std::optional<experimental::SleepParams> GetSleepParams() const;
+
+  /**
+   * @brief Store @p params and send them to the selected scene. No-op if the value has not been
+   * received from the server yet (see @ref GetSleepParams).
+   *
+   * @note If the server rejects the params, a warning is printed and the client's copy is not
+   * reverted.
+   */
+  void SetSleepParams(experimental::SleepParams const& params);
 
   /**
    * @brief Execute a console command
@@ -330,11 +452,20 @@ class DebugClient {
     DynamicArray<std::string> cmdPath; // Current console command path
     DynamicArray<SceneInfo> scenes; // Cached list of scenes, kept in sync with the server
     CoordinateSpace coordinateSpace = CoordinateSpace::Filament(); // Synced from the server
+    protocol::DbgDrawFeatures debugDraw; // Feature catalog plus the client's desired enable state
     SceneHandle selectedScene; // Currently selected scene (if any)
     SceneSyncData syncData; // Latest sync data received from the server.
     uint64_t syncCounter = 0; // Incremented when sync data changes.
     std::unordered_map<ActorHandle, MeshInfo> meshCache; // Per-actor mesh cache.
     DebugClientSettings settings;
+
+    // Selected scene's sleep params. Cleared when the selection changes, then read from the server.
+    std::optional<experimental::SleepParams> sleepParams;
+
+    // Selected scene's step profiles, oldest first. At most settings.maxProfileHistory.
+    StepProfileHistory profileHistory;
+
+    int serverNumWorkerThreads = 0; // From the WelcomeMessage
   };
 
   void InitProtocol();
@@ -347,12 +478,15 @@ class DebugClient {
   DynamicArray<std::string> ResolvePath(std::string_view pathArg, Error& error);
   void ValidatePath(Span<std::string const> path, Error& error);
   static protocol::SceneSyncRequest MakeSyncRequest(State const& state);
+  static protocol::DebugDrawRequest MakeDebugDrawRequest(State const& state);
   static bool IsAutoSelectableScene(SceneInfo const& scene);
   static SceneHandle FindAutoSelectableScene(Span<SceneInfo const> scenes);
   static void SetSelectedScene(
       State& state,
       SceneHandle handle,
-      DynamicArray<protocol::SceneSyncRequest>& outRequests);
+      DynamicArray<protocol::SceneSyncRequest>& outSyncRequests,
+      DynamicArray<protocol::DebugDrawRequest>& outDebugDrawRequests,
+      DynamicArray<protocol::SleepParamsRequest>& outSleepRequests);
   static void UpdateActorMeshes(
       protocol::SceneSyncReply const& reply,
       std::unordered_map<ActorHandle, MeshInfo>& meshCache,
@@ -373,9 +507,11 @@ class DebugClient {
   // Message handlers
   void OnLogMessage(protocol::LogMessage&& msg);
   void OnWelcomeMessage(protocol::WelcomeMessage&& msg);
+  void OnDebugDrawReply(protocol::DebugDrawReply&& reply);
   void OnSceneAddRemove(protocol::SceneAddRemove&& msg);
   void OnSceneStepReply(protocol::SceneStepReply&& reply);
   void OnSceneSyncReply(protocol::SceneSyncReply&& reply);
+  void OnSleepParamsReply(protocol::SleepParamsReply&& reply);
 
   // Console command handlers
   void CmdConnect(Span<std::string const> args);

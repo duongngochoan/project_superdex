@@ -262,12 +262,10 @@ MOCHI_FORCE_INLINE void StribeckActivation(
       df = dfInfty;
       ddf = 0_r;
     }
-    if (x == 0_r)
-      MOCHI_UNLIKELY {
-        // Technically reachable if we allow t = 0 (cf. nested Select in IPCstepC1)
-        df_x = 0_r;
-      }
-    else {
+    if (x == 0_r) MOCHI_UNLIKELY {
+      // Technically reachable if we allow t = 0 (cf. nested Select in IPCstepC1)
+      df_x = 0_r;
+    } else {
       df_x = df / x;
     }
   }

@@ -33,6 +33,7 @@
 #include <mochi_core/utils/rigid_body_size.h>
 #include <mochi_core/utils/rigid_body_utils.h>
 
+#include <array>
 #include <cstddef>
 
 /**
@@ -77,9 +78,7 @@
 // - Improve the formulation for twist DoF weights of rod actors. Consider treating each rod element
 //   as a rigid body in 3D space, computing its full inertia tensor (diagonal in element-adapted
 //   frame), and using the maximum characteristic torque from that. This would provide a purely
-//   inertial twist weight that is always positive (even for straight rods with negligible
-//   rotational inertia), eliminating the curvature-based branch and the dimensionally-inconsistent
-//   w=1 fallback.
+//   inertial twist weight, eliminating the curvature-based branch.
 // - Introduce stiffness-based weights for quasi-static simulation, defining characteristic forces
 //   from elastic and geometric properties.
 
@@ -113,8 +112,11 @@ static VMatrix3x3r SqrtSym3x3(VSymMatrix3x3r const& sym) {
  * The diagonal elements (√I_world)_{ii} give the per-axis characteristic torques. MOI must be in
  * the world frame to match the world-frame rotational residual DoFs.
  */
-static ColumnVector<real>
-GetRigidActorResidualWeights(entt::registry const& reg, entt::entity actor, real aRef) {
+static void GetRigidActorResidualWeights(
+    entt::registry const& reg,
+    entt::entity actor,
+    real aRef,
+    ColumnVector<real>& outWeights) {
   MOCHI_ASSERT_VERBOSE(
       reg.all_of<TagRigidActor>(actor) && !reg.any_of<TagStaticActor>(actor),
       "Expected rigid dynamic actor.");
@@ -126,24 +128,22 @@ GetRigidActorResidualWeights(entt::registry const& reg, entt::entity actor, real
   auto const moiWorld =
       RotateInertia(inertia.GetMomentOfInertiaLocal(), rootTransform.worldFromLocal.GetRotation());
 
-  ColumnVector<real> weights(RigidSize::kDAll);
+  outWeights.Resize(RigidSize::kDAll);
 
   // Translational DoFs: f_c = m·aRef.
   real const fRef = mass * aRef;
   real const forceWeight = (fRef > 0_r) ? (1_r / Sqr(fRef)) : 1_r;
   for (int i = 0; i < RigidSize::kDTrans; ++i) {
-    weights(i) = forceWeight;
+    outWeights(i) = forceWeight;
   }
 
   // Rotational DoFs: τ_c = aRef·√m·(√I_world)_{ii} via principal matrix square root.
   auto const sqrtI = SqrtSym3x3(SimdFullToSym(moiWorld));
   for (int i = 0; i < RigidSize::kDRot; ++i) {
     real const characteristicTorque = aRef * Sqrt(mass) * sqrtI[i][i];
-    weights(RigidSize::kDTrans + i) =
+    outWeights(RigidSize::kDTrans + i) =
         (characteristicTorque > 0_r) ? (1_r / Sqr(characteristicTorque)) : 1_r;
   }
-
-  return weights;
 }
 
 /**
@@ -298,8 +298,7 @@ GetRodActorResidualWeights(entt::registry const& reg, entt::entity actor, real a
       "Inconsistent number of nodes and elements for rod actor.");
   MOCHI_ASSERT_VERBOSE(material.linearDensity > 0_r, "Linear density must be positive.");
   MOCHI_ASSERT_VERBOSE(
-      material.linearRotationalInertia > 0_r || material.torsionalStiffness > 0_r,
-      "Rotational inertia and/or torsional stiffness must be positive.");
+      material.linearRotationalInertia > 0_r, "Rotational inertia must be positive.");
 
   // --- Curvature-based twist weights ---
 
@@ -328,14 +327,9 @@ GetRodActorResidualWeights(entt::registry const& reg, entt::entity actor, real a
 
   real const totalMass = rod::GetActorMass(reg, actor);
   real const forceScaling = (totalMass > 0_r) ? (1_r / (Sqr(aRef) * totalMass)) : 0_r;
-  real rotScaling = 0_r;
-  if (material.linearRotationalInertia > 0_r) {
-    real const gyrRadius = Sqrt(material.linearRotationalInertia / material.linearDensity);
-    real const totalRotInertia = HSum(MakeConstSpan(elementRotationalInertias.values));
-    if (totalRotInertia > 0_r) {
-      rotScaling = 1_r / (Sqr(aRef / gyrRadius) * totalRotInertia);
-    }
-  }
+  real const gyrRadius = Sqrt(material.linearRotationalInertia / material.linearDensity);
+  real const totalRotInertia = HSum(MakeConstSpan(elementRotationalInertias.values));
+  real const rotScaling = 1_r / (Sqr(aRef / gyrRadius) * totalRotInertia);
 
   // --- Assemble weights ---
   ColumnVector<real> weights(numDofs);
@@ -371,60 +365,49 @@ GetRodActorResidualWeights(entt::registry const& reg, entt::entity actor, real a
     real const curvatureCouplingWeight = (forceScaling > 0_r && elemMass > 0_r)
         ? (forceScaling * Sqr(effectiveCurvature) / elemMass)
         : 0_r;
-    real const rotInertiaWeight =
-        (rotScaling > 0_r && elementRotationalInertias.values[nodeIdx] > 0_r)
-        ? (rotScaling / elementRotationalInertias.values[nodeIdx])
-        : 0_r;
+    real const rotInertiaWeight = rotScaling / elementRotationalInertias.values[nodeIdx];
     MOCHI_ASSERT_VERBOSE(
-        curvatureCouplingWeight >= 0_r && rotInertiaWeight >= 0_r,
-        "Twist weight components must be non-negative.");
+        curvatureCouplingWeight >= 0_r && rotInertiaWeight > 0_r && IsFinite(rotInertiaWeight),
+        "Curvature twist weight must be non-negative and inertia twist weight must be positive and "
+        "finite.");
 
-    // Note: When both criteria give zero (e.g. straight rod with negligible rotational inertia
-    // under pure torsion), falls back to w=1. This is dimensionally inconsistent but conservative
-    // — the twist residual is not downweighted. See the TODO at the top of this file for a
-    // unified inertia-based formulation that would avoid this.
-    real const twistWeight = Max(curvatureCouplingWeight, rotInertiaWeight);
-    weights(baseDof + 3) = (twistWeight > 0_r) ? twistWeight : 1_r;
+    weights(baseDof + 3) = Max(curvatureCouplingWeight, rotInertiaWeight);
   }
 
   return weights;
 }
 
 /**
- * @brief Compute diagonal block of M(q) = Jᵀ·H·J for DoFs [dofStart, dofStart + blockSize). Returns
- * a 3×3 compile-time matrix. Caller must use top-left blockSize × blockSize.
+ * @brief Compute the kBlockSize × kBlockSize diagonal block of M(q) = Jᵀ·H·J for DoFs
+ * [dofStart, dofStart + kBlockSize).
  */
-static Matrix<real, 3, 3> ComputeMassBlock(
+template <int kBlockSize>
+[[nodiscard]] static Matrix<real, kBlockSize, kBlockSize> ComputeMassBlock(
     entt::registry const& reg,
     CGroupMembers const& groupMembers,
-    CArticulatedLinkTransforms<TimeStep::Current> const& linkTransforms,
+    Span<VMatrix3x3r const> linkMoisWorld,
     RowMatrixView<real const> J,
-    int dofStart,
-    int blockSize) {
-  MOCHI_ASSERT_VERBOSE(blockSize == 1 || blockSize == 3, "Unsupported block size.");
+    int dofStart) {
+  static_assert(kBlockSize == 1 || kBlockSize == 3, "Unsupported block size.");
 
   int const numLinks = isize(groupMembers.actors);
-  auto block = Matrix<real, 3, 3>::Zero();
+  auto block = Matrix<real, kBlockSize, kBlockSize>::Zero();
 
   for (int k = 0; k < numLinks; ++k) {
     auto const& inertia = reg.get<CRigidBodyInertia>(groupMembers.actors[k]);
     int const linkOffset = k * RigidSize::kDAll;
 
-    // Extract the blockSize columns of J for this link's trans/rot rows.
-    auto Jt_block =
-        J.template Block<RigidSize::kDTrans>(linkOffset, dofStart, RigidSize::kDTrans, blockSize);
-    auto Jr_block = J.template Block<RigidSize::kDRot>(
-        linkOffset + RigidSize::kDTrans, dofStart, RigidSize::kDRot, blockSize);
+    // Extract the kBlockSize columns of J for this link's trans/rot rows.
+    auto JtBlock = J.template Block<RigidSize::kDTrans, kBlockSize>(
+        linkOffset, dofStart, RigidSize::kDTrans, kBlockSize);
+    auto JrBlock = J.template Block<RigidSize::kDRot, kBlockSize>(
+        linkOffset + RigidSize::kDTrans, dofStart, RigidSize::kDRot, kBlockSize);
 
     // Translational: mass × Jₜᵀ·Jₜ
-    block.Block(0, 0, blockSize, blockSize) +=
-        inertia.GetMass() * (Jt_block.Transpose() * Jt_block);
+    block += inertia.GetMass() * (JtBlock.Transpose() * JtBlock);
 
     // Rotational: Jᵣᵀ·MOI·Jᵣ (MOI in world frame).
-    auto const moiWorld =
-        RotateInertia(inertia.GetMomentOfInertiaLocal(), linkTransforms[k].GetRotation());
-    block.Block(0, 0, blockSize, blockSize) +=
-        Jr_block.Transpose() * AsMatrixView(moiWorld) * Jr_block;
+    block += JrBlock.Transpose() * AsMatrixView(linkMoisWorld[k]) * JrBlock;
   }
 
   return block;
@@ -462,20 +445,17 @@ static DynamicArray<real> ComputeSubtreeMasses(
 }
 
 /** @brief Compute the diagonal of the principal matrix square root of a symmetric PSD block. */
-static void BlockSqrtDiagonal(MatrixView<real const, 3, 3> block, Span<real> outDiag) {
-  int const size = isize(outDiag);
-  if (size == 1) {
-    outDiag[0] = Sqrt(Max(0_r, block(0, 0)));
-    return;
-  }
-
-  MOCHI_ASSERT_VERBOSE(size == 3, "Unsupported block size.");
-  VSymMatrix3x3r const sym{
-      Vec4r{block(0, 0), block(1, 1), block(2, 2)}, Vec4r{block(1, 0), block(2, 0), block(2, 1)}};
-  auto const sqrtM = SqrtSym3x3(sym);
-
-  for (int i = 0; i < 3; ++i) {
-    outDiag[i] = sqrtM[i][i];
+template <int kBlockSize>
+[[nodiscard]] static std::array<real, kBlockSize> BlockSqrtDiagonal(
+    MatrixView<real const, kBlockSize, kBlockSize> block) {
+  static_assert(kBlockSize == 1 || kBlockSize == 3, "Unsupported block size.");
+  if constexpr (kBlockSize == 1) {
+    return {Sqrt(Max(0_r, block(0, 0)))};
+  } else {
+    VSymMatrix3x3r const sym{
+        Vec4r{block(0, 0), block(1, 1), block(2, 2)}, Vec4r{block(1, 0), block(2, 0), block(2, 1)}};
+    auto const sqrtM = SqrtSym3x3(sym);
+    return {sqrtM[0][0], sqrtM[1][1], sqrtM[2][2]};
   }
 }
 
@@ -507,8 +487,11 @@ static void BlockSqrtDiagonal(MatrixView<real const, 3, 3> block, Span<real> out
  * 4. Characteristic Formula: We compute the principal matrix square root per block.
  *    Q_c,i = aRef * m_i¹/² * (M_block¹/²)_{ii}
  */
-static ColumnVector<real>
-GetArticulatedActorResidualWeights(entt::registry const& reg, entt::entity actor, real aRef) {
+static void GetArticulatedActorResidualWeights(
+    entt::registry const& reg,
+    entt::entity actor,
+    real aRef,
+    ColumnVector<real>& outWeights) {
   MOCHI_ASSERT_VERBOSE(reg.all_of<TagArticulatedActor>(actor), "Expected articulated actor.");
   MOCHI_ASSERT_VERBOSE(aRef > 0_r, "Characteristic acceleration must be positive.");
 
@@ -521,54 +504,66 @@ GetArticulatedActorResidualWeights(entt::registry const& reg, entt::entity actor
   auto const& dofInfo = reg.get<CActorDofInfo>(actor);
   int const numDofs = dofInfo.dofsSize;
 
-  // Stack allocator for temporaries (subtree masses + Qc per DoF).
-  constexpr std::size_t kStackSizeBytes = 1024 * 4;
+  // Stack allocator for temporaries (subtree masses + link MOIs in world space + Qc per DoF).
+  constexpr std::size_t kStackSizeBytes = 16 * 1024;
   MOCHI_FILO_STACK_ALLOCATOR(allocator, kStackSizeBytes);
 
   auto const subtreeMasses = ComputeSubtreeMasses(reg, groupMembers, parents, &allocator);
+  DynamicArray<VMatrix3x3r> linkMoisWorld(&allocator);
+  linkMoisWorld.resize_noinit(groupMembers.actors.size());
+  for (int i = 0; i < isize(groupMembers.actors); ++i) {
+    auto const& inertia = reg.get<CRigidBodyInertia>(groupMembers.actors[i]);
+    linkMoisWorld[i] =
+        RotateInertia(inertia.GetMomentOfInertiaLocal(), linkTransforms[i].GetRotation());
+  }
 
   // Compute Qc per DoF and accumulate per-type totals.
   DynamicArray<real> Qc(&allocator);
   Qc.resize_noinit(numDofs);
   real Qtrans = 0_r;
   real Qrot = 0_r;
-  real sqrtDiag[3] = {}; // Buffer for block-wise matrix square root.
-
   for (int j = 0; j < isize(joints->dofInfo); ++j) {
     auto const& joint = joints->dofInfo[j];
     real const sqrtSubtreeMass = Sqrt(subtreeMasses[joints->jointsChildLinks[j]]);
 
-    auto accumulateBlock = [&](int offset, int size, real& Qtype) {
-      auto const block = ComputeMassBlock(reg, groupMembers, linkTransforms, J, offset, size);
-      BlockSqrtDiagonal(block, Span(sqrtDiag, size));
-      for (int d = 0; d < size; ++d) {
+    auto accumulateBlock = [&]<int kBlockSize>(int offset, real& Qtype) {
+      auto const block =
+          ComputeMassBlock<kBlockSize>(reg, groupMembers, MakeConstSpan(linkMoisWorld), J, offset);
+      auto const sqrtDiag = BlockSqrtDiagonal<kBlockSize>(AsConstView(block));
+      for (int d = 0; d < kBlockSize; ++d) {
         Qc[offset + d] = aRef * sqrtSubtreeMass * sqrtDiag[d];
         Qtype += Qc[offset + d];
       }
     };
 
-    if (joint.transSize > 0) {
-      accumulateBlock(joint.GetTransOffset(), joint.transSize, Qtrans);
+    if (joint.transSize == 1) {
+      accumulateBlock.template operator()<1>(joint.GetTransOffset(), Qtrans);
+    } else if (joint.transSize == 3) {
+      accumulateBlock.template operator()<3>(joint.GetTransOffset(), Qtrans);
+    } else {
+      MOCHI_ASSERT_VERBOSE(joint.transSize == 0, "Unexpected joint translation size.");
     }
-    if (joint.rotSize > 0) {
-      accumulateBlock(joint.GetRotOffset(), joint.rotSize, Qrot);
+    if (joint.rotSize == 1) {
+      accumulateBlock.template operator()<1>(joint.GetRotOffset(), Qrot);
+    } else if (joint.rotSize == 3) {
+      accumulateBlock.template operator()<3>(joint.GetRotOffset(), Qrot);
+    } else {
+      MOCHI_ASSERT_VERBOSE(joint.rotSize == 0, "Unexpected joint rotation size.");
     }
   }
 
   // Compute weights.
-  ColumnVector<real> weights(numDofs);
+  outWeights.Resize(numDofs);
   auto fillWeights = [&](int offset, int size, real Qtype) {
     for (int d = 0; d < size; ++d) {
       int const idx = offset + d;
-      weights(idx) = (Qtype > 0_r && Qc[idx] > 0_r) ? (1_r / (Qtype * Qc[idx])) : 1_r;
+      outWeights(idx) = (Qtype > 0_r && Qc[idx] > 0_r) ? (1_r / (Qtype * Qc[idx])) : 1_r;
     }
   };
   for (auto const& joint : joints->dofInfo) {
     fillWeights(joint.GetTransOffset(), joint.transSize, Qtrans);
     fillWeights(joint.GetRotOffset(), joint.rotSize, Qrot);
   }
-
-  return weights;
 }
 
 void UpdateActorConvergenceWeights(
@@ -592,19 +587,18 @@ void UpdateActorConvergenceWeights(
   real const aRef = Max(1_r, Norm<3>(reg.ctx<CSceneGravity>().accel));
 
   if (reg.any_of<TagArticulatedActor>(actor)) {
-    outWeights.values = GetArticulatedActorResidualWeights(reg, actor, aRef);
+    GetArticulatedActorResidualWeights(reg, actor, aRef, outWeights.values);
   } else if (reg.any_of<TagRigidActor>(actor)) {
-    outWeights.values = GetRigidActorResidualWeights(reg, actor, aRef);
+    GetRigidActorResidualWeights(reg, actor, aRef, outWeights.values);
   } else if (reg.any_of<TagSoftActor>(actor)) {
     outWeights.values = GetSoftActorResidualWeights(reg, actor, aRef);
   } else if (reg.any_of<TagShellActor>(actor)) {
     outWeights.values = GetShellActorResidualWeights(reg, actor, aRef);
   } else if (reg.any_of<TagRodActor>(actor)) {
     outWeights.values = GetRodActorResidualWeights(reg, actor, aRef);
-  } else
-    MOCHI_UNLIKELY {
-      MOCHI_ASSERT(false, "Unexpected actor type.");
-    }
+  } else MOCHI_UNLIKELY {
+    MOCHI_ASSERT(false, "Unexpected actor type.");
+  }
   MOCHI_ASSERT_VERBOSE(IsFinite(MakeConstSpan(outWeights.values)), "Weights must be finite.");
 
   outWeights.isValid = true;

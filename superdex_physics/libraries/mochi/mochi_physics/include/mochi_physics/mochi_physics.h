@@ -34,10 +34,8 @@
 #include "cpp_api/mochi_structs.h"
 
 // Optionally include reflection support for API types
-#ifdef MOCHI_USE_REFLECTION
 #if MOCHI_USE_REFLECTION
 #include "utils/mochi_physics_reflection.generated.h"
-#endif
 #endif
 
 #else

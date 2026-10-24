@@ -67,7 +67,7 @@ class RootTask {
 };
 
 struct RootTask::promise_type {
-  promise_type(TaskSemaphore sem, [[maybe_unused]] auto&&... args) : _sem(sem) {}
+  promise_type(TaskSemaphore const& sem, [[maybe_unused]] auto&&... args) : _sem(sem) {}
   /// @brief The coroutine system will call handle.resume() when the coroutine
   /// is resumed.
   /// @param handle The coroutine handle.

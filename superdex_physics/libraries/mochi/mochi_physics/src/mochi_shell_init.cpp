@@ -22,13 +22,13 @@
 #include "mochi_deformable.h"
 #include "mochi_ecs_utils.h"
 #include "mochi_island.h"
+#include "mochi_linear_contact_skin.h"
 #include "mochi_point_cloud_contact.h"
 #include "mochi_scene_recorder.h"
 #include "mochi_shell.h"
 #include "mochi_simulation.h"
 #include "mochi_snle.h"
 
-#include <mochi_core/element_operations/element_assembler.h>
 #include <mochi_core/element_operations/fem_inertia.h>
 #include <mochi_core/geometry/deep_flow_map.h>
 #include <mochi_core/geometry/geometry_utils.h>
@@ -39,86 +39,14 @@
 #include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/error.h>
 #include <mochi_core/utils/log.h>
-#include <mochi_core/utils/profile.h>
 
 #include <memory>
-#include <type_traits>
 #include <utility>
 
 #include <entt/entity/view.hpp>
 
 using namespace mochi;
 using namespace mochi::experimental;
-
-static void UpdateMassMatrix(
-    CActorSnle const& actorSnle,
-    CLocal2GlobalMap const& l2g,
-    CNodalBasedStructure const& nbs,
-    real const& density,
-    CFemSurfaceDiscretizationP1Q3 const& femHighDisc,
-    CFullSparsityPattern const& sparsity,
-    CMassMatrix& outMassMatrix,
-    CPerElementMassMatrix<CFemSurfaceDiscretizationP1Q3>& outPerElemMass,
-    CLumpedMassMatrix& outLumpedMass,
-    CActiveVolumeElements const* activeVolElems = nullptr) {
-  MOCHI_PROFILE_SCOPE();
-
-  // Wrap the mass matrix values in a BlockSparseMatrixView for use below
-  MOCHI_ASSERT_VERBOSE(
-      (std::holds_alternative<BlockSparseMatrix<real, 3>>(actorSnle.fullDResidual)),
-      "Expected block sparse actor matrix.");
-  auto const& dresidual = std::get<BlockSparseMatrix<real, 3>>(actorSnle.fullDResidual);
-  BlockSparseMatrixView<real, 3> outMassMatrixBSp(
-      dresidual.BlockCols(), dresidual.Pointers(), dresidual.Indices(), outMassMatrix.values);
-
-  // Initialize to zero
-  outPerElemMass.values.resize_noinit(femHighDisc.femElements.size());
-  deformable::SetZeroMassMatrix(outMassMatrixBSp, MakeSpan(outPerElemMass.values));
-
-  MOCHI_ASSERT(
-      !activeVolElems || !activeVolElems->empty(), "Active volume elements must not be empty.");
-  Span<int const> activeVolIndices =
-      activeVolElems ? activeVolElems->ViewIndices() : Span<int const>{};
-  Span<real const> activeVolWeights =
-      activeVolElems ? activeVolElems->ViewWeights() : Span<real const>{};
-
-  // we need to first recompute the per-element mass matrices since this is used
-  // below for assembling the global mass matrix
-  fem::ComputeMassMatrixPerElement(
-      MakeConstSpan(femHighDisc.femElements),
-      density,
-      MakeSpan(outPerElemMass.values),
-      activeVolIndices,
-      activeVolWeights);
-
-  //
-  // here we only request to assemble the DRes because we want
-  // to assemble the mass matrix
-  //
-  AssemblyParams assemblyParams{
-      .assemObj = false, .assemRes = false, .assemDRes = true, .psdDRes = false};
-
-  AssemblyActiveSubset activeSubset = activeVolElems
-      ? AssemblyActiveSubset{activeVolIndices, activeVolElems->ViewIsActive()}
-      : AssemblyActiveSubset{};
-
-  // Assemble the global mass matrix from precomputed per-element triangle mass matrices. The shell
-  // assembler runs over the 6-node bending stencil, but inertia only uses the first 3 nodes, which
-  // are the triangle vertices. The 9x9 triangle mass matrix is written into the top-left block of
-  // the batched 18x18 element dresidual. The assembler then scatters it into the global matrix.
-  auto const massMatrixOp = deformable::MakeAddMassMatrixToDResOp<shell::ShellStencilElement>(
-      MakeConstSpan(outPerElemMass.values));
-  AssembleObjResDRes<shell::ShellStencilElement>(
-      l2g,
-      nbs,
-      massMatrixOp,
-      AssemblyResults<real>{
-          .outObj = nullptr, .outRes = {}, .outDRes = outMassMatrixBSp, .params = assemblyParams},
-      activeSubset);
-
-  // Compute lumped mass matrix.
-  deformable::ComputeLumpedMassMatrix(sparsity, outMassMatrix, outLumpedMass);
-}
 
 static void EmplaceShellActorDiscretization(
     entt::registry& reg,
@@ -135,6 +63,10 @@ static void EmplaceShellActorDiscretization(
     MOCHI_LOG_WARNING(
         "Shell shape has a visual mesh but no embedding. The visual mesh will be ignored.");
   }
+
+  if (shape->GetContactSkin()) {
+    reg.emplace<CContactSkinMesh>(e, shape->GetContactSkin(), shape->GetContactSkinEmbedding());
+  }
 }
 
 static void EmplaceShellActorContact(
@@ -144,8 +76,7 @@ static void EmplaceShellActorContact(
     std::shared_ptr<TriangularMeshShape const> shape,
     int numCollidingSamples,
     Error& error) {
-  reg.emplace<CBoundingVolume<TimeStep::Current>>(e, shape->GetMesh()->GetObb());
-  reg.emplace<CBoundingVolume<TimeStep::Previous>>(e, shape->GetMesh()->GetObb());
+  reg.emplace<CBoundingVolume>(e, shape->GetMesh()->GetObb());
 
   ColliderType colliderType = params.colliderType;
   if (colliderType == ColliderType::Auto) {
@@ -166,7 +97,7 @@ static void EmplaceShellActorContact(
   reg.emplace<CContactParams>(e, params.contact);
 
   // Components to detect and compute contact against other actors
-  deformable::EmplaceContactComponents(reg, e, numCollidingSamples);
+  deformable::EmplaceContactComponents(reg, e, numCollidingSamples, /*numContactPartitions*/ 1);
   reg.emplace<CDeformablePointAsyncCollisionsResponse>(e);
 
   reg.emplace<CActorAsyncContactSemaphore>(e);
@@ -191,17 +122,17 @@ static void EmplaceShellShellContact(
   reg.emplace<CCollJacs<CollRole::Collider>>(e);
 
   // Emplace point-cloud collider properties.
-  ValidatePointCloudColliderParams(params.pointCloudCollider, error);
+  ValidatePointCloudColliderParams(params.pointCloudCollider, params.contact, error);
   MOCHI_ERROR_RETURN(error);
   auto& pcComponent = reg.emplace<CPointCloudColliderParams>(e, params.pointCloudCollider);
   pcComponent.integralDim = 2;
+  int const numNodes = actorTriMesh.GetNumNodes();
   auto const& nodalWeights = reg.emplace<CNodalWeights>(
-      e, InitializeNodalWeights(reg.get<CFemSurfaceDiscretizationP1Q1>(e)));
+      e, InitializeNodalWeights(reg.get<CFemSurfaceDiscretizationP1Q1>(e), numNodes));
   // Create collider surface discretization from colliderTriangleElementType.
   CColliderPointCloudDiscretization colliderDisc = [&]() -> CColliderPointCloudDiscretization {
     if (!params.pointCloudCollider.colliderTriangleElementType.has_value()) {
       NodalColliderDiscretization nodalDisc;
-      int const numNodes = isize(actorTriMesh.GetNodeCoordinates());
       auto coordinates = actorTriMesh.GetNodeCoordinates();
       nodalDisc.femElements.reserve(numNodes);
       for (int i = 0; i < numNodes; ++i) {
@@ -233,6 +164,27 @@ void mochi::InitShellActor(
   ValidateContactParams(params.contact, error);
   shell::ValidateShellMaterialParams(params.material, error);
   MOCHI_ERROR_RETURN(error);
+  auto const& shapeContactSkinMesh = shapePtr->GetContactSkin();
+  MOCHI_ERROR_IF(
+      params.useContactSkin && !shapeContactSkinMesh,
+      error,
+      "useContactSkin requires a shell shape with a contact skin.");
+  MOCHI_ERROR_IF(
+      shapePtr->GetMesh()->GetNumActiveNodes() != shapePtr->GetMesh()->GetNumNodes(),
+      error,
+      "Shell mesh must not contain nodes that are unreferenced by its triangles.");
+  MOCHI_ERROR_RETURN(error);
+  // Plane stress of any valid isotropic 3D material gives membraneLambda / membraneMu < 2. The
+  // tolerance avoids warning on rounding error near the incompressible limit.
+  real constexpr kMaxPlaneStressLameRatio = 2_r + 1e-4_r;
+  if (params.material.membraneLambda > kMaxPlaneStressLameRatio * params.material.membraneMu) {
+    MOCHI_LOG_WARNING(
+        "Creating shell actor \"%s\" with membraneLambda / membraneMu = %g > 2, which exceeds the "
+        "plane-stress limit of any valid isotropic 3D material. The model remains well-posed, but "
+        "is not derivable from an isotropic 3D material.",
+        params.name.c_str(),
+        static_cast<double>(params.material.membraneLambda / params.material.membraneMu));
+  }
 
   // Identification
   reg.emplace<TagShellActor>(e);
@@ -297,71 +249,54 @@ void mochi::InitShellActor(
       e, BuildPaddedNodalBasedStructure<shell::kNumStencilNodes>(bendingEToN, bendingStencil));
 
   // L2G stores the raw bending connectivity plus stencil positions. Padded indices give the FEM
-  // assembler a uniform shell::kNumStencilNodes * kSpaceDim3 stride. Physical sparsity is still
-  // built from the raw connectivity.
+  // assembler a uniform shell::kNumStencilNodes * kSpaceDim3 stride.
   auto& l2g = reg.emplace<CLocal2GlobalMap>(e);
   l2g.InitializeFromElementNodeConnectivity(bendingEToN, kSpaceDim3);
   l2g.InitializeStencilIndices(bendingStencil);
   l2g.InitializePaddedIndices(shell::kNumStencilNodes * kSpaceDim3);
 
-  auto& fullSparsity = reg.emplace<CFullSparsityPattern>(e, MakeSparsityGraph(l2g, actorMeshDofs));
-
-  // DResidual Matrix
-  BlockSparseMatrix<real, 3> actorDRes;
-  {
-    int const numRows = isize(fullSparsity.graph.GetPointers()) - 1;
-    int const numCols = numRows; // Symmetrical
-    DynamicArray<real> values(fullSparsity.graph.NumTargets());
-    auto actorDResFullSparse = SparseMatrixView<real const>(
-        numCols,
-        fullSparsity.graph.GetPointers(),
-        fullSparsity.graph.GetTargets(),
-        MakeSpan(values));
-    auto blockStructure = BlockedStructure<3>(actorDResFullSparse);
-    actorDRes.Reset(
-        blockStructure.nBlockCols,
-        std::move(blockStructure.ptr),
-        std::move(blockStructure.ndIndices),
-        std::move(values));
-  }
-
   // Actor SNLE data.
-  auto const& actorSnle = reg.emplace<CActorSnle>(e, std::move(actorDRes));
+  reg.emplace<CActorSnle>(e, BlockSparseMatrix<real, 3>(actorTriMesh.GetNumNodes(), nbs.GetNToN()));
 
   // Non-linear solver convergence weights (lazily initialized).
   reg.emplace<CActorConvergenceWeights>(e);
 
-  // Surface discretizations
-  auto* femLowSurfDisc = &reg.emplace<CFemSurfaceDiscretizationP1Q1>(e);
-  auto* femHighSurfDisc = &reg.emplace<CFemSurfaceDiscretizationP1Q3>(e);
+  // Surface discretization
+  auto& femSurfDisc = reg.emplace<CFemSurfaceDiscretizationP1Q1>(e);
   {
-    femLowSurfDisc->femElements.reserve(actorTriMesh.GetNumElements());
-    femHighSurfDisc->femElements.reserve(actorTriMesh.GetNumElements());
+    femSurfDisc.femElements.reserve(actorTriMesh.GetNumElements());
     auto const meshCoords = actorTriMesh.GetNodeCoordinates();
     auto const meshConnec = actorTriMesh.GetElementConnectivity();
     int const meshNumEle = actorTriMesh.GetNumElements();
     for (int i = 0; i < meshNumEle; ++i) {
-      femLowSurfDisc->femElements.emplace_back(i, meshCoords, meshConnec);
-      femHighSurfDisc->femElements.emplace_back(i, meshCoords, meshConnec);
+      femSurfDisc.femElements.emplace_back(i, meshCoords, meshConnec);
     }
   }
+  TriangularMesh const& contactMesh = params.useContactSkin ? *shapeContactSkinMesh : actorTriMesh;
   auto const& contactDisc = reg.emplace<CFemSurfaceDiscretization>(
-      e, CFemSurfaceDiscretization::Create(params.contactElementType, actorTriMesh));
+      e, CFemSurfaceDiscretization::Create(params.contactElementType, contactMesh));
   // FIXME: This is a workaround to accommodate the fact that some queries use only the "lite"
   // surface discretization designed for rigid actors. These should be unified behind a single
   // interface, so only one component is added.
   reg.emplace<CFemSurfaceDiscretizationLite>(
-      e, CFemSurfaceDiscretizationLite::Create(params.contactElementType, actorTriMesh));
+      e, CFemSurfaceDiscretizationLite::Create(params.contactElementType, contactMesh));
 
-  // Codimensional contact assembly uses the shell surface triangles as the assembly elements:
-  // L2G has fixed 3-node x 3-DoF stride, matching CFemSurfaceDiscretization. The NBS uses the same
-  // triangle element order, while sparse indices are computed against the actor's full
-  // bending-stencil sparsity.
-  auto const& triConnectivity = actorTriMesh.GetElementConnectivity();
-  auto& contactL2g = reg.emplace<CContactLocal2GlobalMap>(e);
-  contactL2g.InitializeFromElementNodeConnectivity(triConnectivity, kSpaceDim3);
-  reg.emplace<CContactNodalBasedStructure>(
-      e, NodalBasedStructure(GraphFromRangeOfRanges<int, int>(triConnectivity), nbs.GetNToN()));
+  if (params.useContactSkin) {
+    linear_contact_skin::EmplaceComponents(
+        reg,
+        e,
+        contactDisc,
+        *shapeContactSkinMesh,
+        *shapePtr->GetContactSkinEmbedding(),
+        actorTriMesh.GetNodeCoordinates());
+  } else {
+    // Direct contact assembles shell triangles into the actor's body matrix.
+    auto const& triConnectivity = actorTriMesh.GetElementConnectivity();
+    auto& contactL2g = reg.emplace<CContactLocal2GlobalMap>(e);
+    contactL2g.InitializeFromElementNodeConnectivity(triConnectivity, kSpaceDim3);
+    reg.emplace<CContactNodalBasedStructure>(
+        e, NodalBasedStructure(GraphFromRangeOfRanges<int, int>(triConnectivity), nbs.GetNToN()));
+  }
 
   int const numCollidingSamples = contactDisc.GetNumQuadPoints();
   EmplaceShellActorContact(reg, e, params, shapePtr, numCollidingSamples, error);
@@ -370,30 +305,22 @@ void mochi::InitShellActor(
   EmplaceShellShellContact(reg, e, params, actorTriMesh, error);
   MOCHI_ERROR_RETURN(error);
 
+  if (params.useContactSkin) {
+    ecs::InvokeOnEntity(linear_contact_skin::UpdateBounds<TimeStep::Current>, reg, e);
+  } else {
+    ecs::InvokeOnEntity(shell::UpdateBounds<TimeStep::Current>, reg, e);
+  }
+
   // Bounds used for collision detection.
   reg.emplace<CConservativeStepBounds>(e);
 
-  // MassMatrix (for inertia)
-  auto& massMatrix = reg.emplace<CMassMatrix>(e);
-  massMatrix.values.resize(GetNumValues(actorSnle.fullDResidual), 0_r);
-
-  // Lumped mass matrix. Computed in UpdateMassMatrix.
+  // Lumped mass, for the convergence weights.
   auto& lumpedMass = reg.emplace<CLumpedMassMatrix>(e);
-
-  // Per-element mass matrix
-  // here, rather than hardwiring the template, we can deduce it so
-  // that if that changes this does not have to be modified
-  CPerElementMassMatrix<std::remove_pointer_t<decltype(femHighSurfDisc)>> perElemMass;
-  perElemMass.values.resize(l2g.GetNumElements());
-
-  UpdateMassMatrix(
-      actorSnle,
-      l2g,
-      nbs,
+  lumpedMass.values.resize_noinit(actorMeshDofs);
+  fem::ComputeLumpedMass(
+      MakeConstSpan(femSurfDisc.femElements),
       material.density,
-      *femHighSurfDisc,
-      fullSparsity,
-      massMatrix,
-      perElemMass,
-      lumpedMass);
+      /*activeElementIndices*/ {},
+      /*perElementExtraWeight*/ {},
+      MakeSpan(lumpedMass.values));
 }

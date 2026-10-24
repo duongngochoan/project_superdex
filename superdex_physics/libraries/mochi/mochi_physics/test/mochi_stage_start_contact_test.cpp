@@ -18,6 +18,8 @@
 
 #include <gtest/gtest.h>
 
+#include <utility>
+
 using namespace mochi;
 
 namespace {
@@ -25,66 +27,70 @@ namespace {
 constexpr int kNumPartitions = 3;
 
 template <TimeStep kTimeStep>
-using CActiveCollisionsAsync = CActiveCollisions<ContactType::Async, kTimeStep>;
-
-using CPotentialCollidersAsync = CPotentialColliders<ContactType::Async>;
+using CActiveCollisionsAsync = CActiveCollisions</*kIsSync*/ false, kTimeStep>;
 
 entt::entity Entity(int value) {
   return static_cast<entt::entity>(value);
 }
 
-PotentialColliderData PotentialCollider(int entity) {
-  return {Entity(entity)};
-}
-
 template <TimeStep kTimeStep>
 CActiveCollisionsAsync<kTimeStep> MakeActiveCollisions(
-    std::initializer_list<int> colliderEntities) {
-  CPotentialCollidersAsync potentialColliders;
-  for (int colliderEntity : colliderEntities) {
-    potentialColliders.push_back(PotentialCollider(colliderEntity));
+    std::initializer_list<std::pair<int, int>> pairs) {
+  CActiveCollisionsAsync<kTimeStep> activeCollisions(kNumPartitions);
+  activeCollisions.SetUp({});
+  for (auto const& [colliderEntity, partitionId] : pairs) {
+    activeCollisions.ActivatePartitionResult(Entity(colliderEntity), partitionId);
   }
-
-  CActiveCollisionsAsync<kTimeStep> activeCollisions;
-  activeCollisions.SetUp(potentialColliders, kNumPartitions);
+  activeCollisions.FinalizeActiveCollisions();
   return activeCollisions;
 }
 
 template <TimeStep kTimeStep>
-void ValidateActiveCollisions(
-    CActiveCollisionsAsync<kTimeStep>& activeCollisions,
-    std::initializer_list<int> colliderEntities) {
-  CPotentialCollidersAsync potentialColliders;
-  for (int colliderEntity : colliderEntities) {
-    potentialColliders.push_back(PotentialCollider(colliderEntity));
+auto EntriesOf(CActiveCollisionsAsync<kTimeStep> const& activeCollisions) {
+  DynamicArray<std::pair<int, int>> entries;
+  for (auto const& collision : activeCollisions) {
+    entries.emplace_back(
+        static_cast<int>(collision.colliderEntity), collision.collisionResult.collidingPartitionId);
   }
-
-  activeCollisions.SetUp(potentialColliders, kNumPartitions);
-  EXPECT_EQ(isize(colliderEntities) * kNumPartitions, isize(activeCollisions));
-
-  int activeCollisionIndex = 0;
-  for (int colliderEntity : colliderEntities) {
-    for (int partitionId = 0; partitionId < kNumPartitions; ++partitionId) {
-      EXPECT_EQ(Entity(colliderEntity), activeCollisions[activeCollisionIndex].colliderEntity);
-      EXPECT_EQ(
-          partitionId, activeCollisions[activeCollisionIndex].collisionResult.collidingPartitionId);
-      ++activeCollisionIndex;
-    }
-  }
+  return entries;
 }
 
 } // namespace
 
-TEST(MochiStageStartContact, AddMissingStageStartCollisions) {
-  auto stageStartCollisions = MakeActiveCollisions<TimeStep::StageStart>({10, 20});
-  auto currentCollisions = MakeActiveCollisions<TimeStep::Current>({10, 30});
-
-  ValidateActiveCollisions(stageStartCollisions, {10, 20});
-  ValidateActiveCollisions(currentCollisions, {10, 30});
-
-  stageStartCollisions[4].collisionResult.sampleIndices.push_back(7);
+TEST(MochiStageStartContact, AddsOnlyNonEmptyMissingPairs) {
+  auto stageStartCollisions =
+      MakeActiveCollisions<TimeStep::StageStart>({{10, 0}, {20, 1}, {30, 2}});
+  auto currentCollisions = MakeActiveCollisions<TimeStep::Current>({{10, 2}, {30, 2}});
+  stageStartCollisions[1].collisionResult.sampleIndices.push_back(7);
+  stageStartCollisions[2].collisionResult.sampleIndices.push_back(8);
 
   AddMissingStageStartCollisions(stageStartCollisions, currentCollisions);
 
-  ValidateActiveCollisions(currentCollisions, {10, 20, 30});
+  DynamicArray<std::pair<int, int>> const expected{{10, 2}, {20, 1}, {30, 2}};
+  EXPECT_EQ(EntriesOf(currentCollisions), expected);
+}
+
+TEST(MochiStageStartContact, InsertsMissingPartitionBetweenExistingPartitions) {
+  auto stageStartCollisions = MakeActiveCollisions<TimeStep::StageStart>({{10, 1}});
+  auto currentCollisions = MakeActiveCollisions<TimeStep::Current>({{10, 0}, {10, 2}});
+  stageStartCollisions[0].collisionResult.sampleIndices.push_back(7);
+  stageStartCollisions[0].collisionResult.isSdfGradUnitary = false;
+
+  AddMissingStageStartCollisions(stageStartCollisions, currentCollisions);
+
+  DynamicArray<std::pair<int, int>> const expected{{10, 0}, {10, 1}, {10, 2}};
+  ASSERT_EQ(EntriesOf(currentCollisions), expected);
+  EXPECT_FALSE(currentCollisions[1].collisionResult.isSdfGradUnitary);
+}
+
+TEST(MochiStageStartContact, PreservesExistingCurrentPair) {
+  auto stageStartCollisions = MakeActiveCollisions<TimeStep::StageStart>({{10, 1}});
+  auto currentCollisions = MakeActiveCollisions<TimeStep::Current>({{10, 1}});
+  stageStartCollisions[0].collisionResult.sampleIndices.push_back(7);
+  stageStartCollisions[0].collisionResult.isSdfGradUnitary = false;
+
+  AddMissingStageStartCollisions(stageStartCollisions, currentCollisions);
+
+  ASSERT_EQ(currentCollisions.size(), 1);
+  EXPECT_TRUE(currentCollisions[0].collisionResult.isSdfGradUnitary);
 }

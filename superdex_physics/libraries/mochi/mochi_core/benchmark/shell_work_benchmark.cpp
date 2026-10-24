@@ -142,8 +142,7 @@ struct ShellWorkBenchmarkData {
     // Material parameters (plane-stress SVK).
     constexpr real kYoungsModulus = 1e3_r;
     constexpr real kPoissonRatio = 0.3_r;
-    membraneLambda =
-        (kYoungsModulus * kPoissonRatio) / ((1_r + kPoissonRatio) * (1_r - 2_r * kPoissonRatio));
+    membraneLambda = (kYoungsModulus * kPoissonRatio) / (1_r - kPoissonRatio * kPoissonRatio);
     membraneMu = kYoungsModulus / (2_r * (1_r + kPoissonRatio));
     bendingAlpha = 1e-6_r;
     bendingBeta = 1e-6_r;
@@ -214,6 +213,7 @@ static void BenchmarkShellWork(benchmark::State& state, BenchmarkMode mode, Batc
         data.membraneMu,
         data.bendingAlpha,
         data.bendingBeta,
+        /*membraneCollapseBarrierStiffness*/ 0_r,
         projectPsd);
   };
 

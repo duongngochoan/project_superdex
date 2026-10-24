@@ -25,7 +25,9 @@
 // mochi_mesh/mochi_mesh_cli_encoding.h. Adding a field to any of these structs will fail to
 // compile there until the matching Write/Read pair is updated.
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace mochi::mesh {
 
@@ -153,6 +155,39 @@ struct StepTessellationParams {
   double angularDeflection = 0.5;
 };
 
+/// @brief Largest valid packed `0xRRGGBB` face color.
+inline constexpr uint32_t kMaxPackedRgb = 0xFFFFFFu;
+
+/// @brief Per-face-color sizing override for @ref StepMeshBodyParams.
+///
+/// Every face whose resolved STEP surface color quantizes to @ref rgb is meshed with these values
+/// instead of the global ones. A value <= 0 inherits the corresponding global value. An edge shared
+/// by faces with different sizing uses the smallest of their values.
+struct StepFaceColorSizing {
+  /// Face color as 8-bit sRGB packed `0xRRGGBB` (each channel `lround(c * 255)`).
+  uint32_t rgb = 0;
+  /// Target uniform 3D edge length [mm]. <= 0 falls back to @ref targetEdgeLengthFraction.
+  double targetEdgeLength = 0.0;
+  /// Maximum chordal deviation [mm]. <= 0 inherits the global value.
+  double linearDeflection = 0.0;
+  /// Maximum angular deviation [rad]. <= 0 inherits the global value.
+  double angularDeflection = 0.0;
+  /// Target edge length as a fraction of the whole model's bounding-box diagonal, as
+  /// @ref StepMeshBodyParams::targetEdgeLengthFraction. Used only when @ref targetEdgeLength <= 0;
+  /// <= 0 too inherits the global target.
+  double targetEdgeLengthFraction = 0.0;
+};
+
+/// @brief One distinct face color found in a STEP file (@ref ReadStepFaceColors).
+struct StepFaceColorInfo {
+  /// Face color as 8-bit sRGB packed `0xRRGGBB`.
+  uint32_t rgb = 0;
+  /// Number of faces resolving to this color.
+  uint32_t faceCount = 0;
+  /// Total surface area of those faces [mm^2].
+  double area = 0.0;
+};
+
 /// @brief Parameters controlling the parameterized STEP body tessellation (OpenCascade BRepMesh
 /// with the isotropic CGAL per-face mesher).
 ///
@@ -188,6 +223,9 @@ struct StepMeshBodyParams {
   /// boolean operation, and on geometry the kernel handles badly it is better skipped than
   /// attempted.
   bool combineTouchingSolids = true;
+  /// Per-face-color sizing overrides (see @ref StepFaceColorSizing). Colors must be unique. Faces
+  /// with no color, or a color not listed, use the global values above.
+  std::vector<StepFaceColorSizing> faceColorSizing;
 };
 
 /// @brief Output file format for @ref VisualExportOutput.

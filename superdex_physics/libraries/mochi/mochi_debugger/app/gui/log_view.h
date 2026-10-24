@@ -55,13 +55,12 @@ class LogView {
   // Removes all log entries and resets the "new entries" flags. Thread-safe.
   void Clear();
 
-  // Returns whether new errors or warnings have arrived since the flags were last consumed.
-  // Thread-safe.
-  bool HasNewErrorsOrWarnings() const;
+  // Resets the new-error and new-warning flags and returns whether either was set (drives raising
+  // the log panel). Independent of @ref ConsumeNewEntries. Thread-safe.
+  bool ConsumeNewErrorsOrWarnings();
 
-  // Resets all "new entries" flags (including the new-error and new-warning flags read by
-  // @ref HasNewErrorsOrWarnings) and returns whether new entries had arrived since they were last
-  // consumed (drives scroll-to-bottom). Thread-safe.
+  // Resets the new-entries flag and returns whether it was set (drives scroll-to-bottom).
+  // Independent of @ref ConsumeNewErrorsOrWarnings. Thread-safe.
   bool ConsumeNewEntries();
 
   // Invokes visitor(Entry const&) for each retained entry, oldest to newest, under the read lock.

@@ -20,6 +20,8 @@
 #include "rendering/debug_text.h"
 #include "rendering/render_target.h"
 
+#include <mochi_core/utils/error.h>
+
 #include <mochi_renderer/resource_manager.h>
 #include <mochi_renderer/scene.h>
 
@@ -32,6 +34,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -43,6 +46,7 @@ class IndexBuffer;
 namespace superdex::studio {
 
 class SuperDexStudio;
+class MeasureTool;
 class Renderer;
 struct SceneStage;
 
@@ -136,6 +140,21 @@ class Viewport {
   RenderTarget* GetRenderTarget() const {
     return _renderTarget.get();
   }
+  // Runs @p render with the render target and the camera sized to @p width x @p height pixels, then
+  // gives the viewport its own size and projection back, also when @p render throws. @p render
+  // reports a failure through the Error it is passed, which ends up in @p error. A restore step
+  // that fails is logged and the others still run. Returns whether the viewport got everything
+  // back. If only the restore failed, @p error is left alone, so an image @p render captured can
+  // still be kept; if @p render failed too, or threw, @p error says the restore failed as well. The
+  // image shows at least what the viewport shows (see FrameScreenshot). Sets @p error, without
+  // calling @p render, for an empty @p render, a size outside 1 to
+  // SuperDexStudio::kMaxScreenshotSide, a camera setting that is not finite or out of range, a view
+  // it cannot frame, or a viewport that has no size, target or scene yet.
+  [[nodiscard]] bool WithRenderSize(
+      int width,
+      int height,
+      std::function<void(mochi::Error&)> const& render,
+      mochi::Error& error);
   // Positions the drop-shadow ground plane at the lowest point of the scene's meshes (from their
   // AABBs, including hidden ones, so toggling visibility doesn't move it) and returns that height.
   // Call after geometry changes; do NOT call while a physics sim is running -- the plane should
@@ -147,6 +166,9 @@ class Viewport {
   void SetSceneStage(SceneStage* stage) {
     _stage = stage;
   }
+  // Whether the scene's display mode shows `object`. Unlike SceneObject::IsVisible, this stays true
+  // while a selection or hover highlight hides the object behind its tinted stand-in.
+  [[nodiscard]] bool IsShown(mochi_renderer::SceneObject const* object) const;
   // Scene Object Selection / Highlighting
   // Replaces the whole selection with `objects` (nulls and duplicates are dropped; order preserved,
   // back() = primary/active). Pass {} to clear the selection.
@@ -168,8 +190,34 @@ class Viewport {
   float& HighlightOverlayAlpha() {
     return _highlightOverlayAlpha;
   }
-  void FocusCameraOnScene(std::optional<mochi::Real3> dir = std::nullopt) const;
+  // The focus functions frame their objects viewed from the editor-space direction @p dir, or along
+  // the current view direction. They animate the camera unless @p animate is false, in which case
+  // it is placed at once.
+  void FocusCameraOnScene(std::optional<mochi::Real3> dir = std::nullopt, bool animate = true)
+      const;
   void FocusCameraOnSelectedSceneObject(std::optional<mochi::Real3> dir = std::nullopt) const;
+  // Frames @p objects together, or the whole scene when none of them has bounds.
+  void FocusCameraOnSceneObjects(
+      std::vector<mochi_renderer::SceneObject*> const& objects,
+      std::optional<mochi::Real3> dir = std::nullopt,
+      bool animate = true) const;
+  // The visible objects named @p path or sitting under it ("arm" also matches "arm/hand"), or all
+  // visible named objects when @p path is empty. When no name starts with @p path, it may start
+  // after any '/' instead, so "hand" finds "arm/hand". When those names belong to more than one
+  // actor ("left/hand" and "right/hand"), every match is returned and @p ambiguous, if given, is
+  // set. Bots and prefabs stage one object per link or actor, named like the physics actor
+  // ("prefab/actor", "articulated/link").
+  std::vector<mochi_renderer::SceneObject*> FindActors(
+      std::string_view path = {},
+      bool* ambiguous = nullptr) const;
+  // Whether any visible object, named or not, has geometry to show.
+  [[nodiscard]] bool HasVisibleGeometry() const;
+  // Places the camera at @p eye looking at @p target, both in editor space, at once.
+  void SetCameraLookAt(mochi::Real3 const& eye, mochi::Real3 const& target) const;
+  // The camera position and the point it orbits, in editor space.
+  std::pair<mochi::Real3, mochi::Real3> GetCameraLookAt() const;
+  // True while the camera animates or the user moves it.
+  bool IsCameraMoving() const;
   // ImGui
   void ShowViewportContents(bool showCameraOrientationGizmo);
   void ShowStatsOverlay(
@@ -180,6 +228,11 @@ class Viewport {
   // Register a toggleable "Show" command. The viewport owns its keyboard shortcut and lists it in
   // the top-left "Show" dropdown.
   void RegisterShowCommand(ShowCommand command);
+  // The viewport's Measure tool (never null). Every viewport has one and registers its Ctrl+M
+  // toggle; editors give it geometry to pick via MeasureTool::SetTargetProvider.
+  MeasureTool* GetMeasureTool() const {
+    return _measureTool.get();
+  }
 
  private:
   Viewport(SuperDexStudio* studio, mochi_renderer::SceneViewSettings const& viewSettings);
@@ -187,7 +240,13 @@ class Viewport {
       filament::math::double3 from,
       filament::math::double3 to,
       float orthoHeight,
-      std::optional<mochi::Real3> dir) const;
+      std::optional<mochi::Real3> dir,
+      bool animate) const;
+  // The focus used when no visible object has bounds: the whole ground grid.
+  void GetEmptySceneFocus(
+      filament::math::double3& outFrom,
+      filament::math::double3& outTo,
+      float& outOrthoHeight) const;
   bool ShowCameraOrientationGizmo() const;
   bool ShowCameraOrientationToolbar() const;
   bool ShowTransformGizmo(float x, float y, float width, float height) const;
@@ -196,6 +255,11 @@ class Viewport {
   void ShowDebugText(ImVec2 contentOrigin, float logicalWidth, float logicalHeight);
   void ShowShowMenu();
   void HandleShowCommandShortcuts();
+  // Feeds the Measure tool the cursor ray for this frame (hover preview, and a pick on click), and
+  // switches the tool off if the editor has withdrawn it. Called every frame the viewport is drawn.
+  // @p renderHeight is the framebuffer height, needed for the bottom-origin pixel convention
+  // Filament's picking uses.
+  void HandleMeasureToolInput(bool canPick, int renderHeight, float fbScale);
   void DrawDebug();
   // Lazily creates, and resizes to (width, height), the highlight overlay target + view and the
   // fullscreen composite view. Called each frame a highlight is present.
@@ -257,6 +321,9 @@ class Viewport {
   mutable mochi::Real3 _gizmoPrevScale{1.0f, 1.0f, 1.0f};
   // Registered "Show" toggle commands (keyboard bindings + top-left dropdown).
   std::vector<ShowCommand> _showCommands;
+  // Modal vertex/face measurement tool, owned per viewport so its selection and recorded
+  // measurements are per-editor. Created in the constructor and never null.
+  std::unique_ptr<MeasureTool> _measureTool;
   // Ground grid: per-viewport visibility (Show menu / G), seeded from the app settings at creation
   // and drawn at the scene's lowest point. Its appearance is app-wide -- see
   // AppSettings::viewport::groundGrid.

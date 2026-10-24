@@ -20,7 +20,8 @@
 #include "mochi_discretization_components.h"
 #include "mochi_group.h"
 
-#include <algorithm>
+#include <mochi_core/utils/array_utils.h>
+
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -45,67 +46,52 @@ static std::vector<Int3> GetNodeIndices(entt::registry const& reg, entt::entity 
   return extract(reg.get<CFemSurfaceDiscretization const>(entity));
 }
 
-static std::vector<IndexGroups>
-CreateSkinningDofGroups(entt::registry const& reg, entt::entity entity, entt::entity articulated) {
+// Gather, per collision sample, the sorted-unique set of governing bones that depend on articulated
+// DoFs.
+static DynamicArray<DynamicArray<int>>
+CreateSharedBoneIds(entt::registry const& reg, entt::entity entity, entt::entity articulated) {
   // Fetch skinning of the entity that will be partitioned.
   auto const& skinningData = reg.get<CArticulatedSkinningData const>(entity).skinningData;
 
-  // Fetch components of the articulated actor: bone actors, articulated DoFs
+  // Fetch the bone entities of the articulated actor.
   auto const& boneActors = reg.get<CGroupMembers const>(articulated).actors;
-  int numArticulatedDofs = reg.get<CArticulatedProps const>(articulated).reducedDofsDim;
 
-  // Prepare node indices per collision sample
+  // Prepare node indices per collision sample.
   auto nodeIndices = GetNodeIndices(reg, entity);
 
-  // Prepare a vector of joint dofs per bone
-  std::vector<Span<int const>> jointDofs;
-  jointDofs.reserve(boneActors.size());
-  for (auto bone : boneActors) {
-    jointDofs.emplace_back(reg.get<CArticulatedRigidJacobian const>(bone).dofs);
+  // Flag static bones, i.e., with no joint DoFs. TagStaticActor is not assigned yet at partition
+  // initialization, so static bones are detected from their empty DoF list.
+  DynamicArray<bool> staticBones;
+  staticBones.reserve(isize(boneActors));
+  for (auto const bone : boneActors) {
+    staticBones.emplace_back(reg.get<CArticulatedRigidJacobian const>(bone).dofs.empty());
   }
 
-  // Traverse all the collision samples and compute their DoF index groups.
-  static int constexpr kMaxIndexGroups = 4;
-  std::vector<IndexGroups> indexGroups;
-  indexGroups.reserve(nodeIndices.size());
+  DynamicArray<DynamicArray<int>> boneIdsPerSample;
+  boneIdsPerSample.reserve(nodeIndices.size());
+  int const spanSize = skinningData.weightsPerNode;
   for (auto const& indices : nodeIndices) {
     // Collect bone indices for the nodes
-    std::vector<int> boneIndices;
+    DynamicArray<int> boneIndices;
     for (int i = 0; i < 3; i++) {
       // Fetch bone indices per node
-      int const spanSize = skinningData.weightsPerNode;
       auto const boneWeights = Span(&skinningData.weights[indices[i] * spanSize], spanSize);
       auto const boneIndicesThis = Span(&skinningData.indices[indices[i] * spanSize], spanSize);
       for (int j = 0; j < spanSize; j++) {
-        // Check if bone indices are valid and insert
+        // Insert bones with nonzero weight that depend on joint DoFs
         if (boneWeights[j] != 0_r) {
-          boneIndices.push_back(boneIndicesThis[j]);
+          int const boneId = boneIndicesThis[j];
+          if (!staticBones[boneId]) {
+            boneIndices.push_back(boneId);
+          }
         }
       }
     }
-    std::sort(boneIndices.begin(), boneIndices.end());
-    boneIndices.erase(std::unique(boneIndices.begin(), boneIndices.end()), boneIndices.end());
-
-    // Collect joint DoFs for the bones
-    std::vector<int> dofs;
-    for (auto const& boneId : boneIndices) {
-      auto const& jointDofsBone = jointDofs[boneId];
-      dofs.insert(dofs.end(), jointDofsBone.begin(), jointDofsBone.end());
-    }
-    std::sort(dofs.begin(), dofs.end());
-    dofs.erase(std::unique(dofs.begin(), dofs.end()), dofs.end());
-
-    // Convert to index groups
-    IndexGroups sampleDoFs = CreateIndexGroups(std::vector<int>(dofs.begin(), dofs.end()), false);
-    if (sampleDoFs.size() > kMaxIndexGroups) {
-      // Use all DoFs if the number of index groups is too large
-      sampleDoFs.clear();
-      sampleDoFs.push_back({0, 0, numArticulatedDofs});
-    }
-    indexGroups.emplace_back(std::move(sampleDoFs));
+    SortAndRemoveDuplicates(boneIndices);
+    boneIdsPerSample.push_back(std::move(boneIndices));
   }
 
-  return indexGroups;
+  return boneIdsPerSample;
 }
 
 static std::vector<int> CreateSoftActorIds(entt::registry const& reg, entt::entity entity) {
@@ -147,12 +133,13 @@ static std::vector<ContactPartition> CreatePartitionsFromStrategy(
       auto ids = CreateSoftActorIds(reg, entity);
       return CreateContactPartitions<IdDescriptor>(ids);
     }
-    case ContactPartitionStrategy::SkinningDofGroups:
-    default: {
-      auto dofGroups = CreateSkinningDofGroups(reg, entity, articulated);
-      return CreateContactPartitions<IndexGroupsDescriptor>(dofGroups);
+    case ContactPartitionStrategy::SharedBones: {
+      auto boneIds = CreateSharedBoneIds(reg, entity, articulated);
+      return CreateContactPartitions<BoneIdsDescriptor>(boneIds);
     }
   }
+  MOCHI_ASSERT(false, "Unknown contact partition strategy");
+  return {};
 }
 
 std::vector<ContactPartition> mochi::InitializeContactPartitions(

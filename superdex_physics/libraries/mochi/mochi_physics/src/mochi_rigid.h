@@ -25,6 +25,7 @@
 #include "mochi_snle.h"
 
 #include <mochi_core/integration/integration_utils.h>
+#include <mochi_core/utils/constants.h>
 #include <mochi_core/utils/rigid_body_utils.h>
 
 #include <memory>
@@ -59,13 +60,7 @@ struct CRigidVel : public RigidBodyVelContainer {
 };
 
 /// @brief Component for time integration of rigid velocity.
-using IntegrationRigidVels = IntegrationBundle<RigidBodyVelContainer>;
-struct CIntegrationRigidVels : public IntegrationRigidVels, NoCopy {
-  MOCHI_STRUCT_BEGIN(mochi::CIntegrationRigidVels);
-  MOCHI_ATTRIBUTE(CaptureState);
-  MOCHI_BASE_CLASS(IntegrationRigidVels);
-  MOCHI_STRUCT_END();
-};
+MOCHI_DEFINE_INTEGRATION_COMPONENT(CIntegrationRigidVels, RigidBodyVelContainer);
 
 // ECS component storing rigid actor creation params that are consumed during InitRigidActor
 // and cannot be recovered from the ECS afterward. Used for lossless prefab export.
@@ -102,7 +97,7 @@ void SetRootTransform(
     CRigidState<TimeStep::Current>& outCurrState);
 
 // Update CRootTransform from rigid body state
-MOCHI_API void RigidStateToRootTransform(
+void RigidStateToRootTransform(
     Vec4r const& comLocal,
     TransformRT const& state,
     TransformRT& worldFromLocal);
@@ -116,11 +111,6 @@ void ComputeRootTransformCurrent(
     CRigidBodyInertia const& rigidInertia,
     CRigidState<TimeStep::Current> const& currPose,
     CRootTransform& rootTransform);
-
-void ComputeVelocityAtStepStart(
-    CTimeIntegratorState const& intState,
-    CRigidVel<TimeStep::Previous> const& prevVel,
-    CIntegrationRigidVels& intVels);
 
 void ComputeVelocityAtStageStart(
     CTimeIntegratorState const& intState,
@@ -144,7 +134,7 @@ inline void UpdateRigidVelocity_Static(
     ecs::CtxGlobal<CSceneTime const> time,
     CRootTransform const& root,
     CPrevRigidVelocity& outRigidVelocity) {
-  ComputeRigidVelocityWorldSpace(
+  FiniteDifferenceRigidTransformLie(
       static_cast<real>(time->DeltaTime()),
       root.worldFromLocal,
       root.worldFromLocalPrev,
@@ -164,7 +154,7 @@ inline void UpdateRigidVelocity_Dynamic(
 }
 
 // System to initialize state (position and velocity) for a new step
-MOCHI_API void EntityIncrementStep(
+void EntityIncrementStep(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CRigidState<TimeStep::Current> const& currPose,
@@ -172,8 +162,27 @@ MOCHI_API void EntityIncrementStep(
     CRigidState<TimeStep::Previous>& prevPose,
     CRigidVel<TimeStep::Previous>& prevVel);
 
+/*
+ * Reconstructs the begin-of-step @ref TimeStep::Previous state from the integration history if
+ * history is present and the integration method allows, otherwise it estimates the state from
+ * constant velocity.
+ */
+void EntityReconstructPreviousStep(
+    ecs::Included<TagRigidActor>,
+    ecs::Excluded<TagArticulatedLinkActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CRigidBodyInertia const& rigidInertia,
+    CRigidState<TimeStep::Current> const& currPose,
+    CRigidVel<TimeStep::Current> const& currVel,
+    CIntegrationRigidStates const& intPoses,
+    CIntegrationRigidVels const& intVels,
+    CRigidState<TimeStep::Previous>& outPrevPose,
+    CRigidVel<TimeStep::Previous>& outPrevVel,
+    CRootTransform& outRootTransform);
+
 // Pre-first-stage callback.
-MOCHI_API void EntityPreFirstStage(
+void EntityPreFirstStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CTimeIntegratorState const& intState,
@@ -183,7 +192,7 @@ MOCHI_API void EntityPreFirstStage(
     CIntegrationRigidVels& intVels);
 
 // Pre-stage callback.
-MOCHI_API void EntityPreStage(
+void EntityPreStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CRigidBodyInertia const& rigidInertia,
@@ -195,7 +204,7 @@ MOCHI_API void EntityPreStage(
     CRootTransform& rootTransform);
 
 // Post-stage callback.
-MOCHI_API void EntityPostStage(
+void EntityPostStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CConvergenceStatus const& convergence,
@@ -210,7 +219,7 @@ MOCHI_API void EntityPostStage(
     CIntegrationRigidVels& intVels);
 
 // Post-last-stage callback.
-MOCHI_API void EntityPostLastStage(
+void EntityPostLastStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CRigidBodyInertia const& rigidInertia,
@@ -222,13 +231,13 @@ MOCHI_API void EntityPostLastStage(
     CRootTransform& rootTransform);
 
 // Set up kinematic data of all active collision points; specific for rigid actors
-template <ContactType kContactType>
+template <bool kIsSync>
 void SetupActiveCollisionNormals(
     ecs::RequiredTag<TagRigidActor>,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     CContactSamples<TimeStep::Current> const& samples,
     CRootTransform const& rootTransform,
-    CActiveCollisions<kContactType, TimeStep::Current>& activeCollisions);
+    CActiveCollisions<kIsSync, TimeStep::Current>& activeCollisions);
 
 // Compute the contact Jacobians as colliding actor
 void SetupCollidingJacobiansImpl(
@@ -237,8 +246,9 @@ void SetupCollidingJacobiansImpl(
     CDofOffset const& dofOffset,
     CContactSamples<TimeStep::Current> const& samples,
     CCollJacs<CollRole::Colliding>& outJacobians,
-    MatrixView<real const> jacAux = {},
-    Span<int const> dofsAux = {});
+    ContactJac::AuxView jacAux = {},
+    Span<int const> dofsAux = {},
+    int internalDofOffset = kSentinelIndex);
 
 template <TimeStep kTimeStep>
 MOCHI_FORCE_INLINE void SetupCollidingJacobians(
@@ -265,8 +275,9 @@ void SetupColliderJacobiansImpl(
     CDofOffset const& dofOffset,
     CRigidBodyInertia const& rigidInertia,
     CCollJacs<CollRole::Collider>& outJacobians,
-    MatrixView<real const> jacAux = {},
-    Span<int const> dofsAux = {});
+    ContactJac::AuxView jacAux = {},
+    Span<int const> dofsAux = {},
+    int internalDofOffset = kSentinelIndex);
 
 template <TimeStep kTimeStep>
 MOCHI_FORCE_INLINE void SetupColliderJacobians(
@@ -289,7 +300,7 @@ MOCHI_FORCE_INLINE void SetupColliderJacobians(
  * Any derived state that is required for assembly and not updated in this system MUST be
  * updated in EntityAssemble or in mochi_solve's UpdateDerivedStateBeforeAssembly.
  */
-MOCHI_API void EntityPostNewSolution(
+void EntityPostNewSolution(
     ColumnVectorView<real const> solution,
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
@@ -341,7 +352,7 @@ void EntityAssemble(
     CExternalForces const& externalForces,
     CColliderInfo const& colliderInfo,
     CContactSamples<TimeStep::Current> const* contactSample,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>* activeCollisions);
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>* activeCollisions);
 
 /*
  * System to copy a column vector with the position state of the rigid actor to its CRigidState
@@ -386,6 +397,16 @@ void UpdateVSym(
     ecs::Included<TagRigidActor>,
     ecs::CtxGlobal<CSceneTime const> time,
     CRigidVel<TimeStep::Current>& outVel);
+
+// Update the maximum world-space speed over the actor's current bounding volume.
+void UpdateMaxGeometrySpeed(
+    ecs::RequiredTag<TagRigidActor>,
+    ecs::Excluded<TagStaticActor>,
+    CRigidState<TimeStep::Current> const& state,
+    CRigidVel<TimeStep::Current> const& vel,
+    CRootTransform const& transform,
+    CBoundingVolume const& bounds,
+    CConservativeStepBounds& outStepBounds);
 
 /*
  * [Differentiability] System to project a derived state gradient to a state gradient.

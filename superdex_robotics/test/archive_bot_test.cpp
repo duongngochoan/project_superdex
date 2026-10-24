@@ -20,6 +20,7 @@
 #include <superdex_robotics/utils/archive_utils.h>
 #include <superdex_robotics/utils/file_utils.h>
 
+#include <mochi_core/mochi_platform.h>
 #include <mochi_core/test/log_suppression.h>
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/defer.h>
@@ -143,6 +144,33 @@ TEST(ArchiveBotCacheTest, RecoversFromStaleIncompleteCacheDir) {
   auto const recoveredHash = HashBotFile(target, ExpectOK{});
   EXPECT_EQ(originalHash, recoveredHash);
 }
+
+#if !MOCHI_PLATFORM_WINDOWS
+// An archive whose path cannot be stat'd (permission denied) must produce an error rather than
+// throw std::filesystem::filesystem_error, which would abort SuperDex Studio.
+TEST(ArchiveBotCacheTest, UnreadableArchivePathReportsError) {
+  auto const tempDir = mochi::CreateTempDirectory("archive_bot_unreadable_test", ExpectOK{});
+  auto const lockedDir = tempDir.Path() / "locked";
+  std::filesystem::create_directories(lockedDir);
+  auto const archiveFile = lockedDir / "unreadable.superdex_bot_archive";
+  mochi::WriteFile(archiveFile, std::string_view{"not a zip"}, ExpectOK{});
+  std::filesystem::permissions(lockedDir, std::filesystem::perms::none);
+  MOCHI_DEFER({
+    std::error_code ec;
+    std::filesystem::permissions(lockedDir, std::filesystem::perms::owner_all, ec);
+  });
+  std::error_code probe;
+  if (std::filesystem::exists(archiveFile, probe) || !probe) {
+    GTEST_SKIP() << "Permissions are not enforced for this user (e.g. running as root).";
+  }
+
+  auto const suppressError = SuppressLogError();
+  Error error;
+  auto const extractedDir = ExtractBotArchiveToCache(archiveFile.string(), error);
+  EXPECT_FALSE(error.IsOK());
+  EXPECT_TRUE(extractedDir.empty());
+}
+#endif
 
 // ----------------------------------------------------------------------------
 // Multi-root archive tests

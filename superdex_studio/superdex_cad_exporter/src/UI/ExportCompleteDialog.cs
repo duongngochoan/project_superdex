@@ -5,71 +5,114 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-using System.Drawing;
-using System.Windows.Forms;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Windows;
+using System.Windows.Controls;
+
+using CADRobotExporter.Utilities;
 
 namespace CADRobotExporter.UI
 {
-    public class ExportCompleteDialog : Form
+    /// <summary>
+    /// Reports where the exported files were written.
+    /// </summary>
+    public class ExportCompleteDialog : Window
     {
-        private Button openFolderButton;
-        private Button closeButton;
-
         public ExportCompleteDialog(string urdfPath, string mjcfPath, string superdexBotPath)
         {
-            Text = "SuperDex CAD Exporter";
-            TopMost = true;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            StartPosition = FormStartPosition.CenterScreen;
-            MaximizeBox = false;
-            MinimizeBox = false;
-
-            int formWidth = 720;
-
-            string message = "Export complete!\n\n" +
+            Build(
+                "SuperDex CAD Exporter",
+                "Export complete!\n\n" +
                 "URDF file saved to:\n" + urdfPath + "\n\n" +
                 "MJCF file saved to:\n" + mjcfPath + "\n\n" +
-                "SuperDex Bot file saved to:\n" + superdexBotPath;
+                "SuperDex Bot file saved to:\n" + superdexBotPath,
+                "Close");
+        }
 
-            var label = new Label
+        private ExportCompleteDialog()
+        {
+        }
+
+        private void Build(string title, string message, string closeCaption)
+        {
+            Theme.FluentTheme.Apply(this);
+
+            Title = title;
+            Topmost = true;
+            Width = 720;
+            SizeToContent = SizeToContent.Height;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            ShowInTaskbar = false;
+
+            TextBlock label = new TextBlock
             {
-                Left = 10,
-                Top = 10,
-                MaximumSize = new Size(formWidth - 30, 0),
                 Text = message,
-                AutoSize = true
+                TextWrapping = TextWrapping.Wrap,
             };
 
-            Controls.Add(label);
-
-            int buttonY = label.Bottom + 20;
-
-            openFolderButton = new Button
+            Button openFolderButton = new Button
             {
-                Text = "Open Folder",
-                Left = formWidth - 320,
-                Top = buttonY,
+                Content = "Open Folder",
+                IsDefault = true,
                 Width = 200,
                 Height = 32,
-                DialogResult = DialogResult.Yes
             };
+            openFolderButton.Click += (sender, e) => { DialogResult = true; };
 
-            closeButton = new Button
+            Button closeButton = new Button
             {
-                Text = "Close",
-                Left = formWidth - 100,
-                Top = buttonY,
+                Content = closeCaption,
+                IsCancel = true,
                 Width = 80,
                 Height = 32,
-                DialogResult = DialogResult.No
+                Margin = new Thickness(20, 0, 0, 0),
             };
 
-            AcceptButton = openFolderButton;
-            CancelButton = closeButton;
-            Controls.Add(openFolderButton);
-            Controls.Add(closeButton);
+            StackPanel buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 20, 0, 0),
+            };
+            buttons.Children.Add(openFolderButton);
+            buttons.Children.Add(closeButton);
 
-            ClientSize = new Size(formWidth, buttonY + 50);
+            StackPanel root = new StackPanel { Margin = new Thickness(10) };
+            root.Children.Add(label);
+            root.Children.Add(buttons);
+
+            Content = root;
+        }
+
+        /// <summary>
+        /// Lists the mesh files written and, if the user asks, opens Explorer with the first one
+        /// selected.
+        /// </summary>
+        public static void ShowMeshExportComplete(
+            IList<string> writtenPaths, Window owner = null, IntPtr ownerHandle = default(IntPtr))
+        {
+            ExportCompleteDialog dialog = new ExportCompleteDialog();
+            dialog.Build(
+                "SuperDex Mesh Exporter",
+                "Mesh export complete!\n\nSaved to:\n" + string.Join("\n", writtenPaths),
+                "OK");
+
+            if (owner != null)
+            {
+                dialog.Owner = owner;
+            }
+            else
+            {
+                WpfWindowOwner.OwnTo(dialog, ownerHandle);
+            }
+
+            if (dialog.ShowDialog() == true && writtenPaths.Count > 0)
+            {
+                Process.Start("explorer.exe", $"/select,\"{writtenPaths[0]}\"");
+            }
         }
     }
 }

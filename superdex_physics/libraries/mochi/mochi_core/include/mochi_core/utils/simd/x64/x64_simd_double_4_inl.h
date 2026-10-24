@@ -41,30 +41,15 @@ class Simd<double, 4> {
   template <int i>
   [[nodiscard]] static MOCHI_FORCE_INLINE double Get(Simd v) {
     static_assert(i >= 0 && i < 4, "Index out of range");
-    if constexpr (i == 0) {
-      return _mm256_cvtsd_f64(v.raw); // AVX
-    } else if constexpr (i == 1) {
-      return _mm256_cvtsd_f64(_mm256_shuffle_pd(v.raw, v.raw, 0x01)); // AVX, AVX
-    } else if constexpr (i == 2) {
-      return _mm256_cvtsd_f64(_mm256_permute2f128_pd(v.raw, v.raw, 0x01)); // AVX, AVX
-    } else if constexpr (i == 3) {
-      auto tmp = _mm256_permute2f128_pd(v.raw, v.raw, 0x01); // AVX
-      return _mm256_cvtsd_f64(_mm256_shuffle_pd(tmp, tmp, 0x01)); // AVX, AVX
-    }
+    return v[i];
   }
 
-  [[nodiscard]] static MOCHI_FORCE_INLINE double Get(Simd v, int i) {
+  [[nodiscard]] MOCHI_FORCE_INLINE Scalar operator[](int i) const {
     MOCHI_ASSERT_VERBOSE(i >= 0 && i < kSize, "Index out of range");
 #if MOCHI_COMPILER_MSVC
-    return v.raw.m256d_f64[i];
+    return raw.m256d_f64[i];
 #else
-    switch (i) { // clang-format off
-      case 0: return Get<0>(v);
-      case 1: return Get<1>(v);
-      case 2: return Get<2>(v);
-      case 3: return Get<3>(v);
-      MOCHI_UNLIKELY default: return 0.0;
-    } // clang-format on
+    return raw[i];
 #endif
   }
 
@@ -124,27 +109,15 @@ class Simd<double, 4> {
   template <int N>
   [[nodiscard]] static MOCHI_FORCE_INLINE bool AllTrue(Simd v) {
     static_assert(N >= 1 && N <= kSize, "Unsupported N");
-    int mask = GetMSBitMask(v); // One bit for each byte in the vector
-    if constexpr (N == kSize) {
-      return mask == 0xFFFFFFFF;
-    } else {
-      int constexpr kNumBits = N * sizeof(Scalar);
-      auto constexpr kMustBeSet = (1UL << kNumBits) - 1;
-      return (mask & kMustBeSet) == kMustBeSet;
-    }
+    int constexpr kLanes = (1 << N) - 1;
+    return (ToMask(v) & kLanes) == kLanes;
   }
 
   template <int N>
   [[nodiscard]] static MOCHI_FORCE_INLINE bool AnyTrue(Simd v) {
     static_assert(N >= 1 && N <= kSize, "Unsupported N");
-    int mask = GetMSBitMask(v); // One bit for each byte in the vector
-    if constexpr (N == kSize) {
-      return mask != 0;
-    } else {
-      int constexpr kNumBits = N * sizeof(Scalar);
-      auto constexpr kMayBeSet = (1UL << kNumBits) - 1;
-      return (mask & kMayBeSet) != 0;
-    }
+    int constexpr kLanes = (1 << N) - 1;
+    return (ToMask(v) & kLanes) != 0;
   }
 
   [[nodiscard]] static MOCHI_FORCE_INLINE Simd Broadcast(Scalar const* p) {
@@ -164,8 +137,7 @@ class Simd<double, 4> {
     } else if constexpr (N == 1) {
       return Simd{*ptr, 0.0};
     } else if constexpr (N == 2) {
-      __m256i mask = _mm256_set_epi64x(0, 0, -1, -1); // AVX
-      return _mm256_maskload_pd(ptr, mask); // AVX
+      return _mm256_zextpd128_pd256(_mm_loadu_pd(ptr)); // AVX, SSE2
     } else if constexpr (N == 3) {
       __m256i mask = _mm256_set_epi64x(0, -1, -1, -1); // AVX
       return _mm256_maskload_pd(ptr, mask); // AVX
@@ -174,6 +146,7 @@ class Simd<double, 4> {
     }
   }
 
+#if !MOCHI_ARCH_X64_AVX512
 #if MOCHI_COMPILER_MSVC
   // MSVC defines __m128i as a union. Byte arrays are required to initialize it this way.
   // clang-format off
@@ -193,10 +166,15 @@ class Simd<double, 4> {
       {-1LL, -1LL, -1LL, 0LL},
       {-1LL, -1LL, -1LL, -1LL}};
 #endif
+#endif
 
   [[nodiscard]] static MOCHI_FORCE_INLINE Simd Load(Scalar const* ptr, int n) {
     MOCHI_ASSERT_VERBOSE(n >= 0 && n <= kSize, "Invalid size parameter");
+#if MOCHI_ARCH_X64_AVX512
+    return _mm256_maskz_loadu_pd(x64_simd::kLaneMasksS8[n], ptr); // AVX512VL
+#else
     return _mm256_maskload_pd(ptr, kLoadMasks[n]); // AVX
+#endif
   }
 
   [[nodiscard]] static Simd LoadIndexed(Scalar const* ptr, Simd<int, 4> const& indices) {
@@ -217,20 +195,17 @@ class Simd<double, 4> {
     auto a = Simd::Load<kCount0>(ptr).raw; // [0,1,2,3]
     auto b = Simd::Load<kCount1>(kCount1 == 0 ? ptr : ptr + 4).raw; // [4,5,6,7]
     auto c = Simd::Load<kCount2>(kCount2 == 0 ? ptr : ptr + 8).raw; // [8,9,10,11]
+    Deinterleave3(a, b, c, out0, out1, out2);
+  }
 
-    auto d = _mm256_blend_pd(a, b, 0b0100); // [0,_,6,3]
-    d = _mm256_blend_pd(d, c, 0b0010); // [0,9,6,3]
-    auto e = _mm256_permute2f128_pd(d, d, 0x01); // [6,3,0,9]
-    out0.raw = _mm256_blend_pd(d, e, 0b1010); // [0,3,6,9]
-
-    d = _mm256_blend_pd(a, b, 0b1001); // [4,1,_,7]
-    d = _mm256_blend_pd(d, c, 0b0100); // [4,1,10,7]
-    out1.raw = _mm256_shuffle_pd(d, d, 0b0101); // [1,4,7,10]
-
-    d = _mm256_blend_pd(a, b, 0b0010); // [_,5,2,_]
-    d = _mm256_blend_pd(d, c, 0b1001); // [8,5,2,11]
-    e = _mm256_permute2f128_pd(d, d, 0x01); // [2,11,8,5]
-    out2.raw = _mm256_blend_pd(d, e, 0b0101); // [2,5,8,11]
+  MOCHI_FORCE_INLINE static void
+  LoadTransposed(Scalar const* ptr, Simd& out0, Simd& out1, Simd& out2, int count) {
+    MOCHI_ASSERT_VERBOSE(count >= 0 && count <= kSize, "Invalid tuple count");
+    int const n = count * 3;
+    auto a = Simd::Load(ptr, mochi::Min(n, 4)).raw; // [0,1,2,3]
+    auto b = Simd::Load(n > 4 ? ptr + 4 : ptr, Clamp(n - 4, 0, 4)).raw; // [4,5,6,7]
+    auto c = Simd::Load(n > 8 ? ptr + 8 : ptr, Clamp(n - 8, 0, 4)).raw; // [8,9,10,11]
+    Deinterleave3(a, b, c, out0, out1, out2);
   }
 
   template <int i>
@@ -244,10 +219,17 @@ class Simd<double, 4> {
   template <int N = kSize>
   static MOCHI_FORCE_INLINE void Store([[maybe_unused]] Scalar* ptr, [[maybe_unused]] Simd v) {
     static_assert(N >= 0 && N <= kSize);
+    // Partial stores write the lanes straight from the register. With AVX2, masked stores are
+    // several times slower on AMD and block store-to-load forwarding on Intel. With AVX-512, they
+    // block forwarding on both. Measured on Zen 4 and Sapphire Rapids. A memcpy of the vector can
+    // go through the stack.
+    using HalfT = Simd<Scalar, 2>;
     if constexpr (N == 0) {
+    } else if constexpr (N <= 2) {
+      HalfT::Store<N>(ptr, HalfT(_mm256_castpd256_pd128(v.raw))); // AVX
     } else if constexpr (N < kSize) {
-      // About 3X faster than a masked store on AMD. About the same on Intel.
-      memcpy(ptr, &v, sizeof(Scalar) * N);
+      HalfT::Store<N - 2>(ptr + 2, HalfT(_mm256_extractf128_pd(v.raw, 1))); // AVX
+      HalfT::Store<2>(ptr, HalfT(_mm256_castpd256_pd128(v.raw))); // AVX
     } else {
       _mm256_storeu_pd(ptr, v.raw); // AVX
     }
@@ -255,7 +237,9 @@ class Simd<double, 4> {
 
   static MOCHI_FORCE_INLINE void Store(Scalar* ptr, Simd v, int n) {
     MOCHI_ASSERT_VERBOSE(n >= 0 && n <= kSize, "Invalid size parameter");
-    // Faster than masked store on AMD.
+#if MOCHI_ARCH_X64_AVX512
+    _mm256_mask_storeu_pd(ptr, x64_simd::kLaneMasksS8[n], v.raw); // AVX512VL
+#else
     switch (n) { // clang-format off
       case 1: Store<1>(ptr, v); break;
       case 2: Store<2>(ptr, v); break;
@@ -263,10 +247,11 @@ class Simd<double, 4> {
       case 4: Store<4>(ptr, v); break;
       MOCHI_UNLIKELY default: break;
     } // clang-format on
+#endif
   }
 
   MOCHI_FORCE_INLINE static int StoreSelected(Scalar* ptr, Simd condition, Simd values) {
-    auto mask = _mm256_movemask_pd(condition.raw);
+    auto mask = ToMask(condition);
     // Load 8 bytes from the table, then zero-exend to get the shuffle pattern.
     auto const* tableRow =
         reinterpret_cast<__m128i const*>(x64_simd::kStoreSelectedShuffleTableD4[mask]);
@@ -279,22 +264,42 @@ class Simd<double, 4> {
   template <int kTupleCount = kSize>
   MOCHI_FORCE_INLINE static void StoreTransposed(Scalar* ptr, Simd a, Simd b, Simd c) {
     static_assert(kTupleCount >= 1 && kTupleCount <= kSize, "Invalid kTupleCount");
-    // a = [0,3,6,9], b = [1,4,7,10], c = [2,5,8,11]
-    auto d = _mm256_shuffle_pd(b.raw, b.raw, 0b0101); // [4,1,10,7]
-    auto e = _mm256_blend_pd(a.raw, c.raw, 0b0101); // [2,3,8,9]
-    e = _mm256_permute2f128_pd(e, e, 0x01); // [8,9,2,3]
-    auto f = _mm256_blend_pd(a.raw, d, 0b1010); // [0,1,6,7]
-    auto g = _mm256_blend_pd(d, c.raw, 0b1010); // [4,5,10,11]
+    Simd x0, x1, x2;
+    Interleave3(a, b, c, x0, x1, x2);
     constexpr int kCount0 = Clamp(kTupleCount * 3 - 0, 0, 4);
     constexpr int kCount1 = Clamp(kTupleCount * 3 - 4, 0, 4);
     constexpr int kCount2 = Clamp(kTupleCount * 3 - 8, 0, 4);
-    Simd::Store<kCount0>(ptr, _mm256_blend_pd(f, e, 0b1100)); // [0,1,2,3]
+    Simd::Store<kCount0>(ptr, x0);
     if constexpr (kCount1 > 0) {
-      Simd::Store<kCount1>(ptr + 4, _mm256_blend_pd(g, f, 0b1100)); // [4,5,6,7]
+      Simd::Store<kCount1>(ptr + 4, x1);
     }
     if constexpr (kCount2 > 0) {
-      Simd::Store<kCount2>(ptr + 8, _mm256_blend_pd(e, g, 0b1100)); // [8,9,10,11]
+      Simd::Store<kCount2>(ptr + 8, x2);
     }
+  }
+
+  MOCHI_FORCE_INLINE static void StoreTransposed(Scalar* ptr, Simd a, Simd b, Simd c, int count) {
+    MOCHI_ASSERT_VERBOSE(count >= 0 && count <= kSize, "Invalid tuple count");
+    Simd x0, x1, x2;
+    Interleave3(a, b, c, x0, x1, x2);
+#if MOCHI_ARCH_X64_AVX512
+    // Bit i selects scalar i. Masks come from shifts, not clamped counts, which clang may turn
+    // back into branches. A zero mask stores nothing.
+    uint32_t const bits = (1u << (count * 3)) - 1;
+    _mm256_mask_storeu_pd(ptr, static_cast<__mmask8>(bits), x0.raw); // AVX512VL
+    _mm256_mask_storeu_pd(ptr + (count > 1 ? 4 : 0), static_cast<__mmask8>(bits >> 4), x1.raw);
+    _mm256_mask_storeu_pd(ptr + (count > 2 ? 8 : 0), static_cast<__mmask8>(bits >> 8), x2.raw);
+#else
+    // Scalar i is stored if i < count * 3. Comparing against scalar indices avoids clamped
+    // counts, which clang may turn back into branches. A zero mask stores nothing.
+    auto const n = _mm256_set1_epi64x(count * 3);
+    auto const mask0 = _mm256_cmpgt_epi64(n, _mm256_setr_epi64x(0, 1, 2, 3)); // AVX2
+    auto const mask1 = _mm256_cmpgt_epi64(n, _mm256_setr_epi64x(4, 5, 6, 7));
+    auto const mask2 = _mm256_cmpgt_epi64(n, _mm256_setr_epi64x(8, 9, 10, 11));
+    _mm256_maskstore_pd(ptr, mask0, x0.raw); // AVX
+    _mm256_maskstore_pd(ptr + (count > 1 ? 4 : 0), mask1, x1.raw);
+    _mm256_maskstore_pd(ptr + (count > 2 ? 8 : 0), mask2, x2.raw);
+#endif
   }
 
   [[nodiscard]] static MOCHI_FORCE_INLINE Simd Select(Simd mask, Simd a, Simd b) {
@@ -481,6 +486,16 @@ class Simd<double, 4> {
     }
   }
 
+  [[nodiscard]] static MOCHI_FORCE_INLINE Simd HSumEach(Simd a, Simd b, Simd c, Simd d) {
+    // ac = {a[0] + a[2], a[1] + a[3], c[0] + c[2], c[1] + c[3]}, and bd likewise.
+    auto const ac = _mm256_add_pd(
+        _mm256_blend_pd(a.raw, c.raw, 0b1100), _mm256_permute2f128_pd(a.raw, c.raw, 0x21)); // AVX
+    auto const bd = _mm256_add_pd(
+        _mm256_blend_pd(b.raw, d.raw, 0b1100), _mm256_permute2f128_pd(b.raw, d.raw, 0x21)); // AVX
+    // {ac[0], bd[0], ac[2], bd[2]} + {ac[1], bd[1], ac[3], bd[3]}.
+    return _mm256_add_pd(_mm256_unpacklo_pd(ac, bd), _mm256_unpackhi_pd(ac, bd)); // AVX
+  }
+
   template <int N>
   [[nodiscard]] static MOCHI_FORCE_INLINE Scalar HProd(Simd a) {
     static_assert(N >= 2 && N <= 4, "Unsupported N");
@@ -530,13 +545,11 @@ class Simd<double, 4> {
   }
 
   [[nodiscard]] MOCHI_FORCE_INLINE bool operator==(Simd rhs) const {
-    auto mask = GetMSBitMask(Equal(*this, rhs));
-    return mask == 0xFFFFFFFF; // All values equal
+    return ToMask(Equal(*this, rhs)) == 0xF; // All values equal
   }
 
   [[nodiscard]] MOCHI_FORCE_INLINE bool operator!=(Simd rhs) const {
-    auto mask = GetMSBitMask(NotEqual(*this, rhs));
-    return mask != 0; // Any values not equal
+    return ToMask(NotEqual(*this, rhs)) != 0; // Any values not equal
   }
 
   [[nodiscard]] MOCHI_FORCE_INLINE Simd operator~() const {
@@ -577,9 +590,41 @@ class Simd<double, 4> {
   }
 
  private:
-  // Integer mask with the most significant bit of each byte in the vector
-  [[nodiscard]] static MOCHI_FORCE_INLINE int GetMSBitMask(Simd a) {
-    return _mm256_movemask_epi8(_mm256_castpd_si256(a.raw)); // AVX2, AVX
+  // One bit per lane, from the lane's sign bit.
+  [[nodiscard]] static MOCHI_FORCE_INLINE int ToMask(Simd a) {
+    return _mm256_movemask_pd(a.raw); // AVX
+  }
+
+  // Splits 12 consecutive scalars {a, b, c} into 3 vectors of every third scalar.
+  MOCHI_FORCE_INLINE static void
+  Deinterleave3(__m256d a, __m256d b, __m256d c, Simd& out0, Simd& out1, Simd& out2) {
+    auto d = _mm256_blend_pd(a, b, 0b0100); // [0,_,6,3]
+    d = _mm256_blend_pd(d, c, 0b0010); // [0,9,6,3]
+    auto e = _mm256_permute2f128_pd(d, d, 0x01); // [6,3,0,9]
+    out0.raw = _mm256_blend_pd(d, e, 0b1010); // [0,3,6,9]
+
+    d = _mm256_blend_pd(a, b, 0b1001); // [4,1,_,7]
+    d = _mm256_blend_pd(d, c, 0b0100); // [4,1,10,7]
+    out1.raw = _mm256_shuffle_pd(d, d, 0b0101); // [1,4,7,10]
+
+    d = _mm256_blend_pd(a, b, 0b0010); // [_,5,2,_]
+    d = _mm256_blend_pd(d, c, 0b1001); // [8,5,2,11]
+    e = _mm256_permute2f128_pd(d, d, 0x01); // [2,11,8,5]
+    out2.raw = _mm256_blend_pd(d, e, 0b0101); // [2,5,8,11]
+  }
+
+  // Inverse of Deinterleave3: out0, out1, out2 are the 12 interleaved scalars in memory order.
+  MOCHI_FORCE_INLINE static void
+  Interleave3(Simd a, Simd b, Simd c, Simd& out0, Simd& out1, Simd& out2) {
+    // a = [0,3,6,9], b = [1,4,7,10], c = [2,5,8,11]
+    auto d = _mm256_shuffle_pd(b.raw, b.raw, 0b0101); // [4,1,10,7]
+    auto e = _mm256_blend_pd(a.raw, c.raw, 0b0101); // [2,3,8,9]
+    e = _mm256_permute2f128_pd(e, e, 0x01); // [8,9,2,3]
+    auto f = _mm256_blend_pd(a.raw, d, 0b1010); // [0,1,6,7]
+    auto g = _mm256_blend_pd(d, c.raw, 0b1010); // [4,5,10,11]
+    out0 = _mm256_blend_pd(f, e, 0b1100); // [0,1,2,3]
+    out1 = _mm256_blend_pd(g, f, 0b1100); // [4,5,6,7]
+    out2 = _mm256_blend_pd(e, g, 0b1100); // [8,9,10,11]
   }
 };
 

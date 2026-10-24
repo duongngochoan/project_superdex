@@ -22,81 +22,53 @@
 
 namespace mochi::tetrahedral {
 
-template <int kPolyOrder_ = 1, int kNumQuadPoints_ = 1>
-class BasisFunctionsEvaluated final {
-  // WARNING: In order to implement higher order polynomials we need to figure
-  // out a better node numbering scheme. Most of the infrastructure is in place
-  static_assert(kPolyOrder_ == 1, "Higher order polynomials not yet implemented");
-
- public:
-  static constexpr int kPolyOrder = kPolyOrder_;
-  static constexpr int kNumQuadPoints = kNumQuadPoints_;
-
-  BasisFunctionsEvaluated(TetrahedralQuadrature<kNumQuadPoints> const& quad) : quadrature(quad) {};
-
-  /**
-    Get the basis value evaluated at the quad points.
-
-    Args:
-      baseIndex (int) : the index of the basis function to evaluate
-      quadNumber (int): the index of the quadrature points where to eval
-
-    Returns:
-      float: the value of the base function
-  */
-  constexpr real GetBasisValue(int quadNumber, int baseIndex) const {
-    return basisEvaluated[quadNumber][baseIndex];
-  }
-
-  /**
-    Get the basis value evaluated at the quad points.
-
-    Args:
-      baseIndex(int) : the index of the basis function to evaluate
-      quadNumber(int) : the index of the quadrature points where to eval
-
-    Returns :
-      ndarray: the value of the base function derivatives wrt param crds
-   */
-  constexpr Real3 GetBasisDValue(int quadNumber, int baseIndex) const {
-    return dBasisEvaluated[quadNumber][baseIndex];
-  }
-
-  // @TODO[MAURIZIO] Make all of these private and have accessors/setters instead
-  TetrahedralQuadrature<kNumQuadPoints> const& quadrature;
-  static constexpr int kSpaceDim = 3;
-  static constexpr BarycentricBasisTetrahedra<kPolyOrder> kBasis = {};
-  static constexpr int kNumDofs = BarycentricBasisTetrahedra<kPolyOrder>::kNumDofs;
-
- private:
-  using BasisEvaluatedType = NdArray<real, kNumQuadPoints, kNumDofs>;
-  using DBasisEvaluatedType = NdArray<real, kNumQuadPoints, kNumDofs, kSpaceDim>;
-
-  // Compile-time algorithm to compute basisEvaluated
-  BasisEvaluatedType ComputeBasisEvaluated() {
-    BasisEvaluatedType result;
-    for (int q = 0; q < kNumQuadPoints; ++q) {
-      for (int f = 0; f < kNumDofs; ++f) {
-        result[q][f] = kBasis.GetValue(f, quadrature.points[q]);
-      }
+/// @brief The basis functions evaluated at the points of @p quadrature.
+template <int kPolyOrder, int kNumQuadPoints>
+constexpr auto EvaluateBasis(TetrahedralQuadrature<kNumQuadPoints> const& quadrature) {
+  using Basis = BarycentricBasisTetrahedra<kPolyOrder>;
+  NdArray<real, kNumQuadPoints, Basis::kNumDofs> result = {};
+  for (int q = 0; q < kNumQuadPoints; ++q) {
+    for (int f = 0; f < Basis::kNumDofs; ++f) {
+      result[q][f] = Basis::GetValue(f, quadrature.points[q]);
     }
-    return result;
   }
+  return result;
+}
 
-  // Compile-time algorithm to compute dBasisEvaluated
-  DBasisEvaluatedType ComputeDBasisEvaluated() {
-    DBasisEvaluatedType result;
-    for (int q = 0; q < kNumQuadPoints; ++q) {
-      for (int f = 0; f < kNumDofs; ++f) {
-        result[q][f] = kBasis.GetDValue(f, quadrature.points[q]);
-      }
+/// @brief The basis function gradients with respect to parametric coordinates, evaluated at the
+/// points of @p quadrature.
+template <int kPolyOrder, int kNumQuadPoints>
+constexpr auto EvaluateBasisGradients(TetrahedralQuadrature<kNumQuadPoints> const& quadrature) {
+  using Basis = BarycentricBasisTetrahedra<kPolyOrder>;
+  NdArray<real, kNumQuadPoints, Basis::kNumDofs, 3> result = {};
+  for (int q = 0; q < kNumQuadPoints; ++q) {
+    for (int f = 0; f < Basis::kNumDofs; ++f) {
+      result[q][f] = Basis::GetDValue(f, quadrature.points[q]);
     }
-    return result;
   }
+  return result;
+}
 
- public:
-  BasisEvaluatedType const basisEvaluated = ComputeBasisEvaluated();
-  DBasisEvaluatedType const dBasisEvaluated = ComputeDBasisEvaluated();
-};
+/// @brief @ref EvaluateBasis for each of the four face quadratures of a tetrahedron.
+template <int kPolyOrder, int kNumQuadPoints>
+constexpr auto EvaluateBasis(
+    NdArray<TetrahedralQuadrature<kNumQuadPoints>, 4> const& faceQuadratures) {
+  NdArray<decltype(EvaluateBasis<kPolyOrder>(faceQuadratures[0])), 4> result = {};
+  for (int face = 0; face < 4; ++face) {
+    result[face] = EvaluateBasis<kPolyOrder>(faceQuadratures[face]);
+  }
+  return result;
+}
+
+/// @brief @ref EvaluateBasisGradients for each of the four face quadratures of a tetrahedron.
+template <int kPolyOrder, int kNumQuadPoints>
+constexpr auto EvaluateBasisGradients(
+    NdArray<TetrahedralQuadrature<kNumQuadPoints>, 4> const& faceQuadratures) {
+  NdArray<decltype(EvaluateBasisGradients<kPolyOrder>(faceQuadratures[0])), 4> result = {};
+  for (int face = 0; face < 4; ++face) {
+    result[face] = EvaluateBasisGradients<kPolyOrder>(faceQuadratures[face]);
+  }
+  return result;
+}
 
 } // namespace mochi::tetrahedral

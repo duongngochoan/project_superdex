@@ -74,5 +74,6 @@ endif ()
 if (NOT TARGET picojson)
     add_library(picojson INTERFACE)
     target_sources(picojson INTERFACE "${SR_PICOJSON_SOURCE_DIR}/picojson/picojson.h")
-    target_include_directories(picojson INTERFACE "${SR_PICOJSON_SOURCE_DIR}")
+    # picojson is vendored: its warnings are not actionable, and consumers should not see them.
+    target_include_directories(picojson SYSTEM INTERFACE "${SR_PICOJSON_SOURCE_DIR}")
 endif ()

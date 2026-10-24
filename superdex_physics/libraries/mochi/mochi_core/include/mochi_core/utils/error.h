@@ -130,11 +130,10 @@ class Error final {
 // Use MOCHI_ERROR_RETURN at the top of every function that takes an Error* argument.
 // Returns immediately if an error has already been set. Note: The static_cast supports wrappers
 // like ErrorAssert being used directly.
-#define MOCHI_ERROR_RETURN(error, ...)                 \
-  if (!static_cast<mochi::Error const&>(error).IsOK()) \
-    MOCHI_UNLIKELY {                                   \
-      return __VA_ARGS__;                              \
-    }
+#define MOCHI_ERROR_RETURN(error, ...)                                  \
+  if (!static_cast<mochi::Error const&>(error).IsOK()) MOCHI_UNLIKELY { \
+    return __VA_ARGS__;                                                 \
+  }
 
 // Use MOCHI_ERROR_SET to indicate that something went wrong (see notes on the Error class above).
 // Ignored if an error was already set. Example: MOCHI_ERROR_SET(error, "Here's why it failed");
@@ -142,16 +141,14 @@ class Error final {
 #define MOCHI_ERROR_SET(error, descriptionStringLiteral) \
   static_cast<mochi::Error&>(error).SetFirstError("" descriptionStringLiteral, __FILE__, __LINE__);
 
-// Sets an error and returns if the condition is true
+// Sets an error if the condition is true.
 #define MOCHI_ERROR_IF(condition, error, descriptionStringLiteral) \
-  if (condition)                                                   \
-    MOCHI_UNLIKELY {                                               \
-      MOCHI_ERROR_SET(error, descriptionStringLiteral);            \
-    }                                                              \
-  else {                                                           \
+  if (condition) MOCHI_UNLIKELY {                                  \
+    MOCHI_ERROR_SET(error, descriptionStringLiteral);              \
+  } else {                                                         \
   }
 
-// Sets and error and returns if the condition is false
+// Sets an error if the condition is false.
 #define MOCHI_ERROR_IF_NOT(condition, error, descriptionStringLiteral) \
   MOCHI_ERROR_IF(!(condition), error, descriptionStringLiteral)
 
@@ -190,11 +187,10 @@ class ErrorAssert final {
   ErrorAssert() = default;
   ~ErrorAssert() {
 #if MOCHI_ASSERT_ENABLED
-    if (!_error.IsOK())
-      MOCHI_UNLIKELY {
-        MOCHI_ASSERT_ON_FAILURE(
-            _error.GetFile(), _error.GetLine(), "error.IsOK()", "%s", _error.GetDescription());
-      }
+    if (!_error.IsOK()) MOCHI_UNLIKELY {
+      MOCHI_ASSERT_ON_FAILURE(
+          _error.GetFile(), _error.GetLine(), "error.IsOK()", "%s", _error.GetDescription());
+    }
 #endif // MOCHI_ASSERT_ENABLED
   }
 
@@ -219,15 +215,14 @@ class ErrorLog final {
  public:
   ErrorLog(LogChannel channel = LogChannel::Error) : _channel(channel) {}
   ~ErrorLog() {
-    if (!_error.IsOK())
-      MOCHI_UNLIKELY {
-        MOCHI_LOG_IMPL(
-            _channel,
-            _error.GetFile(),
-            _error.GetLine(),
-            "[MOCHI ERROR] %s",
-            _error.GetDescription());
-      }
+    if (!_error.IsOK()) MOCHI_UNLIKELY {
+      MOCHI_LOG_IMPL(
+          _channel,
+          _error.GetFile(),
+          _error.GetLine(),
+          "[MOCHI ERROR] %s",
+          _error.GetDescription());
+    }
   }
 
   operator Error&() {

@@ -13,7 +13,6 @@ using System.Text.RegularExpressions;
 using Newtonsoft.Json;
 
 using CADRobotExporter.RobotDescription;
-using CADRobotExporter.UI;
 
 namespace CADRobotExporter.Export
 {

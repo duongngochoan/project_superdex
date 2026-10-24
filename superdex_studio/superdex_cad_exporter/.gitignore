@@ -330,7 +330,7 @@ ASALocalRun/
 
 # Ignore installer zip files
 *.zip
-installer/OUTPUT/*
+installer/[Oo][Uu][Tt][Pp][Uu][Tt]/
 
 src/Versioning/VersionInfo.cs
 

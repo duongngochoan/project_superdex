@@ -199,17 +199,19 @@ void LogView::Clear() {
   });
 }
 
-bool LogView::HasNewErrorsOrWarnings() const {
-  return _shared->state.Read(
-      [](State const& state) { return state.hasNewErrors || state.hasNewWarnings; });
+bool LogView::ConsumeNewErrorsOrWarnings() {
+  return _shared->state.Mutate([](State& state) {
+    bool const hadNewErrorsOrWarnings = state.hasNewErrors || state.hasNewWarnings;
+    state.hasNewErrors = false;
+    state.hasNewWarnings = false;
+    return hadNewErrorsOrWarnings;
+  });
 }
 
 bool LogView::ConsumeNewEntries() {
   return _shared->state.Mutate([](State& state) {
     bool const hadNewEntries = state.hasNewEntries;
     state.hasNewEntries = false;
-    state.hasNewErrors = false;
-    state.hasNewWarnings = false;
     return hadNewEntries;
   });
 }

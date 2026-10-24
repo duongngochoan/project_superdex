@@ -26,8 +26,11 @@
 #include <mochi_core/utils/error.h>
 #include <mochi_core/utils/log.h>
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -48,6 +51,40 @@ constexpr int kProcessingPipelineVersion = 1;
 // folder. Beyond this the path falls back to // / @tag / absolute (see UnresolveBotPath). Bots keep
 // the strict descendant-only default (0). Raise this if the on-disk layout ever nests deeper.
 constexpr int kPipelinePathMaxParentDepth = 2;
+
+// The keys a pipeline document and each of its modifier entries may hold. A preset in
+// processing_presets/ adds a description, which the preset menu shows.
+constexpr std::array<std::string_view, 5> kDocumentKeys =
+    {"version", "description", "editorState", "referenceModels", "modifiers"};
+constexpr std::array<std::string_view, 5> kEntryKeys =
+    {"modifier", "method", "enabled", "collapsed", "properties"};
+
+// @p parts joined, without the temporary strings a chain of + makes.
+std::string Concat(std::initializer_list<std::string_view> parts) {
+  std::string joined;
+  for (std::string_view const part : parts) {
+    joined += part;
+  }
+  return joined;
+}
+
+// Reports each key of @p object that is not in @p known as an issue prefixed by @p where.
+template <std::size_t N>
+void ReportUnknownKeys(
+    picojson::object const& object,
+    std::array<std::string_view, N> const& known,
+    std::string const& where,
+    std::vector<std::string>& issues) {
+  for (auto const& [key, value] : object) {
+    if (std::ranges::find(known, key) == known.end()) {
+      issues.push_back(Concat({where, "unknown field '", key, "'"}));
+    }
+  }
+}
+
+std::string Unreadable(int count, std::string_view one, std::string_view many) {
+  return Concat({std::to_string(count), " unreadable ", count == 1 ? one : many});
+}
 
 // The fixed per-entry fields (reflected); each entry's "properties" is stitched in separately.
 struct ProcessingEntryHeader {
@@ -246,14 +283,18 @@ bool LoadProcessingPipeline(
     return false;
   }
   picojson::object const& root = rootVal.get<picojson::object>();
+  ReportUnknownKeys(root, kDocumentKeys, "", out.issues);
 
   // Optional editor state.
   auto const editorIt = root.find("editorState");
   if (editorIt != root.end() && editorIt->second.is<picojson::object>()) {
     int issues = 0;
     SReflect::FromJsonValue(
-        out.editorState, editorIt->second, SReflect::DeserializeFlags::None, issues);
+        out.editorState, editorIt->second, SReflect::DeserializeFlags::Default, issues);
     out.hasEditorState = true;
+    if (issues > 0) {
+      out.issues.push_back(Concat({"editorState: ", Unreadable(issues, "field", "fields")}));
+    }
   }
 
   // Viewer-only reference models (optional).
@@ -265,7 +306,14 @@ bool LoadProcessingPipeline(
       }
       int issues = 0;
       ReferenceModelState ref;
-      SReflect::FromJsonValue(ref, refVal, SReflect::DeserializeFlags::None, issues);
+      SReflect::FromJsonValue(ref, refVal, SReflect::DeserializeFlags::Default, issues);
+      if (issues > 0) {
+        out.issues.push_back(Concat(
+            {"referenceModels[",
+             std::to_string(out.referenceModels.size()),
+             "]: ",
+             Unreadable(issues, "field", "fields")}));
+      }
       AbsolutizePath(ref.path, baseFile);
       out.referenceModels.push_back(std::move(ref));
     }
@@ -279,11 +327,21 @@ bool LoadProcessingPipeline(
         MOCHI_ERROR_SET(error, "Processing-pipeline modifier entry is not an object.");
         return false;
       }
+      picojson::object const& entryObj = entryVal.get<picojson::object>();
+
+      // The entry's own fields. "properties" is read below, by the method it belongs to, and
+      // unknown keys are reported by name, so only the known header fields are read here.
+      picojson::object headerObj;
+      for (auto const& [key, value] : entryObj) {
+        if (key != "properties" && std::ranges::find(kEntryKeys, key) != kEntryKeys.end()) {
+          headerObj.emplace(key, value);
+        }
+      }
       int issues = 0;
       ProcessingEntryHeader entry;
-      SReflect::FromJsonValue(entry, entryVal, SReflect::DeserializeFlags::None, issues);
+      SReflect::FromJsonValue(
+          entry, picojson::value(headerObj), SReflect::DeserializeFlags::Default, issues);
 
-      picojson::object const& entryObj = entryVal.get<picojson::object>();
       auto const propsIt = entryObj.find("properties");
       bool const hasProps = propsIt != entryObj.end();
 
@@ -291,6 +349,19 @@ bool LoadProcessingPipeline(
       // into std::string explicitly (no implicit cross-allocator conversion exists).
       std::string const modName{entry.modifier.data(), entry.modifier.size()};
       std::string const methodName{entry.method.data(), entry.method.size()};
+
+      std::string const where = Concat(
+          {"modifiers[",
+           std::to_string(out.modifiers.size()),
+           "] (",
+           modName,
+           ": ",
+           methodName,
+           "): "});
+      ReportUnknownKeys(entryObj, kEntryKeys, where, out.issues);
+      if (issues > 0) {
+        out.issues.push_back(Concat({where, Unreadable(issues, "field", "fields")}));
+      }
 
       std::unique_ptr<MeshProcessingModifier> modifier = MakeProcessingModifier(modName);
       if (modifier && modifier->SelectMethodByName(methodName)) {
@@ -301,13 +372,22 @@ bool LoadProcessingPipeline(
           for (std::string_view const key : modifier->ActiveMethod().PathPropKeys()) {
             TransformJsonPathField(props, key, baseFile, AbsolutizePath);
           }
-          modifier->ActiveMethod().DeserializeProps(props);
+          if (int const unreadable = modifier->ActiveMethod().DeserializeProps(props);
+              unreadable > 0) {
+            out.issues.push_back(Concat({where, Unreadable(unreadable, "property", "properties")}));
+          }
         }
       } else {
+        out.issues.push_back(Concat(
+            {where,
+             modifier ? "unknown method '" : "unknown modifier '",
+             modifier ? methodName : modName,
+             "'"}));
         // Unknown modifier or method: keep the data losslessly in a passthrough placeholder.
         std::string const propsJson =
             hasProps ? propsIt->second.serialize(/*prettify=*/false) : "{}";
         modifier = MakeUnknownPlaceholderModifier(modName, methodName, propsJson);
+        out.unrecognized.push_back(out.modifiers.size());
       }
       modifier->enabled = entry.enabled;
       modifier->collapsed = entry.collapsed;

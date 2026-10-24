@@ -20,6 +20,7 @@
 // (MOCHI_USE_OCCT); elsewhere this header is an empty translation unit.
 #if MOCHI_USE_OCCT
 
+#include "occ_face_sizing.h"
 #include "occ_isotropic_face_mesher.h" // FaceMeshFallbackStats
 
 #include <mochi_mesh/mochi_mesh_cli_types.h>
@@ -55,6 +56,9 @@ struct ShapeMeshingParams {
   double targetEdgeLength = 0.0;
   /// Edge sampling strategy. Read only for @ref FaceMesher::Isotropic.
   StepMeshBodyParams::EdgeSampling edgeSampling = StepMeshBodyParams::EdgeSampling::Uniform;
+  /// Per-face overrides of the three sizes above, keyed by the faces of the meshed shape. Read
+  /// only for @ref FaceMesher::Isotropic.
+  FaceSizingMap faceSizing;
 };
 
 /// Target uniform 3D edge length [mm]: @p explicitLength when positive, otherwise @p fraction of

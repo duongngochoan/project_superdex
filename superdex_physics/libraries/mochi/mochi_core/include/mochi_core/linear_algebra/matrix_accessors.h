@@ -90,7 +90,7 @@ struct BasicAccessor {
 /// @param v Pointer to the first source element.
 /// @param s Stride value.
 template <typename VType, int N0 = -1, int kStride>
-MOCHI_ANY auto GetSimd(typename VType::Scalar const* v, IntOrEmpty<kStride> s) {
+MOCHI_ANY MOCHI_FORCE_INLINE auto GetSimd(typename VType::Scalar const* v, IntOrEmpty<kStride> s) {
   constexpr int N = (N0 == -1) ? VType::kSize : N0;
   static_assert(N > 0 && N <= VType::kSize, "Inconsistent N");
   if constexpr (kStride == 1) {
@@ -118,7 +118,8 @@ MOCHI_ANY auto GetSimd(typename VType::Scalar const* v, IntOrEmpty<kStride> s) {
 
 /// @brief Overload for runtime N. Unlike the compile-time overload, N = -1 is illegal.
 template <typename VType, int kStride>
-MOCHI_ANY auto GetSimd(typename VType::Scalar const* v, int N, IntOrEmpty<kStride> s) {
+MOCHI_ANY MOCHI_FORCE_INLINE auto
+GetSimd(typename VType::Scalar const* v, int N, IntOrEmpty<kStride> s) {
   using Scalar = typename VType::Scalar;
   MOCHI_ASSERT_VERBOSE(N >= 0 && N <= VType::kSize, "Unsupported N");
   constexpr auto kVecSize = VType::kSize;
@@ -147,7 +148,8 @@ MOCHI_ANY auto GetSimd(typename VType::Scalar const* v, int N, IntOrEmpty<kStrid
 /// @param v SIMD vector with the source data.
 /// @param s Stride value.
 template <int N0 = -1, typename VType, int kStride>
-MOCHI_ANY auto StoreSimd(typename VType::Scalar* d, VType v, IntOrEmpty<kStride> s) {
+MOCHI_ANY MOCHI_FORCE_INLINE auto
+StoreSimd(typename VType::Scalar* d, VType v, IntOrEmpty<kStride> s) {
   constexpr int N = (N0 == -1) ? VType::kSize : N0;
   static_assert(N > 0 && N <= VType::kSize, "Inconsistent N");
   using Scalar = typename VType::Scalar;
@@ -169,7 +171,8 @@ MOCHI_ANY auto StoreSimd(typename VType::Scalar* d, VType v, IntOrEmpty<kStride>
 
 /// @brief Overload for runtime N. Unlike the compile-time overload, N = -1 is illegal.
 template <typename VType, int kStride>
-MOCHI_ANY auto StoreSimd(typename VType::Scalar* d, VType v, int N, IntOrEmpty<kStride> s) {
+MOCHI_ANY MOCHI_FORCE_INLINE auto
+StoreSimd(typename VType::Scalar* d, VType v, int N, IntOrEmpty<kStride> s) {
   using Scalar = typename VType::Scalar;
   MOCHI_ASSERT_VERBOSE(N >= 0 && N <= VType::kSize, "Unsupported N");
   if constexpr (kStride == 1) {
@@ -227,29 +230,29 @@ struct Accessor {
         a._v, a._colStride, a._rowStride);
   }
 
-  inline Scalar* Data() {
+  MOCHI_FORCE_INLINE Scalar* Data() {
     return _v;
   }
 
-  inline constexpr Scalar const* Data() const {
+  MOCHI_FORCE_INLINE constexpr Scalar const* Data() const {
     return _v;
   }
 
-  inline Scalar* ptr(int r, int c) const {
+  MOCHI_FORCE_INLINE Scalar* ptr(int r, int c) const {
     return _v + static_cast<size_t>(r) * _rowStride.sVal() +
         static_cast<size_t>(c) * _colStride.sVal();
   }
 
-  inline constexpr Scalar const& operator()(int r, int c) const {
+  MOCHI_FORCE_INLINE constexpr Scalar const& operator()(int r, int c) const {
     return _v[r * _rowStride.sVal() + c * _colStride.sVal()];
   }
 
-  inline constexpr void Store(int r, int c, Scalar const& value) const {
+  MOCHI_FORCE_INLINE constexpr void Store(int r, int c, Scalar const& value) const {
     *ptr(r, c) = value;
   }
 
   template <typename VType, int N = -1>
-  inline auto RowVector(int r, int c) const {
+  MOCHI_FORCE_INLINE auto RowVector(int r, int c) const {
     static_assert(
         std::is_same_v<std::remove_const_t<Scalar>, typename VType::Scalar>,
         "Inconsistent scalar types");
@@ -257,7 +260,7 @@ struct Accessor {
   }
 
   template <typename VType>
-  inline auto RowVector(int r, int c, int N) const {
+  MOCHI_FORCE_INLINE auto RowVector(int r, int c, int N) const {
     static_assert(
         std::is_same_v<std::remove_const_t<Scalar>, typename VType::Scalar>,
         "Inconsistent scalar types");
@@ -265,7 +268,7 @@ struct Accessor {
   }
 
   template <typename VType, int N = -1>
-  inline auto ColVector(int r, int c) const {
+  MOCHI_FORCE_INLINE auto ColVector(int r, int c) const {
     static_assert(
         std::is_same_v<std::remove_const_t<Scalar>, typename VType::Scalar>,
         "Inconsistent scalar types");
@@ -273,7 +276,7 @@ struct Accessor {
   }
 
   template <typename VType>
-  inline auto ColVector(int r, int c, int N) const {
+  MOCHI_FORCE_INLINE auto ColVector(int r, int c, int N) const {
     static_assert(
         std::is_same_v<std::remove_const_t<Scalar>, typename VType::Scalar>,
         "Inconsistent scalar types");
@@ -281,25 +284,25 @@ struct Accessor {
   }
 
   template <int N = -1, typename VType>
-  inline auto StoreRowVector(int r, int c, VType vec) const {
+  MOCHI_FORCE_INLINE auto StoreRowVector(int r, int c, VType vec) const {
     static_assert(std::is_same_v<Scalar, typename VType::Scalar>, "Inconsistent scalar types");
     return StoreSimd<N>(ptr(r, c), vec, _colStride);
   }
 
   template <typename VType>
-  inline auto StoreRowVector(int r, int c, VType vec, int N) const {
+  MOCHI_FORCE_INLINE auto StoreRowVector(int r, int c, VType vec, int N) const {
     static_assert(std::is_same_v<Scalar, typename VType::Scalar>, "Inconsistent scalar types");
     return StoreSimd(ptr(r, c), vec, N, _colStride);
   }
 
   template <int N = -1, typename VType>
-  inline auto StoreColVector(int r, int c, VType vec) const {
+  MOCHI_FORCE_INLINE auto StoreColVector(int r, int c, VType vec) const {
     static_assert(std::is_same_v<Scalar, typename VType::Scalar>, "Inconsistent scalar types");
     return StoreSimd<N>(ptr(r, c), vec, _rowStride);
   }
 
   template <typename VType>
-  inline auto StoreColVector(int r, int c, VType vec, int N) const {
+  MOCHI_FORCE_INLINE auto StoreColVector(int r, int c, VType vec, int N) const {
     static_assert(std::is_same_v<Scalar, typename VType::Scalar>, "Inconsistent scalar types");
     return StoreSimd(ptr(r, c), vec, N, _rowStride);
   }

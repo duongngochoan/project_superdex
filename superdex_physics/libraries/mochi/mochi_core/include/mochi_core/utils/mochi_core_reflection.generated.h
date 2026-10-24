@@ -22,4 +22,6 @@
 
 #include <mochi_core/utils/reflection.h>
 
+#include <limits>
+
 // clang-format on

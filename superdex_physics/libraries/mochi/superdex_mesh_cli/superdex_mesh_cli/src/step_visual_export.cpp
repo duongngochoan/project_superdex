@@ -16,23 +16,25 @@
 
 // Render-side STEP export. Reads via XCAF to preserve per-body colors/materials.
 // Skips topology-modifying steps (CombineSolids/NormalizeShape) to keep styles intact.
-// Normals come from evaluating the true surface at UV nodes (not facet-averaged).
-// Mesher backend is selectable via StepVisualExportParams::backend.
+// Normals are taken from the real CAD surface at each vertex rather than averaged from the
+// triangles. They are stored on the mesh before the UVs are rewritten into the 0-1 range, so
+// changing the UVs does not change the shading. The mesher is chosen by
+// StepVisualExportParams::backend.
 
 #include "mesh_cli_geometry.h"
 
 #if MOCHI_USE_OCCT
 
 #include "occ_shape_meshing.h"
+#include "step_face_colors.h"
 
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepLProp_SLProps.hxx>
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
-#include <CDM_CanCloseStatus.hxx>
-#include <IFSelect_ReturnStatus.hxx>
 #include <IMeshData_Status.hxx>
-#include <Interface_Static.hxx>
 #include <Message_ProgressRange.hxx>
 #include <Poly_Triangle.hxx>
 #include <Poly_Triangulation.hxx>
@@ -41,8 +43,6 @@
 #include <RWMesh_CoordinateSystem.hxx>
 #include <RWMesh_CoordinateSystemConverter.hxx>
 #include <RWObj_CafWriter.hxx>
-#include <STEPCAFControl_Reader.hxx>
-#include <STEPControl_Controller.hxx>
 #include <Standard_Failure.hxx>
 #include <Standard_Integer.hxx>
 #include <StlAPI_Writer.hxx>
@@ -58,10 +58,11 @@
 #include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
-#include <XCAFApp_Application.hxx>
 #include <XCAFDoc_DocumentTool.hxx>
 #include <XCAFDoc_ShapeTool.hxx>
+#include <gp.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -75,9 +76,12 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iterator>
+#include <limits>
 #include <span>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -89,54 +93,6 @@ constexpr double kDegenerateTriangleArea = 1e-10;
 
 // OpenCascade emits geometry in millimeters (see LoadStepDocument).
 constexpr double kMillimetersToMeters = 0.001;
-
-// Reads a STEP file into an XCAF document, preserving colors, materials, names and layers.
-bool LoadStepDocument(
-    std::string const& path,
-    Handle(TDocStd_Document) & outDocument,
-    CliError& error) {
-  // Statics are unregistered, and silently ignored, until the controller is initialized.
-  STEPControl_Controller::Init();
-  Interface_Static::SetCVal("xstep.cascade.unit", "MM");
-  // Fix for SolidWorks' single-part export with a non-identity coordinate transform. This flag is
-  // benign in most cases.
-  Interface_Static::SetCVal("read.step.root.transformation", "OFF");
-
-  Handle(XCAFApp_Application) const application = XCAFApp_Application::GetApplication();
-  application->NewDocument("BinXCAF", outDocument);
-  MOCHI_MESH_CLI_ERROR_IF(
-      outDocument.IsNull(), error, "Failed to create an OpenCascade XCAF document.");
-  MOCHI_MESH_CLI_ERROR_RETURN(error, false);
-
-  STEPCAFControl_Reader reader;
-  reader.SetColorMode(true);
-  reader.SetMatMode(true);
-  reader.SetLayerMode(true);
-  reader.SetNameMode(true);
-  reader.SetPropsMode(true);
-
-  IFSelect_ReturnStatus status = IFSelect_RetFail;
-  try {
-    status = reader.ReadFile(path.c_str());
-  } catch (...) {
-    MOCHI_MESH_CLI_ERROR_SET(error, "OpenCascade threw while reading the STEP file.");
-    return false;
-  }
-  MOCHI_MESH_CLI_ERROR_IF(status != IFSelect_RetDone, error, "Failed to read STEP file.");
-  MOCHI_MESH_CLI_ERROR_RETURN(error, false);
-
-  if (!reader.Transfer(outDocument, Message_ProgressRange())) {
-    MOCHI_MESH_CLI_ERROR_SET(error, "Failed to transfer the STEP file into an XCAF document.");
-    return false;
-  }
-
-  TDF_LabelSequence freeShapes;
-  XCAFDoc_DocumentTool::ShapeTool(outDocument->Main())->GetFreeShapes(freeShapes);
-  MOCHI_MESH_CLI_ERROR_IF(
-      freeShapes.Length() == 0, error, "STEP file contains no shapes to export.");
-  MOCHI_MESH_CLI_ERROR_RETURN(error, false);
-  return true;
-}
 
 // Tessellates one shape in place, using the backend the caller asked for.
 IMeshData_Status MeshShapeForVisualExport(
@@ -234,6 +190,137 @@ int RemoveZeroAreaTriangles(TopoDS_Shape const& shape) {
   return totalRemoved;
 }
 
+// Space left between neighboring faces in the UV layout, relative to the overall size of the
+// layout.
+constexpr double kUvChartPadding = 0.01;
+
+// The UV layout of one face. It records the face's UV range and how much real-world distance one
+// unit of U or V covers, so every face gets the same texture resolution.
+struct UvChart {
+  Handle(Poly_Triangulation) triangulation;
+  double uMin = 0.0;
+  double vMin = 0.0;
+  double scaleU = 0.0;
+  double scaleV = 0.0;
+  double width = 0.0;
+  double height = 0.0;
+  double offsetU = 0.0;
+  double offsetV = 0.0;
+};
+
+// If the mesh has no stored normals, the GLB/OBJ writers look up the CAD surface at each vertex's
+// UV to get one, which would give wrong normals once the UVs are rewritten. So this stores the
+// normals first, computed the same way the writers would. While visiting each vertex it also
+// measures how stretched U and V are, to size the face's layout.
+UvChart BakeNormalsAndMeasureChart(
+    TopoDS_Face const& face,
+    Handle(Poly_Triangulation) const& triangulation) {
+  TopoDS_Face forwardFace = TopoDS::Face(face.Oriented(TopAbs_FORWARD));
+  forwardFace.Location(TopLoc_Location());
+  BRepLProp_SLProps props(BRepAdaptor_Surface(forwardFace, false), 1, 1e-12);
+
+  double uMin = std::numeric_limits<double>::max();
+  double vMin = std::numeric_limits<double>::max();
+  double uMax = std::numeric_limits<double>::lowest();
+  double vMax = std::numeric_limits<double>::lowest();
+  double sumScaleU = 0.0;
+  double sumScaleV = 0.0;
+
+  triangulation->AddNormals();
+  Standard_Integer const numNodes = triangulation->NbNodes();
+  for (Standard_Integer i = 1; i <= numNodes; ++i) {
+    gp_Pnt2d const uv = triangulation->UVNode(i);
+    props.SetParameters(uv.X(), uv.Y());
+    triangulation->SetNormal(i, props.IsNormalDefined() ? props.Normal() : gp::DZ());
+    sumScaleU += props.D1U().Magnitude();
+    sumScaleV += props.D1V().Magnitude();
+    uMin = std::min(uMin, uv.X());
+    vMin = std::min(vMin, uv.Y());
+    uMax = std::max(uMax, uv.X());
+    vMax = std::max(vMax, uv.Y());
+  }
+
+  double const scaleU = sumScaleU / numNodes;
+  double const scaleV = sumScaleV / numNodes;
+  return UvChart{
+      .triangulation = triangulation,
+      .uMin = uMin,
+      .vMin = vMin,
+      .scaleU = scaleU,
+      .scaleV = scaleV,
+      .width = (uMax - uMin) * scaleU,
+      .height = (vMax - vMin) * scaleV,
+  };
+}
+
+// The CAD mesher's UVs are the surface's own coordinates (an angle on a cylinder, millimeters on a
+// plane), so they fall far outside 0-1 and faces overlap. This rescales each face to its real-world
+// size, lays the faces out in rows without overlapping, and then shrinks the whole layout to fit
+// inside 0-1.
+void PackFaceUvs(TopTools_IndexedMapOfShape const& faces) {
+  std::vector<UvChart> charts;
+  // Copies of the same part share one mesh, so each mesh is laid out only once and the copies keep
+  // the same UVs.
+  std::unordered_set<Poly_Triangulation const*> seen;
+  for (Standard_Integer fi = 1; fi <= faces.Extent(); ++fi) {
+    TopoDS_Face const face = TopoDS::Face(faces(fi));
+    TopLoc_Location location;
+    Handle(Poly_Triangulation) const triangulation = BRep_Tool::Triangulation(face, location);
+    if (triangulation.IsNull() || !triangulation->HasUVNodes() || triangulation->NbNodes() == 0 ||
+        !seen.insert(triangulation.get()).second) {
+      continue;
+    }
+    charts.push_back(BakeNormalsAndMeasureChart(face, triangulation));
+  }
+
+  double area = 0.0;
+  double maxWidth = 0.0;
+  for (UvChart const& chart : charts) {
+    area += chart.width * chart.height;
+    maxWidth = std::max(maxWidth, chart.width);
+  }
+  if (!(area > 0.0)) {
+    return;
+  }
+  double const padding = kUvChartPadding * std::sqrt(area);
+  double paddedArea = 0.0;
+  for (UvChart const& chart : charts) {
+    paddedArea += (chart.width + padding) * (chart.height + padding);
+  }
+  double const shelfWidth = std::max(std::sqrt(paddedArea), maxWidth + 2.0 * padding);
+
+  std::ranges::stable_sort(charts, std::ranges::greater{}, &UvChart::height);
+  double x = padding;
+  double y = padding;
+  double shelfHeight = 0.0;
+  double usedWidth = 0.0;
+  for (UvChart& chart : charts) {
+    if (x > padding && x + chart.width + padding > shelfWidth) {
+      x = padding;
+      y += shelfHeight + padding;
+      shelfHeight = 0.0;
+    }
+    chart.offsetU = x;
+    chart.offsetV = y;
+    x += chart.width + padding;
+    shelfHeight = std::max(shelfHeight, chart.height);
+    usedWidth = std::max(usedWidth, x);
+  }
+  double const invAtlasSize = 1.0 / std::max(usedWidth, y + shelfHeight + padding);
+
+  for (UvChart const& chart : charts) {
+    Standard_Integer const numNodes = chart.triangulation->NbNodes();
+    for (Standard_Integer i = 1; i <= numNodes; ++i) {
+      gp_Pnt2d const uv = chart.triangulation->UVNode(i);
+      chart.triangulation->SetUVNode(
+          i,
+          gp_Pnt2d(
+              (chart.offsetU + (uv.X() - chart.uMin) * chart.scaleU) * invAtlasSize,
+              (chart.offsetV + (uv.Y() - chart.vMin) * chart.scaleV) * invAtlasSize));
+    }
+  }
+}
+
 // Tessellates every free shape in the document. Returns false when a face failed and the caller
 // asked not to tolerate that; sets @p outHadPartialFailure when a failure was tolerated.
 bool MeshDocument(
@@ -263,6 +350,7 @@ bool MeshDocument(
   occ::FaceMeshFallbackStats fallbackStats;
 
   int totalDegenerate = 0;
+  TopTools_IndexedMapOfShape faces;
   for (Standard_Integer i = 1; i <= freeShapes.Length(); ++i) {
     TopoDS_Shape const shape = shapeTool->GetShape(freeShapes.Value(i));
     if (shape.IsNull()) {
@@ -280,7 +368,9 @@ bool MeshDocument(
       outHadPartialFailure = true;
     }
     totalDegenerate += RemoveZeroAreaTriangles(shape);
+    TopExp::MapShapes(shape, TopAbs_FACE, faces);
   }
+  PackFaceUvs(faces);
 
   if (fallbackStats.FailedCount() > 0) {
     MOCHI_MESH_CLI_LOG_WARNING(
@@ -539,7 +629,7 @@ bool mochi::mesh::cli::ExportStepVisual(
   MOCHI_MESH_CLI_ERROR_RETURN(error, false);
 
   Handle(TDocStd_Document) document;
-  if (!LoadStepDocument(std::string(stepFilePath), document, error)) {
+  if (!occ::LoadStepDocument(std::string(stepFilePath), document, error)) {
     return false;
   }
 
@@ -592,9 +682,7 @@ bool mochi::mesh::cli::ExportStepVisual(
     MOCHI_MESH_CLI_ERROR_SET(error, "OpenCascade threw during the STEP visual export.");
   }
 
-  if (document->CanClose() == CDM_CCS_OK) {
-    document->Close();
-  }
+  occ::CloseStepDocument(document);
   MOCHI_MESH_CLI_ERROR_RETURN(error, false);
   return meshed;
 }

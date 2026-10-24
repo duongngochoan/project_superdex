@@ -138,6 +138,10 @@ enum class QueryType {
 
   VisualNodeNormals,
 
+  ContactSkinNodePositions,
+
+  ContactSkinNodeNormals,
+
   ContactPoints,
 
   ElasticEnergy,

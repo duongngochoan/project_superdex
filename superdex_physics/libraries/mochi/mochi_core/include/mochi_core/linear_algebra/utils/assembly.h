@@ -129,8 +129,6 @@ struct NodalBasedStructure {
  private:
   /// @brief Element-to-node connectivity.
   Graph<int, int> _eToN;
-  /// @brief Node-to-element connectivity.
-  Graph<int, int> _nToE;
   /// @brief Node-to-node connectivity. (Pattern of the mesh matrix in BlockSparseMatrix format).
   Graph<int, int> _nToN;
   /// @brief Precomputed locations of the elemental blocks in the BlockSparseMatrix.

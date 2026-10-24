@@ -38,6 +38,10 @@ enum struct ConvergenceStatus {
   /**
    * @brief Solver met at least one stopping criterion without converging to the requested
    * tolerance.
+   *
+   * @note This does not necessarily indicate a problem: the residual tolerances may be stricter
+   * than required. If the maximum-iteration limit (@ref NonLinearSolverParams::maxIter) caused the
+   * status, increase it only if additional iterations materially change the results.
    */
   Stopped,
 
@@ -133,7 +137,15 @@ MOCHI_ENUM_COUNT(Count)
 MOCHI_ENUM_END()
 
 namespace mochi {
-/** @brief Line search methods for the non-linear solver. */
+/**
+ * @brief Line search methods for the non-linear solver.
+ *
+ * @note In the line searches that test the objective (@ref LineSearchType::Simple,
+ * @ref LineSearchType::Armijo, @ref LineSearchType::WolfeWeak, @ref LineSearchType::WolfeStrong and
+ * @ref LineSearchType::ArmijoOrResidualNorm), a step that fails the test but changes the objective
+ * by no more than an estimate of its rounding error is tested on the slope of the objective along
+ * the step instead.
+ */
 enum struct LineSearchType {
   /** @brief No line search. May substantially degrade stability. */
   None,
@@ -378,13 +390,10 @@ struct NonLinearSolverParams {
    * iteration. */
   bool stopIfNoImprovement = false;
 
-  // Retries and fallbacks
+  // Retries
 
   /** @brief Positive Semi-Definite (PSD) projection mode for the dresidual matrix. */
   PsdProjectionMode psdProjMode = PsdProjectionMode::Default;
-
-  /** @brief Fall back to gradient descent direction if the solver search direction fails. */
-  bool gradientDescentFallback = false;
 
   // Explosion control
 
@@ -445,6 +454,8 @@ struct NonLinearSolverParams {
    * @brief Maximum relative increase in the objective to accept the step.
    *
    * @note Only applies to @ref LineSearchType::Simple.
+   * @note An increase beyond this maximum but within an estimate of the objective's rounding error
+   * is tested on the slope of the objective along the step instead (see @ref LineSearchType).
    */
   real lineSearchMaxRelIncrease = 0.0_r;
 
@@ -476,7 +487,6 @@ struct NonLinearSolverParams {
   MOCHI_FIELD(relStepTol)
   MOCHI_FIELD(stopIfNoImprovement)
   MOCHI_FIELD(psdProjMode)
-  MOCHI_FIELD(gradientDescentFallback)
   MOCHI_FIELD(explosionControl)
   MOCHI_FIELD(absDivTol)
   MOCHI_FIELD(relDivTol)

@@ -28,7 +28,6 @@
 #include "mochi_simulation.h"
 #include "mochi_snle.h"
 
-#include <mochi_core/contact/dmap.h>
 #include <mochi_core/element_operations/element_assembler.h>
 #include <mochi_core/element_operations/fem_rod.h>
 #include <mochi_core/geometry/mesh_data.h>
@@ -40,6 +39,8 @@
 #include <mochi_core/linear_algebra/matrix.h>
 #include <mochi_core/linear_algebra/sparse_matrix.h>
 #include <mochi_core/linear_algebra/utils/assembly.h>
+#include <mochi_core/utils/array_utils.h>
+#include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/graph_utils.h>
 #include <mochi_core/utils/matrix_utils.h>
 #include <mochi_core/utils/nd_array_utils.h>
@@ -90,9 +91,7 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CRodPose<TimeStep::StageStart>>(reg);
   ecs::RegisterComponent<CRodPose<TimeStep::Previous>>(reg);
   ecs::RegisterComponent<CRodVisualMeshEmbedding>(reg);
-  ecs::RegisterComponent<CRodSkinningData>(reg);
-  ecs::RegisterComponent<CRodDeformedVisualNodes>(reg);
-  ecs::RegisterComponent<TagUseVisualMeshContact>(reg);
+  ecs::RegisterComponent<CRodContactSkinEmbedding>(reg);
 }
 
 // Serializes frame axes to the packed pose vector layout [displacement_twist | axes].
@@ -211,6 +210,23 @@ void EntityIncrementStep(
   currVel.value.SetZero();
 }
 
+void EntityReconstructPreviousStep(
+    ecs::Included<TagRodActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CPolylineMesh const& mesh,
+    CRodPose<TimeStep::Current> const& currPose,
+    CVelocitySlice<real, TimeStep::Current> const& currVel,
+    CIntegrationRodPoses const& intPoses,
+    CIntegrationVelocitySlices<DisplacementLayer::Default> const& intVels,
+    CRodPose<TimeStep::Previous>& outPrevPose,
+    CVelocitySlice<real, TimeStep::Previous>& outPrevVel) {
+  auto const method = simParams->integrationMethod;
+  integration::ReconstructPreviousPoseFromHistoryOrExtrapolate(
+      mesh.nodes, method, time.value, intPoses, currPose, currVel, outPrevPose);
+  integration::ReconstructPreviousVelocityFromHistoryOrCopy(method, intVels, currVel, outPrevVel);
+}
+
 void EntityPreFirstStage(
     ecs::Included<TagRodActor>,
     CTimeIntegratorState const& intState,
@@ -277,7 +293,7 @@ void EntityPostLastStage(
 // Update CDirichletBC based on CDofPositionsBC (if any)
 static void UpdateDirichletBC(
     CRootTransform const& root,
-    CFullSparsityPattern const& fullSparsity,
+    CActorSnle const& actorSnle,
     CDofPositionsBC const* inWorldBC,
     CDirichletBC<real>& outLocalBC,
     CPolylineMesh const& mesh) {
@@ -291,7 +307,7 @@ static void UpdateDirichletBC(
     outLocalBC.colValueIndices = inWorldBC->colValueIndices;
 
     int const numBcDofs = isize(inWorldBC->dofIndices);
-    outLocalBC.poseValues.resize(numBcDofs);
+    outLocalBC.poseValues.resize_noinit(numBcDofs);
     for (int i = 0; i < numBcDofs; ++i) {
       int const dofIndex = inWorldBC->dofIndices[i];
       int const component = dofIndex % fem::kNumRodFields;
@@ -327,7 +343,7 @@ static void UpdateDirichletBC(
     outLocalBC.poseIndices.push_back(numDofs - 1);
     outLocalBC.poseValues.push_back(0_r);
     AppendColValueIndexCache(
-        fullSparsity.graph,
+        AsConstView(actorSnle.fullDResidual),
         MakeSingletonConstSpan(outLocalBC.dofIndices.back()),
         outLocalBC.colValueIndices);
   }
@@ -374,8 +390,9 @@ void ComputeRodNodeCurvatureBinormals(
   }
 }
 
-// Helper: compute deformed visual mesh node positions from rod pose.
-// Writes numVisualNodes × 3 values to outPositions (must be pre-sized).
+// Compute deformed triangular-surface node positions from a rod pose.
+// Writes either every surface node or the requested node subset to outPositions (must be
+// pre-sized). outputNodeIndices uses full-mesh node indices and preserves its input ordering.
 //
 // Implementation: two passes, with SIMD-friendly per-element transforms.
 //   Pass 1 (per element, with periodic wrap): cache the per-element affine map
@@ -383,27 +400,26 @@ void ComputeRodNodeCurvatureBinormals(
 //     row holding one column of the affine. scaledTDef = (x1 - x0) / referenceLength is the
 //     stretched unit tangent. Lane 3 of each stored row is intentionally unconstrained; it
 //     would correspond to the affine's bottom row, which never reaches outPositions.
-//   Pass 2 (per visual node × per weight): evaluate affine · [xi[0], xi[1], xi[2], 1] via
+//   Pass 2 (per surface node × per weight): evaluate affine · [xi[0], xi[1], xi[2], 1] via
 //     DotVecMat4x4 and accumulate the weighted contribution from each contributing element.
 //     The meaningless homogeneous-output lane is discarded by Store<3>.
-static void ComputeDeformedVisualNodePositions(
-    CVisualMesh const& visualMesh,
-    CRodVisualMeshEmbedding const& rodEmbedding,
+static void ComputeDeformedSurfaceNodePositions(
+    TriangularMesh const& surfaceMesh,
+    RodSurfaceEmbeddingData const& embedding,
     CPolylineMesh const& polylineMesh,
     RodPose const& rodPose,
     Span<real> outPositions) {
-  auto const& embData = *rodEmbedding.data;
-  int const numVisualNodes = visualMesh.mesh->GetNumNodes();
-  int const K = embData.weightsPerNode;
+  int const numSurfaceNodes = surfaceMesh.GetNumNodes();
+  int const K = embedding.weightsPerNode;
   int const numElements = polylineMesh.NumElements();
-  auto const meshNodes = polylineMesh.nodes;
+  auto const centerlineNodes = polylineMesh.nodes;
   auto const& displacements = rodPose.displacements;
   auto const& frameAxes = rodPose.frameAxes;
 
   MOCHI_ASSERT_VERBOSE(
-      isize(outPositions) == kSpaceDim3 * numVisualNodes, "outPositions must be pre-sized");
+      isize(outPositions) == kSpaceDim3 * numSurfaceNodes, "outPositions must be pre-sized");
   MOCHI_ASSERT_VERBOSE(
-      isize(embData.invReferenceLengths) == numElements,
+      isize(embedding.invReferenceLengths) == numElements,
       "invReferenceLengths size must match number of elements");
 
   // Pass 1: per-element affine transform stored as the transpose of a 4x4 (VMatrix4x4r).
@@ -415,222 +431,305 @@ static void ComputeDeformedVisualNodePositions(
   elemTransforms.resize_noinit(numElements);
   for (int e = 0; e < numElements; ++e) {
     Int2 const en = polylineMesh.ElementNodes(e);
-    Vec4r const x0 =
-        ToSimd(meshNodes[en[0]], 0_r) + Load<Vec4r>(&displacements[fem::kNumRodFields * en[0]]);
-    Vec4r const x1 =
-        ToSimd(meshNodes[en[1]], 0_r) + Load<Vec4r>(&displacements[fem::kNumRodFields * en[1]]);
+    Vec4r const x0 = ToSimd(centerlineNodes[en[0]], 0_r) +
+        Load<Vec4r>(&displacements[fem::kNumRodFields * en[0]]);
+    Vec4r const x1 = ToSimd(centerlineNodes[en[1]], 0_r) +
+        Load<Vec4r>(&displacements[fem::kNumRodFields * en[1]]);
     Vec4r const tDef = x1 - x0;
     Vec4r const eHat = Normalize<3>(tDef);
     Vec4r const dDef = ToSimd(frameAxes[e], 0_r);
     Vec4r const bDef = Cross3(eHat, dDef);
-    Vec4r const scaledTDef = embData.invReferenceLengths[e] * tDef;
+    Vec4r const scaledTDef = embedding.invReferenceLengths[e] * tDef;
     Vec4r const midDef = 0.5_r * (x0 + x1);
     elemTransforms[e] = VMatrix4x4r{scaledTDef, dDef, bDef, midDef};
   }
 
-  // Pass 2: per-visual-node skinning. Evaluate affine · [xi, 1] via DotVecMat4x4 on the
+  // Pass 2: per-surface-node skinning. Evaluate affine · [xi, 1] via DotVecMat4x4 on the
   // transposed transform; lane 3 of the result is meaningless and discarded by Store<3>.
-  for (int i = 0; i < numVisualNodes; ++i) {
-    Vec4r xVis{};
+  for (int i = 0; i < numSurfaceNodes; ++i) {
+    Vec4r xSurface{};
     for (int m = 0; m < K; ++m) {
       int const idx = i * K + m;
-      int const elemIdx = embData.elementIndices[idx];
-      real const w = embData.weights[idx];
-      Real3 const xi = embData.localCoordinates[idx];
+      int const elemIdx = embedding.elementIndices[idx];
+      real const w = embedding.weights[idx];
+      Real3 const xi = embedding.localCoordinates[idx];
 
       Vec4r const localHom{xi[0], xi[1], xi[2], 1_r};
       Vec4r const xElem = DotVecMat4x4(localHom, elemTransforms[elemIdx]);
-      xVis += w * xElem;
+      xSurface += w * xElem;
     }
-    Store<3>(&outPositions[kSpaceDim3 * i], xVis);
+    Store<3>(&outPositions[kSpaceDim3 * i], xSurface);
   }
 }
 
 template <TimeStep kTimeStep>
-void UpdateRodVisualMeshContactPositions(
+void UpdateSurfaceContactPositions(
     ecs::Included<TagRodActor>,
-    ecs::RequiredTag<TagUseVisualMeshContact>,
+    ecs::RequiredTag<TagUseDeformableContactSkin>,
     CRodPose<kTimeStep> const& rodPose,
-    CRodVisualMeshEmbedding const& rodEmbedding,
-    CVisualMesh const& visualMesh,
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CFemSurfaceDiscretization const& surfaceDisc,
-    CRodDeformedVisualNodes& deformedNodes,
+    CDeformedContactSkinNodes& deformedNodes,
     CContactSamples<kTimeStep>& outSamples) {
   MOCHI_PROFILE_SCOPE();
 
-  // Step 1: Compute deformed visual mesh node displacements
-  ComputeDeformedVisualNodePositions(
-      visualMesh, rodEmbedding, polylineMesh, rodPose.value, MakeSpan(deformedNodes.positions));
+  ComputeDeformedSurfaceNodePositions(
+      *contactSkin.mesh,
+      *rodEmbedding.data,
+      polylineMesh,
+      rodPose.value,
+      MakeSpan(deformedNodes.positions));
 
-  // Sizing heuristic: ~100 centerline rod elements x ~10 visual nodes around the circumference,
-  // with modest safety factor to avoid dynamic allocation fallback.
-  int constexpr kNumVisualNodesEstimate = 2048;
-  MOCHI_FILO_STACK_ALLOCATOR(allocator, kSpaceDim3 * kNumVisualNodesEstimate * sizeof(real));
-  ColumnVector<real> visualNodeDispl(isize(deformedNodes.positions), &allocator);
-  Span<real const> restPositions = Flatten(visualMesh.mesh->GetNodeCoordinates());
-  visualNodeDispl = AsConstView(deformedNodes.positions) - AsConstView(restPositions);
+  int constexpr kNumContactSkinNodesEstimate = 2048;
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, kSpaceDim3 * kNumContactSkinNodesEstimate * sizeof(real));
+  ColumnVector<real> contactSkinNodeDisplacements(isize(deformedNodes.positions), &allocator);
+  Span<real const> restPositions = Flatten(contactSkin.mesh->GetNodeCoordinates());
+  contactSkinNodeDisplacements = AsConstView(deformedNodes.positions) - AsConstView(restPositions);
 
-  // Step 2: Evaluate quadrature positions and weights on the surface
-  UpdateCollisionSamplePositionsImpl</*kUpdateOnlyActiveFaces*/ false,
-                                     CFemSurfaceDiscretization,
-                                     /*kNumFields*/ 3>(
-      visualNodeDispl, surfaceDisc, nullptr, outSamples);
+  UpdateCollisionSamplePositionsFromNodeDisplacements<
+      /*kUpdateOnlyActiveFaces*/ false,
+      CFemSurfaceDiscretization,
+      /*kNumFields*/ 3>(contactSkinNodeDisplacements, surfaceDisc, nullptr, outSamples);
 }
 
-// Explicit template instantiations
-template void UpdateRodVisualMeshContactPositions<TimeStep::Current>(
+template void UpdateSurfaceContactPositions<TimeStep::Current>(
     ecs::Included<TagRodActor>,
-    ecs::RequiredTag<TagUseVisualMeshContact>,
+    ecs::RequiredTag<TagUseDeformableContactSkin>,
     CRodPose<TimeStep::Current> const& rodPose,
-    CRodVisualMeshEmbedding const& rodEmbedding,
-    CVisualMesh const& visualMesh,
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CFemSurfaceDiscretization const& surfaceDisc,
-    CRodDeformedVisualNodes& deformedNodes,
+    CDeformedContactSkinNodes& deformedNodes,
     CContactSamples<TimeStep::Current>& outSamples);
 
-template void UpdateRodVisualMeshContactPositions<TimeStep::StageStart>(
+template void UpdateSurfaceContactPositions<TimeStep::StageStart>(
     ecs::Included<TagRodActor>,
-    ecs::RequiredTag<TagUseVisualMeshContact>,
+    ecs::RequiredTag<TagUseDeformableContactSkin>,
     CRodPose<TimeStep::StageStart> const& rodPose,
-    CRodVisualMeshEmbedding const& rodEmbedding,
-    CVisualMesh const& visualMesh,
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CFemSurfaceDiscretization const& surfaceDisc,
-    CRodDeformedVisualNodes& deformedNodes,
+    CDeformedContactSkinNodes& deformedNodes,
     CContactSamples<TimeStep::StageStart>& outSamples);
 
-void SetupRodVisualMeshCollidingJacobians(
-    ecs::Included<TagRodActor>,
-    ecs::RequiredTag<TagUseVisualMeshContact>,
-    CFemSurfaceDiscretization const& surfaceDisc,
-    CRootTransform const& transform,
-    CDofOffset const& dofOffset,
-    CRodSkinningData const& skinningData,
-    CCollJacs<CollRole::Colliding>& outJacobians) {
-  MOCHI_PROFILE_SCOPE();
-
-  // Create the skinning data view for DMapSparseSkinning
-  auto skinJacView = AsConstView(skinningData.jacobian);
-  dmap::DMapSparseSkinning sparseSkinning(0, dofOffset.dofsOffset, skinJacView);
-  dmap::DMapRTConst dtransform(transform.worldFromLocal);
-
-  surfaceDisc.Visit([&](auto const& discImpl) {
-    using DiscT = std::decay_t<decltype(discImpl)>;
-    using DQuad = dmap::DMapQuad<typename DiscT::ElementT>;
-
-    // Collect all non-empty jac pointers for parallel processing (both sync and async).
-    // Use GetPtrsNonEmpty to skip empty jacobian entries.
-    MOCHI_FILO_STACK_ALLOCATOR(tempAlloc, 256 * sizeof(JacData*));
-    auto allJacs = outJacobians.GetPtrsNonEmpty(&tempAlloc);
-    if (allJacs.empty()) {
-      return;
-    }
-
-    ParallelForEach(
-        "rod::SetupRodVisualMeshCollidingJacobians Range", allJacs, 1, [&](JacData* jac) {
-          DQuad dquad(discImpl.femElements, jac->query->jacColliderFromWorld);
-          dmap::DMap<DQuad, dmap::DMapRTConst, dmap::DMapSparseSkinning> dmap(
-              &dquad, &dtransform, &sparseSkinning);
-
-          auto& jacs = *(jac->jacs);
-          dmap.GetJac(jac->query->sampleIndices, jacs);
-          jacs[0].CompressIndices();
-        });
-  });
-}
-
 template <TimeStep kStep>
-void UpdateBoundsVisualMesh(
+void UpdateSurfaceContactBounds(
     ecs::Included<TagRodActor>,
-    ecs::RequiredTag<TagUseVisualMeshContact>,
-    CVisualMesh const& visualMesh,
-    CRodVisualMeshEmbedding const& rodEmbedding,
+    ecs::RequiredTag<TagUseDeformableContactSkin>,
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CRodPose<kStep> const& rodPose,
-    CRodDeformedVisualNodes& deformedNodes,
-    CBoundingVolume<TimeStep::Current>& outBounds) {
+    CDeformedContactSkinNodes& deformedNodes,
+    CPointCloudColliderParams const* pointCloudColliderParams,
+    CBoundingVolume& outBounds) {
   static_assert(kStep == TimeStep::Current || kStep == TimeStep::StageStart);
   MOCHI_PROFILE_SCOPE();
 
-  int const numVisualNodes = visualMesh.mesh->GetNumNodes();
-  if (numVisualNodes == 0) {
-    return;
-  }
+  MOCHI_ASSERT_VERBOSE(
+      contactSkin.mesh->GetNumNodes() > 0,
+      "TagUseDeformableContactSkin requires a non-empty contact skin.");
 
-  // Compute deformed visual mesh node positions (into pre-allocated buffer)
-  ComputeDeformedVisualNodePositions(
-      visualMesh, rodEmbedding, polylineMesh, rodPose.value, MakeSpan(deformedNodes.positions));
-  auto const deformedVisualNodes = Unflatten<Real3 const>(MakeConstSpan(deformedNodes.positions));
+  ComputeDeformedSurfaceNodePositions(
+      *contactSkin.mesh,
+      *rodEmbedding.data,
+      polylineMesh,
+      rodPose.value,
+      MakeSpan(deformedNodes.positions));
+  auto const deformedNodesView = Unflatten<Real3 const>(MakeConstSpan(deformedNodes.positions));
 
-  Vec4r min = ToSimd(deformedVisualNodes[0], 0_r);
+  Vec4r min = ToSimd(deformedNodesView[0], 0_r);
   Vec4r max = min;
-  for (int i = 1; i < isize(deformedVisualNodes); ++i) {
-    Vec4r const pos = ToSimd(deformedVisualNodes[i], 0_r);
+  for (int i = 1; i < isize(deformedNodesView); ++i) {
+    Vec4r const pos = ToSimd(deformedNodesView[i], 0_r);
     min = Min(min, pos);
     max = Max(max, pos);
   }
-  outBounds.localShape = GetObb(Aabb{Set(min, 3, 0_r), Set(max, 3, 0_r)});
+
+  Aabb bounds{Set(min, 3, 0_r), Set(max, 3, 0_r)};
+  if (pointCloudColliderParams) {
+    Aabb const pointCloudBounds = ExpandShape(
+        CalcDeformedRodCenterlineAabb(polylineMesh.nodes, rodPose.value.displacements),
+        pointCloudColliderParams->radius);
+    bounds = GetAabb(bounds, pointCloudBounds);
+  }
+  outBounds.localShape = GetObb(bounds);
 }
 
-template void UpdateBoundsVisualMesh<TimeStep::Current>(
+template void UpdateSurfaceContactBounds<TimeStep::Current>(
     ecs::Included<TagRodActor>,
-    ecs::RequiredTag<TagUseVisualMeshContact>,
-    CVisualMesh const& visualMesh,
-    CRodVisualMeshEmbedding const& rodEmbedding,
+    ecs::RequiredTag<TagUseDeformableContactSkin>,
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CRodPose<TimeStep::Current> const& rodPose,
-    CRodDeformedVisualNodes& deformedNodes,
-    CBoundingVolume<TimeStep::Current>& outBounds);
+    CDeformedContactSkinNodes& deformedNodes,
+    CPointCloudColliderParams const* pointCloudColliderParams,
+    CBoundingVolume& outBounds);
 
-template void UpdateBoundsVisualMesh<TimeStep::StageStart>(
+template void UpdateSurfaceContactBounds<TimeStep::StageStart>(
     ecs::Included<TagRodActor>,
-    ecs::RequiredTag<TagUseVisualMeshContact>,
-    CVisualMesh const& visualMesh,
-    CRodVisualMeshEmbedding const& rodEmbedding,
+    ecs::RequiredTag<TagUseDeformableContactSkin>,
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CRodPose<TimeStep::StageStart> const& rodPose,
-    CRodDeformedVisualNodes& deformedNodes,
-    CBoundingVolume<TimeStep::Current>& outBounds);
+    CDeformedContactSkinNodes& deformedNodes,
+    CPointCloudColliderParams const* pointCloudColliderParams,
+    CBoundingVolume& outBounds);
+
+// Compute max speed of skin vertices using finite-step twist velocities, not just instantaneous
+// tangent velocities.
+static real ComputeMaxSkinSpeed(
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
+    CPolylineMesh const& polylineMesh,
+    RodPose const& rodPose,
+    ColumnVectorView<real const> dofVelocity,
+    real timeStep) {
+  static_assert(fem::kNumRodFields == 4);
+
+  auto const& surfaceMesh = *contactSkin.mesh;
+  auto const& embedding = *rodEmbedding.data;
+  int const numSurfaceNodes = surfaceMesh.GetNumNodes();
+  int const numElements = polylineMesh.NumElements();
+  int const K = embedding.weightsPerNode;
+  auto const centerlineNodes = polylineMesh.nodes;
+  auto const& displacements = rodPose.displacements;
+  auto const& frameAxes = rodPose.frameAxes;
+
+  MOCHI_ASSERT_VERBOSE(
+      dofVelocity.Rows() == fem::kNumRodFields * isize(centerlineNodes),
+      "Rod velocity size must match the rod node count");
+  MOCHI_ASSERT_VERBOSE(
+      isize(embedding.invReferenceLengths) == numElements,
+      "invReferenceLengths size must match number of elements");
+
+  // Stack memory for 256 rod elements
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * sizeof(VMatrix4x4r));
+  DynamicArray<VMatrix4x4r> elemVelocityTransforms(&allocator);
+  elemVelocityTransforms.resize_noinit(numElements);
+  real const invTimeStep = timeStep != 0_r ? 1_r / timeStep : 0_r;
+  for (int e = 0; e < numElements; ++e) {
+    Int2 const en = polylineMesh.ElementNodes(e);
+    int const node0Offset = fem::kNumRodFields * en[0];
+    int const node1Offset = fem::kNumRodFields * en[1];
+    Vec4r const x0 = ToSimd(centerlineNodes[en[0]], 0_r) + Load<Vec4r>(&displacements[node0Offset]);
+    Vec4r const x1 = ToSimd(centerlineNodes[en[1]], 0_r) + Load<Vec4r>(&displacements[node1Offset]);
+    Vec4r const frameAxis = ToSimd(frameAxes[e], 0_r);
+    auto const differential = fem::ComputeRodElementFrameDifferential(x1 - x0, frameAxis);
+
+    Vec4r const velocity0 = Load<Vec4r>(&dofVelocity[node0Offset]);
+    Vec4r const velocity1 = Load<Vec4r>(&dofVelocity[node1Offset]);
+    Vec4r const edgeVelocity = velocity1 - velocity0;
+    real const twistVelocity = velocity0[fem::kRodThetaDofOffset];
+    real finiteTwistRate = twistVelocity;
+    real finiteTwistContractionRate = 0_r;
+    if (timeStep != 0_r) {
+      real const twistAngle = timeStep * twistVelocity;
+      finiteTwistRate = Sin(twistAngle) * invTimeStep;
+      finiteTwistContractionRate = -2_r * Sqr(Sin(0.5_r * twistAngle)) * invTimeStep;
+    }
+    Vec4r const frameAxisVelocity = DotMatVec3x3(differential.dFrameAxisDEdge, edgeVelocity) +
+        finiteTwistRate * differential.binormal + finiteTwistContractionRate * frameAxis;
+    Vec4r const binormalVelocity = DotMatVec3x3(differential.dBinormalDEdge, edgeVelocity) -
+        finiteTwistRate * frameAxis + finiteTwistContractionRate * differential.binormal;
+    Vec4r const scaledTangentVelocity = embedding.invReferenceLengths[e] * edgeVelocity;
+    Vec4r const midpointVelocity = 0.5_r * (velocity0 + velocity1);
+    elemVelocityTransforms[e] =
+        VMatrix4x4r{scaledTangentVelocity, frameAxisVelocity, binormalVelocity, midpointVelocity};
+  }
+
+  real maxSpeedSqr = 0_r;
+  for (int i = 0; i < numSurfaceNodes; ++i) {
+    Vec4r surfaceVelocity{};
+    for (int m = 0; m < K; ++m) {
+      int const idx = i * K + m;
+      int const elemIdx = embedding.elementIndices[idx];
+      real const w = embedding.weights[idx];
+      Real3 const xi = embedding.localCoordinates[idx];
+      surfaceVelocity +=
+          w * DotVecMat4x4(Vec4r{xi[0], xi[1], xi[2], 1_r}, elemVelocityTransforms[elemIdx]);
+    }
+    maxSpeedSqr = Max(maxSpeedSqr, NormSqr<3>(surfaceVelocity));
+  }
+  return Sqrt(maxSpeedSqr);
+}
+
+void UpdateMaxGeometrySpeed(
+    ecs::Included<TagRodActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    CPolylineMesh const& polylineMesh,
+    CRodPose<TimeStep::Current> const& rodPose,
+    CVelocitySlice<real, TimeStep::Current> const& velocity,
+    ecs::OptionalTag<TagUseDeformableContactSkin> usesContactSkin,
+    CContactSkinMesh const* contactSkin,
+    CRodContactSkinEmbedding const* rodEmbedding,
+    CPointCloudColliderParams const* pointCloudColliderParams,
+    CConservativeStepBounds& outStepBounds) {
+  ColumnVectorView<real const> dofVelocity = velocity.value;
+
+  // Centerline speed bounds, if there's no surface contact or there's a point-cloud collider.
+  auto const centerlineMaxSpeed = (pointCloudColliderParams || !usesContactSkin)
+      ? MaxPackedVector3Norm<fem::kNumRodFields>(dofVelocity.GetConstSpan())
+      : 0_r;
+
+  // Surface speed bounds.
+  real skinMaxSpeed = 0_r;
+  if (usesContactSkin) {
+    MOCHI_ASSERT_VERBOSE(contactSkin && rodEmbedding, "Contact skin components are missing.");
+    skinMaxSpeed = ComputeMaxSkinSpeed(
+        *contactSkin,
+        *rodEmbedding,
+        polylineMesh,
+        rodPose.value,
+        dofVelocity,
+        static_cast<real>(time->DeltaTime()));
+  }
+  outStepBounds.maxGeometrySpeed = Max(centerlineMaxSpeed, skinMaxSpeed);
+}
 
 } // namespace mochi::rod
 
-std::shared_ptr<RodVisualMeshEmbeddingData> mochi::ComputeRodVisualMeshEmbedding(
+RodSurfaceEmbeddingData mochi::ComputeRodSurfaceEmbedding(
     Span<Real3 const> nodes,
     Span<Real3 const> frameAxes,
-    TriangularMesh const& visualMesh,
+    TriangularMesh const& surfaceMesh,
     SkinningData&& skinning,
     bool isClosedLoop) {
   int const weightsPerNode = skinning.weightsPerNode;
-  int const numVisualNodes = visualMesh.GetNumNodes();
+  int const numSurfaceNodes = surfaceMesh.GetNumNodes();
   int const numNodes = isize(nodes);
   int const numElements = isClosedLoop ? numNodes : numNodes - 1;
   MOCHI_ASSERT(
       isize(frameAxes) == numElements,
       "frameAxes must have one entry per polyline element (caller should generate if needed)");
 
-  auto embedding = std::make_shared<RodVisualMeshEmbeddingData>();
-  embedding->weightsPerNode = weightsPerNode;
-  embedding->elementIndices = std::move(skinning.indices);
-  embedding->weights = std::move(skinning.weights);
-  embedding->localCoordinates.resize(numVisualNodes * weightsPerNode);
+  RodSurfaceEmbeddingData embedding;
+  embedding.weightsPerNode = weightsPerNode;
+  embedding.elementIndices = std::move(skinning.indices);
+  embedding.weights = std::move(skinning.weights);
+  embedding.localCoordinates.resize(numSurfaceNodes * weightsPerNode);
 
-  // Precompute reciprocal reference lengths once per element, so the per-(visual node, element)
+  // Precompute reciprocal reference lengths once per element, so the per-(surface node, element)
   // ξ solve below builds a unit-reference-tangent basis that is well conditioned independent of
   // edge length.
-  embedding->invReferenceLengths.resize_noinit(numElements);
+  embedding.invReferenceLengths.resize_noinit(numElements);
   for (int e = 0; e < numElements; ++e) {
     real const referenceLength = Norm(nodes[(e + 1) % numNodes] - nodes[e]);
     MOCHI_ASSERT_VERBOSE(referenceLength > 0_r, "Rod element has zero reference length");
-    embedding->invReferenceLengths[e] = 1_r / referenceLength;
+    embedding.invReferenceLengths[e] = 1_r / referenceLength;
   }
 
-  auto const visCoords = visualMesh.GetNodeCoordinates();
-  for (int i = 0; i < numVisualNodes; ++i) {
+  auto const surfaceCoordinates = surfaceMesh.GetNodeCoordinates();
+  for (int i = 0; i < numSurfaceNodes; ++i) {
     for (int m = 0; m < weightsPerNode; ++m) {
       int const idx = i * weightsPerNode + m;
-      int const elemIdx = embedding->elementIndices[idx];
+      int const elemIdx = embedding.elementIndices[idx];
       MOCHI_ASSERT_VERBOSE(elemIdx >= 0 && elemIdx < numElements);
 
       Int2 const en = {elemIdx, (elemIdx + 1) % numNodes};
@@ -640,65 +739,92 @@ std::shared_ptr<RodVisualMeshEmbeddingData> mochi::ComputeRodVisualMeshEmbedding
       // Use a *unit* reference tangent so xi[0] is in arc-length units. This makes the local solve
       // independent of the element edge length and keeps the runtime skinning frame well
       // conditioned under stretch (cf. xi[0] is rescaled by invReferenceLengths at runtime).
-      Real3 const unitReferenceT = embedding->invReferenceLengths[elemIdx] * (x1 - x0);
+      Real3 const unitReferenceT = embedding.invReferenceLengths[elemIdx] * (x1 - x0);
       Real3 const d = frameAxes[elemIdx];
       Real3 const b = Cross(unitReferenceT, d);
 
-      Real3 const rhs = visCoords[i] - mid;
+      Real3 const rhs = surfaceCoordinates[i] - mid;
       // Solve [unitReferenceT | d | b] * xi = rhs. Since (unitReferenceT, d, b) form an
       // orthonormal basis, the matrix is a rotation and its inverse equals its transpose.
       Real3 const xi = DotMatVec(Matrix3x3r{unitReferenceT, d, b}, rhs);
-      embedding->localCoordinates[idx] = xi;
+      embedding.localCoordinates[idx] = xi;
     }
   }
   return embedding;
 }
 
-void mochi::rod::UpdateQueryRodVisualNodePositionsAndNormals(
+// Compute deformed node positions and (optionally) normals of an auxiliary (visual or contact skin)
+// mesh embedded in a rod.
+static void UpdateAuxiliaryMeshNodePositionsAndNormals(
+    TriangularMesh const& mesh,
+    RodSurfaceEmbeddingData const& embedding,
+    CPolylineMesh const& polylineMesh,
+    RodPose const& rodPose,
+    DynamicArray<real>& outPositions,
+    DynamicArray<real>* outNormals) {
+  MOCHI_PROFILE_SCOPE();
+
+  outPositions.resize(static_cast<size_t>(kSpaceDim3) * mesh.GetNumNodes());
+  rod::ComputeDeformedSurfaceNodePositions(
+      mesh, embedding, polylineMesh, rodPose, MakeSpan(outPositions));
+
+  if (outNormals) {
+    UpdateAuxiliaryMeshNodeNormals(false, mesh, MakeConstSpan(outPositions), *outNormals);
+  }
+}
+
+void mochi::rod::UpdateQueryVisualNodePositionsAndNormals(
     CVisualMesh const& visualMesh,
     CRodVisualMeshEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CRodPose<TimeStep::Current> const& rodPose,
     CQueryVisualNodePositions& outVisPosQuery,
     CQueryVisualNodeNormals* outVisNormQuery) {
-  MOCHI_PROFILE_SCOPE();
-
-  int const numVisualNodes = visualMesh.mesh->GetNumNodes();
-  auto const numValues = static_cast<size_t>(kSpaceDim3) * numVisualNodes;
-  outVisPosQuery.nodePositions.resize(numValues);
-
-  ComputeDeformedVisualNodePositions(
-      visualMesh,
-      rodEmbedding,
+  UpdateAuxiliaryMeshNodePositionsAndNormals(
+      *visualMesh.mesh,
+      *rodEmbedding.data,
       polylineMesh,
       rodPose.value,
-      MakeSpan(outVisPosQuery.nodePositions));
-
-  if (outVisNormQuery) {
-    UpdateQueryVisualNodeNormals(false, visualMesh, outVisPosQuery, *outVisNormQuery);
-  }
+      outVisPosQuery.nodePositions,
+      outVisNormQuery ? &outVisNormQuery->nodeNormals : nullptr);
 }
 
-void mochi::rod::InitializeRodSkinningJacobian(
-    CVisualMesh const& visualMesh,
-    CRodVisualMeshEmbedding const& rodEmbedding,
+void mochi::rod::UpdateQueryContactSkinNodePositionsAndNormals(
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
-    CRodSkinningData& outSkinning) {
+    CRodPose<TimeStep::Current> const& rodPose,
+    CQueryContactSkinNodePositions& outPosQuery,
+    CQueryContactSkinNodeNormals* outNormQuery) {
+  UpdateAuxiliaryMeshNodePositionsAndNormals(
+      *contactSkin.mesh,
+      *rodEmbedding.data,
+      polylineMesh,
+      rodPose.value,
+      outPosQuery.nodePositions,
+      outNormQuery ? &outNormQuery->nodeNormals : nullptr);
+}
+
+void mochi::rod::InitializeContactSkinningJacobian(
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
+    CPolylineMesh const& polylineMesh,
+    CContactSkinningData& outSkinning) {
   auto const& embData = *rodEmbedding.data;
-  int const numVisualNodes = visualMesh.mesh->GetNumNodes();
+  int const numContactSkinNodes = contactSkin.mesh->GetNumNodes();
   int const K = embData.weightsPerNode;
   int const numNodes = isize(polylineMesh.nodes);
   int const numDofs = numNodes * fem::kNumRodFields;
 
-  // Collect unique, sorted DOF indices per visual node, deduplicating overlapping elements.
-  DynamicArray<DynamicArray<int>> dofIndicesPerNode(numVisualNodes);
+  // Collect unique, sorted DOF indices per contact-skin node, deduplicating overlapping elements.
+  DynamicArray<DynamicArray<int>> dofIndicesPerNode(numContactSkinNodes);
 
-  int const numRows = numVisualNodes;
+  int const numRows = numContactSkinNodes;
   DynamicArray<int> rowPtrs;
   rowPtrs.resize_noinit(numRows + 1);
   rowPtrs[0] = 0;
 
-  for (int i = 0; i < numVisualNodes; ++i) {
+  for (int i = 0; i < numContactSkinNodes; ++i) {
     auto& nodeDofs = dofIndicesPerNode[i];
     nodeDofs.reserve(K * 2 * fem::kNumRodFields);
 
@@ -727,7 +853,7 @@ void mochi::rod::InitializeRodSkinningJacobian(
 
   int const totalNnz = rowPtrs[numRows];
   DynamicArray<int> colIndices(totalNnz);
-  for (int i = 0; i < numVisualNodes; ++i) {
+  for (int i = 0; i < numContactSkinNodes; ++i) {
     auto const& nodeDofs = dofIndicesPerNode[i];
     std::copy_n(nodeDofs.data(), isize(nodeDofs), &colIndices[rowPtrs[i]]);
   }
@@ -737,25 +863,42 @@ void mochi::rod::InitializeRodSkinningJacobian(
       SparseMatrix<Real3>(numDofs, std::move(rowPtrs), std::move(colIndices), std::move(values));
 }
 
-void mochi::rod::ResolveRodSkinningJacobian(
-    CVisualMesh const& visualMesh,
-    CRodVisualMeshEmbedding const& rodEmbedding,
+void mochi::rod::ResolveContactSkinningJacobian(
+    ecs::RequiredTag<TagUseDeformableContactSkin>,
+    CContactSkinMesh const& contactSkin,
+    CRodContactSkinEmbedding const& rodEmbedding,
     CPolylineMesh const& polylineMesh,
     CRodPose<TimeStep::Current> const& rodPose,
-    CRodSkinningData& outSkinning) {
+    CContactSkinningData& outSkinning) {
   MOCHI_PROFILE_SCOPE();
 
   auto const& embData = *rodEmbedding.data;
-  int const numVisualNodes = visualMesh.mesh->GetNumNodes();
+  int const numContactSkinNodes = contactSkin.mesh->GetNumNodes();
   int const K = embData.weightsPerNode;
-  auto const meshNodes = polylineMesh.nodes;
+  int const numElements = polylineMesh.NumElements();
+  auto const centerlineNodes = polylineMesh.nodes;
   auto const& displacements = rodPose.value.displacements;
   auto const& frameAxes = rodPose.value.frameAxes;
 
+  // Stack memory for 256 rod elements
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * sizeof(fem::RodElementFrameDifferential));
+  DynamicArray<fem::RodElementFrameDifferential> elementDifferentials(&allocator);
+  elementDifferentials.reserve(numElements);
+  for (int e = 0; e < numElements; ++e) {
+    Int2 const en = polylineMesh.ElementNodes(e);
+    int const node0Start = en[0] * fem::kNumRodFields;
+    int const node1Start = en[1] * fem::kNumRodFields;
+    Vec4r const x0 = ToSimd(centerlineNodes[en[0]], 0_r) + Load<Vec4r>(&displacements[node0Start]);
+    Vec4r const x1 = ToSimd(centerlineNodes[en[1]], 0_r) + Load<Vec4r>(&displacements[node1Start]);
+    elementDifferentials.emplace_back(
+        fem::ComputeRodElementFrameDifferential(x1 - x0, ToSimd(frameAxes[e], 0_r)));
+  }
+
   auto& jac = outSkinning.jacobian;
+  // Only values change here; columnCoalescingMap relies on the sparsity staying fixed.
   jac.SetZero();
 
-  for (int i = 0; i < numVisualNodes; ++i) {
+  for (int i = 0; i < numContactSkinNodes; ++i) {
     auto const colIndices = jac.Indices(i);
     auto values = jac.Values(i);
 
@@ -766,21 +909,11 @@ void mochi::rod::ResolveRodSkinningJacobian(
       Real3 const xi = embData.localCoordinates[idx];
 
       Int2 const en = polylineMesh.ElementNodes(elemIdx);
-      NdArray<real, 8> elemDofs;
       int const node0Start = en[0] * fem::kNumRodFields;
-      int const node1Start = en[1] * fem::kNumRodFields;
-      Store(&elemDofs[0], Load<Vec4r>(&displacements[node0Start]));
-      Store(&elemDofs[fem::kNumRodFields], Load<Vec4r>(&displacements[node1Start]));
 
       NdArray<real, 3, 8> elemJac;
       fem::ComputeEmbeddedPointElementJacobian(
-          meshNodes[en[0]],
-          meshNodes[en[1]],
-          xi,
-          embData.invReferenceLengths[elemIdx],
-          frameAxes[elemIdx],
-          MakeConstSpan(elemDofs),
-          elemJac);
+          xi, embData.invReferenceLengths[elemIdx], elementDifferentials[elemIdx], elemJac);
 
       // Find localCol0 via binary search in the pre-built sorted column indices.
       auto const* it0 = std::lower_bound(colIndices.begin(), colIndices.end(), node0Start);
@@ -790,7 +923,7 @@ void mochi::rod::ResolveRodSkinningJacobian(
       // Second node of rod element may wrap around to zero for closed-loop rod.
       int const localCol1 = (localCol0 + fem::kNumRodFields) % isize(colIndices);
       MOCHI_ASSERT_VERBOSE(
-          colIndices[localCol1] == node1Start,
+          colIndices[localCol1] == en[1] * fem::kNumRodFields,
           "node1Start DOF must be present (possibly wrapped) in sparsity pattern");
 
       for (int d = 0; d < fem::kNumRodFields; ++d) {
@@ -882,7 +1015,7 @@ DynamicArray<Real3> mochi::GenerateDiscreteBishopFrame(Span<Real3 const> nodes, 
   return elementFrameAxes;
 }
 
-MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
+ModelData mochi::experimental::GenerateTubularRodModelData(
     Span<Real3 const> nodes,
     Span<Real3 const> elementFrameAxes,
     real radius,
@@ -917,7 +1050,7 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
 
   // Compute a discrete Bishop frame for twist-free cross-section orientation. Note that these axes
   // are intentionally independent of the rod's material frame axes, to minimize distortion of the
-  // tubular visual mesh in the reference configuration, even if the material frame axes have some
+  // tubular contact skin in the reference configuration, even if the material frame axes have some
   // nontrivial twist.
   DynamicArray<Real3> const bishopAxes = GenerateDiscreteBishopFrame(nodes, isClosedLoop);
 
@@ -928,9 +1061,9 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
   if (isClosedLoop) {
     // Closed loop: one ring per element midpoint, no boundary rings, no end caps.
     int const numRings = numElements;
-    int const numVisualNodes = numCrossSectionSegments * numRings;
-    DynamicArray<real> visNodePositions;
-    visNodePositions.reserve(3 * numVisualNodes);
+    int const numSurfaceNodes = numCrossSectionSegments * numRings;
+    DynamicArray<real> surfaceNodePositions;
+    surfaceNodePositions.reserve(3 * numSurfaceNodes);
     real const invSeg = 1_r / static_cast<real>(numCrossSectionSegments);
     for (int r = 0; r < numRings; ++r) {
       Int2 const en = {r, (r + 1) % numNodes};
@@ -940,11 +1073,11 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
       for (int s = 0; s < numCrossSectionSegments; ++s) {
         real const angle = 2_r * kPI * static_cast<real>(s) * invSeg;
         Real3 const pos = center + radius * (Cos(angle) * bishopAxes[r] + Sin(angle) * binormal);
-        visNodePositions.append(MakeConstSpan(pos));
+        surfaceNodePositions.append(MakeConstSpan(pos));
       }
     }
-    DynamicArray<int> visTriangles;
-    visTriangles.reserve(3 * 2 * numCrossSectionSegments * numRings);
+    DynamicArray<int> surfaceTriangles;
+    surfaceTriangles.reserve(3 * 2 * numCrossSectionSegments * numRings);
     for (int i = 0; i < numRings; ++i) {
       int const nextRing = (i + 1) % numRings;
       for (int c = 0; c < numCrossSectionSegments; ++c) {
@@ -954,20 +1087,20 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
         int const v10 = nextRing * numCrossSectionSegments + c;
         int const v11 = nextRing * numCrossSectionSegments + c1;
         Int3 const tri0{v00, v01, v11};
-        visTriangles.append(MakeConstSpan(tri0));
+        surfaceTriangles.append(MakeConstSpan(tri0));
         Int3 const tri1{v00, v11, v10};
-        visTriangles.append(MakeConstSpan(tri1));
+        surfaceTriangles.append(MakeConstSpan(tri1));
       }
     }
     int constexpr kWeightsPerNode = 1;
     DynamicArray<int> embeddingElementIndices;
-    embeddingElementIndices.reserve(kWeightsPerNode * numVisualNodes);
+    embeddingElementIndices.reserve(kWeightsPerNode * numSurfaceNodes);
     for (int r = 0; r < numRings; ++r) {
       for (int s = 0; s < numCrossSectionSegments; ++s) {
         embeddingElementIndices.push_back(r);
       }
     }
-    DynamicArray<real> embeddingWeights(numVisualNodes, 1_r);
+    DynamicArray<real> embeddingWeights(numSurfaceNodes, 1_r);
     ModelData model;
     model.mesh.emplace(MeshData{});
     model.mesh->nodesPerElement = 2;
@@ -975,14 +1108,14 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
     // Closed-loop polyline: connectivity must include the wrap-around segment.
     model.mesh->connectivity = MakeSequentialPolylineConnectivity(numNodes, /*isClosedLoop=*/true);
     model.elementFrameAxes = Flatten(frameAxes);
-    model.visualMesh.emplace(MeshData{});
-    model.visualMesh->nodesPerElement = 3;
-    model.visualMesh->coordinates = std::move(visNodePositions);
-    model.visualMesh->connectivity = std::move(visTriangles);
-    model.visualMesh->skinning.emplace(SkinningData{});
-    model.visualMesh->skinning->weightsPerNode = kWeightsPerNode;
-    model.visualMesh->skinning->indices = std::move(embeddingElementIndices);
-    model.visualMesh->skinning->weights = std::move(embeddingWeights);
+    model.contactSkinMesh.emplace(MeshData{});
+    model.contactSkinMesh->nodesPerElement = 3;
+    model.contactSkinMesh->coordinates = std::move(surfaceNodePositions);
+    model.contactSkinMesh->connectivity = std::move(surfaceTriangles);
+    model.contactSkinMesh->skinning.emplace(SkinningData{});
+    model.contactSkinMesh->skinning->weightsPerNode = kWeightsPerNode;
+    model.contactSkinMesh->skinning->indices = std::move(embeddingElementIndices);
+    model.contactSkinMesh->skinning->weights = std::move(embeddingWeights);
     return model;
   }
 
@@ -1002,10 +1135,10 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
     ringB[r] = Cross(tangent, d);
   }
 
-  // Visual mesh nodes: numCrossSectionSegments vertices per ring, plus 2 cap-center vertices
-  int const numVisualNodes = numCrossSectionSegments * numRings + 2;
-  DynamicArray<real> visNodePositions;
-  visNodePositions.reserve(3 * numVisualNodes);
+  // Surface nodes: numCrossSectionSegments vertices per ring, plus 2 cap-center vertices
+  int const numSurfaceNodes = numCrossSectionSegments * numRings + 2;
+  DynamicArray<real> surfaceNodePositions;
+  surfaceNodePositions.reserve(3 * numSurfaceNodes);
   real const invNumCrossSectionSegments = 1_r / static_cast<real>(numCrossSectionSegments);
   for (int r = 0; r < numRings; ++r) {
     Real3 center;
@@ -1019,16 +1152,16 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
     for (int s = 0; s < numCrossSectionSegments; ++s) {
       real const angle = 2_r * kPI * static_cast<real>(s) * invNumCrossSectionSegments;
       Real3 const pos = center + radius * (Cos(angle) * ringD[r] + Sin(angle) * ringB[r]);
-      visNodePositions.append(MakeConstSpan(pos));
+      surfaceNodePositions.append(MakeConstSpan(pos));
     }
   }
-  visNodePositions.append(MakeConstSpan(nodes[0]));
-  visNodePositions.append(MakeConstSpan(nodes[numNodes - 1]));
+  surfaceNodePositions.append(MakeConstSpan(nodes[0]));
+  surfaceNodePositions.append(MakeConstSpan(nodes[numNodes - 1]));
 
   // Triangles: quad strips between consecutive rings + triangle-fan end caps
   int const numQuadStrips = numRings - 1;
-  DynamicArray<int> visTriangles;
-  visTriangles.reserve(
+  DynamicArray<int> surfaceTriangles;
+  surfaceTriangles.reserve(
       3 * (2 * numCrossSectionSegments * numQuadStrips + 2 * numCrossSectionSegments));
   for (int i = 0; i < numQuadStrips; ++i) {
     for (int c = 0; c < numCrossSectionSegments; ++c) {
@@ -1038,9 +1171,9 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
       int const v10 = (i + 1) * numCrossSectionSegments + c;
       int const v11 = (i + 1) * numCrossSectionSegments + c1;
       Int3 const tri0{v00, v01, v11};
-      visTriangles.append(MakeConstSpan(tri0));
+      surfaceTriangles.append(MakeConstSpan(tri0));
       Int3 const tri1{v00, v11, v10};
-      visTriangles.append(MakeConstSpan(tri1));
+      surfaceTriangles.append(MakeConstSpan(tri1));
     }
   }
   // Start cap
@@ -1048,7 +1181,7 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
   for (int s = 0; s < numCrossSectionSegments; ++s) {
     int const s1 = (s + 1) % numCrossSectionSegments;
     Int3 const tri{startCapCenter, s1, s};
-    visTriangles.append(MakeConstSpan(tri));
+    surfaceTriangles.append(MakeConstSpan(tri));
   }
   // End cap
   int const endCapCenter = startCapCenter + 1;
@@ -1056,15 +1189,15 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
   for (int s = 0; s < numCrossSectionSegments; ++s) {
     int const s1 = (s + 1) % numCrossSectionSegments;
     Int3 const tri{endCapCenter, lastRingStart + s, lastRingStart + s1};
-    visTriangles.append(MakeConstSpan(tri));
+    surfaceTriangles.append(MakeConstSpan(tri));
   }
 
-  // Embedding: each visual vertex is assigned to exactly one element
+  // Embedding: each surface vertex is assigned to exactly one element
   int constexpr kWeightsPerNode = 1;
   DynamicArray<int> embeddingElementIndices;
   DynamicArray<real> embeddingWeights;
-  embeddingElementIndices.reserve(kWeightsPerNode * numVisualNodes);
-  embeddingWeights.reserve(kWeightsPerNode * numVisualNodes);
+  embeddingElementIndices.reserve(kWeightsPerNode * numSurfaceNodes);
+  embeddingWeights.reserve(kWeightsPerNode * numSurfaceNodes);
   for (int r = 0; r < numRings; ++r) {
     int const elem = Min(Max(r - 1, 0), numElements - 1);
     for (int s = 0; s < numCrossSectionSegments; ++s) {
@@ -1090,17 +1223,17 @@ MOCHI_API ModelData mochi::experimental::GenerateTubularRodModelData(
   model.mesh->connectivity = MakeSequentialPolylineConnectivity(numNodes, /*isClosedLoop=*/false);
   model.elementFrameAxes = Flatten(frameAxes);
 
-  // Visual mesh (triangular tube)
-  model.visualMesh.emplace(MeshData{});
-  model.visualMesh->nodesPerElement = 3;
-  model.visualMesh->coordinates = std::move(visNodePositions);
-  model.visualMesh->connectivity = std::move(visTriangles);
+  // Contact skin (triangular tube)
+  model.contactSkinMesh.emplace(MeshData{});
+  model.contactSkinMesh->nodesPerElement = 3;
+  model.contactSkinMesh->coordinates = std::move(surfaceNodePositions);
+  model.contactSkinMesh->connectivity = std::move(surfaceTriangles);
 
   // Skinning data
-  model.visualMesh->skinning.emplace(SkinningData{});
-  model.visualMesh->skinning->weightsPerNode = kWeightsPerNode;
-  model.visualMesh->skinning->indices = std::move(embeddingElementIndices);
-  model.visualMesh->skinning->weights = std::move(embeddingWeights);
+  model.contactSkinMesh->skinning.emplace(SkinningData{});
+  model.contactSkinMesh->skinning->weightsPerNode = kWeightsPerNode;
+  model.contactSkinMesh->skinning->indices = std::move(embeddingElementIndices);
+  model.contactSkinMesh->skinning->weights = std::move(embeddingWeights);
 
   return model;
 }
@@ -1120,8 +1253,7 @@ static void EmplaceRodActorContact(
     int numCollidingSamples,
     Error& error) {
   Obb const meshObb = CalcObb(MakeConstSpan(shape.GetNodes()));
-  reg.emplace<CBoundingVolume<TimeStep::Current>>(e, meshObb);
-  reg.emplace<CBoundingVolume<TimeStep::Previous>>(e, meshObb);
+  reg.emplace<CBoundingVolume>(e, meshObb);
 
   ColliderType colliderType = params.colliderType;
   if (colliderType == ColliderType::Auto) {
@@ -1134,7 +1266,7 @@ static void EmplaceRodActorContact(
   reg.emplace<CContactParams>(e, params.contact);
 
   // Components to detect and compute contact against other actors
-  deformable::EmplaceContactComponents(reg, e, numCollidingSamples);
+  deformable::EmplaceContactComponents(reg, e, numCollidingSamples, /*numContactPartitions*/ 1);
   reg.emplace<CDeformablePointAsyncCollisionsResponse>(e);
 
   reg.emplace<CActorAsyncContactSemaphore>(e);
@@ -1155,7 +1287,7 @@ static void EmplaceRodActorContact(
   reg.emplace<TagUsePointCloudContact>(e);
   reg.emplace<CCollJacs<CollRole::Collider>>(e);
 
-  ValidatePointCloudColliderParams(params.pointCloudCollider, error);
+  ValidatePointCloudColliderParams(params.pointCloudCollider, params.contact, error);
   MOCHI_ERROR_RETURN(error);
   auto& pcComponent = reg.emplace<CPointCloudColliderParams>(e, params.pointCloudCollider);
   pcComponent.integralDim = 1;
@@ -1166,10 +1298,11 @@ static void EmplaceRodActorContact(
     if (!params.pointCloudCollider.colliderSegmentElementType.has_value()) {
       // Nodal collider: one point per node, weighted by lumped segment lengths assembled from the
       // contact discretization (mirroring the shell pattern with InitializeNodalWeights).
-      DynamicArray<real> nodalWeights;
-      segmentDisc.Visit([&](auto const& disc) { nodalWeights = InitializeNodalWeights(disc); });
-      NodalColliderDiscretization nodalDisc;
       int const numNodes = isize(nodes);
+      DynamicArray<real> nodalWeights;
+      segmentDisc.Visit(
+          [&](auto const& disc) { nodalWeights = InitializeNodalWeights(disc, numNodes); });
+      NodalColliderDiscretization nodalDisc;
       nodalDisc.femElements.reserve(numNodes);
       for (int i = 0; i < numNodes; ++i) {
         nodalDisc.femElements.emplace_back(i, MakeConstSpan(nodes), i, nodalWeights[i]);
@@ -1200,31 +1333,52 @@ void mochi::InitRodActor(
     Error& error) {
   // Validate material parameters for actor creation
   // (Geometry validation is done in model::Validate)
-  MOCHI_ERROR_IF(params.material.axialStiffness <= 0_r, error, "Invalid axial stiffness");
+  MOCHI_ERROR_IF(
+      !IsFinite(params.material.axialStiffness) || params.material.axialStiffness <= 0_r,
+      error,
+      "Axial stiffness must be positive and finite.");
   // Deliberately allow zero torsional or flexural stiffnesses, to turn off torsion and/or bending
   // in cable-like rods.
-  MOCHI_ERROR_IF(params.material.torsionalStiffness < 0_r, error, "Invalid torsional stiffness");
-  for (auto const& flexuralStiffnessComponent : params.material.flexuralStiffness) {
-    MOCHI_ERROR_IF(flexuralStiffnessComponent < 0_r, error, "Invalid flexural stiffness");
-  }
-  MOCHI_ERROR_IF(params.material.linearDensity <= 0_r, error, "Invalid linear density");
-  // Exact zero is well-posed if there is at least one BC on twisting DoFs.
   MOCHI_ERROR_IF(
-      params.material.linearRotationalInertia < 0_r, error, "Invalid rotational inertia");
-  MOCHI_ERROR_IF(
-      params.material.linearRotationalInertia == 0_r && params.material.torsionalStiffness == 0_r,
+      !IsFinite(params.material.torsionalStiffness) || params.material.torsionalStiffness < 0_r,
       error,
-      "Rotational inertia and torsional stiffness cannot both be zero.");
+      "Torsional stiffness must be non-negative and finite.");
+  for (auto const& flexuralStiffnessComponent : params.material.flexuralStiffness) {
+    MOCHI_ERROR_IF(
+        !IsFinite(flexuralStiffnessComponent) || flexuralStiffnessComponent < 0_r,
+        error,
+        "Flexural stiffness components must be non-negative and finite.");
+  }
+  MOCHI_ERROR_IF(
+      !IsFinite(params.material.linearDensity) || params.material.linearDensity <= 0_r,
+      error,
+      "Linear density must be positive and finite.");
+  MOCHI_ERROR_IF(
+      !IsFinite(params.material.linearRotationalInertia) ||
+          params.material.linearRotationalInertia <= 0_r,
+      error,
+      "Linear rotational inertia must be positive and finite.");
   MOCHI_ERROR_IF(
       !IsFinite(params.material.massDampingCoefficient) ||
           params.material.massDampingCoefficient < 0_r,
       error,
-      "Invalid mass damping coefficient");
+      "Mass damping coefficient must be non-negative and finite.");
   MOCHI_ERROR_IF(
       !IsFinite(params.material.stiffnessDampingCoefficient) ||
           params.material.stiffnessDampingCoefficient < 0_r,
       error,
-      "Invalid stiffness damping coefficient");
+      "Stiffness damping coefficient must be non-negative and finite.");
+  ValidateContactParams(params.contact, error);
+  MOCHI_ERROR_RETURN(error);
+
+  auto const& visualMesh = shapePtr->GetVisualMesh();
+  auto const& visualEmbedding = shapePtr->GetRodVisualEmbedding();
+  bool const hasUsableVisualMesh = visualMesh && visualEmbedding;
+  auto const& shapeContactSkinMesh = shapePtr->GetContactSkin();
+  MOCHI_ERROR_IF(
+      params.useContactSkin && !shapeContactSkinMesh,
+      error,
+      "useContactSkin requires a rod shape with a contact skin.");
   MOCHI_ERROR_RETURN(error);
 
   // Get nodes and element frame axes from the shape
@@ -1250,6 +1404,12 @@ void mochi::InitRodActor(
 
   // Store the shape
   reg.emplace<CShape>(e, shapePtr);
+
+  // The contact skin is exposed independently of which geometry is selected for contact.
+  if (shapeContactSkinMesh) {
+    reg.emplace<CContactSkinMesh>(e, shapeContactSkinMesh);
+    reg.emplace<CRodContactSkinEmbedding>(e, shapePtr->GetRodContactSkinEmbedding());
+  }
 
   // Set up DoF information
   // Each node has 4 DoFs: 3 displacement + 1 twist
@@ -1306,34 +1466,16 @@ void mochi::InitRodActor(
   l2g->InitializeStencilIndices(stencilGraph);
   l2g->InitializePaddedIndices(fem::kNumRodStencilNodes * kNumDofsPerNode);
 
-  // Build sparsity from the raw/unpadded L2G indices.
-  auto& fullSparsity = reg.emplace<CFullSparsityPattern>(e, MakeSparsityGraph(*l2g, totalDofs));
-
   // Nodal based structure for FEM assembly. Uses padded stencil connectivity so every element
   // exposes fem::kNumRodStencilNodes nodes to the FEM assembler, while sparse indices are computed
   // from the original (unpadded) N-to-N graph to preserve the correct DResidual sparsity pattern.
   auto const& nbs = reg.emplace<CNodalBasedStructure>(
       e, BuildPaddedNodalBasedStructure<fem::kNumRodStencilNodes>(connectivity, stencilGraph));
 
-  // DResidual matrix
-  int const numRows = isize(fullSparsity.graph.GetPointers()) - 1;
-  int const numCols = numRows;
-  int const numNonZeros = fullSparsity.graph.NumTargets();
-  DynamicArray<real> values(numNonZeros, 0_r);
-  auto blockStructure = BlockedStructure<kNumDofsPerNode>(
-      numCols,
-      MakeConstSpan(fullSparsity.graph.GetPointers()),
-      MakeConstSpan(fullSparsity.graph.GetTargets()));
-  BlockSparseMatrix<real, kNumDofsPerNode> actorDRes(
-      blockStructure.nBlockCols,
-      std::move(blockStructure.ptr),
-      std::move(blockStructure.ndIndices),
-      std::move(values));
-
   // Actor SNLE data
   reg.emplace<CActorSnle>(
       e,
-      std::move(actorDRes),
+      BlockSparseMatrix<real, kNumDofsPerNode>(numNodes, nbs.GetNToN()),
       // Use ILU0 actor preconditioner (O(n) and exact for rods).
       // NOTE: IC0 is also O(n) and exact, but (a) performance is slightly worse for pentadiagonal
       // systems and (b) it may break down with AssemblyParams::psdDRes = false.
@@ -1347,42 +1489,35 @@ void mochi::InitRodActor(
       params.contactElementType, shapePtr->GetNodes(), shapePtr->IsClosedLoop());
   int numCollidingSamples = segmentDisc.GetNumQuadPoints();
 
-  // Visual mesh contact: use CFemSurfaceDiscretization on the visual mesh for contact samples.
-  // Do NOT emplace CFemSegmentDiscretization on the entity — only rods using centerline contact
-  // should have it. This prevents the centerline UpdateCollisionSamplePositions system from
-  // matching visual-mesh-contact rods, which would race with UpdateRodVisualMeshContactPositions.
-  if (params.useVisualMeshContact) {
-    MOCHI_ERROR_IF(
-        !shapePtr->GetVisualMesh() || !shapePtr->GetRodVisualEmbedding(),
-        error,
-        "useVisualMeshContact requires a rod shape with visual mesh and embedding data.");
-    MOCHI_ERROR_RETURN(error);
-
+  if (params.useContactSkin) {
     auto const& surfaceDisc = reg.emplace<CFemSurfaceDiscretization>(
-        e,
-        CFemSurfaceDiscretization::Create(
-            params.visualMeshContactElementType, *shapePtr->GetVisualMesh()));
+        e, CFemSurfaceDiscretization::Create(params.contactSkinElementType, *shapeContactSkinMesh));
     numCollidingSamples = surfaceDisc.GetNumQuadPoints();
 
-    reg.emplace<CRodSkinningData>(e);
-    reg.emplace<TagUseVisualMeshContact>(e);
+    auto& skinningData = reg.emplace<CContactSkinningData>(e);
+    rod::InitializeContactSkinningJacobian(
+        reg.get<CContactSkinMesh const>(e),
+        reg.get<CRodContactSkinEmbedding const>(e),
+        mesh,
+        skinningData);
+    InitializeContactSkinningColumnCoalescingMap(surfaceDisc, skinningData);
+    reg.emplace<TagUseDeformableContactSkin>(e);
     reg.emplace<CSkinnedContactSnle>(e);
     reg.emplace<TagSkinnedContact>(e);
 
-    // Pre-allocate buffer for deformed visual node positions to avoid per-frame allocations
-    int const numVisualNodes = shapePtr->GetVisualMesh()->GetNumNodes();
-    auto& deformedNodes = reg.emplace<CRodDeformedVisualNodes>(e);
-    deformedNodes.positions.resize(static_cast<size_t>(kSpaceDim3) * numVisualNodes);
+    auto& deformedNodes = reg.emplace<CDeformedContactSkinNodes>(e);
+    deformedNodes.positions.resize(
+        static_cast<size_t>(kSpaceDim3) * shapeContactSkinMesh->GetNumNodes());
   }
 
-  // Contact.
+  // Contact. The point-cloud collider remains discretized on the rod centerline.
   EmplaceRodActorContact(reg, e, params, *shapePtr, segmentDisc, numCollidingSamples, error);
   MOCHI_ERROR_RETURN(error);
 
   // Centerline contact rods.
-  if (!params.useVisualMeshContact) {
-    // Centerline contact assembly uses rod segments as the assembly elements. The visual-mesh
-    // contact path uses the skinned-contact subsystem instead.
+  if (!params.useContactSkin) {
+    // Centerline contact assembly uses rod segments as the assembly elements. The contact-skin
+    // path uses the skinned-contact subsystem instead.
     //
     // L2G has fixed 2-node x kNumDofsPerNode stride, matching CFemSegmentDiscretization. The NBS
     // uses the same segment element order, while sparse indices are computed against the actor's
@@ -1436,26 +1571,25 @@ void mochi::InitRodActor(
     reg.emplace<TagUseGravity>(e);
   }
 
-  // Visual mesh
-  if (shapePtr->GetVisualMesh() && shapePtr->GetRodVisualEmbedding()) {
-    reg.emplace<CVisualMesh>(e, shapePtr->GetVisualMesh(), nullptr);
-    reg.emplace<CRodVisualMeshEmbedding>(e, shapePtr->GetRodVisualEmbedding());
-    if (auto* skinningData = reg.try_get<CRodSkinningData>(e)) {
-      rod::InitializeRodSkinningJacobian(
-          reg.get<CVisualMesh const>(e),
-          reg.get<CRodVisualMeshEmbedding const>(e),
-          reg.get<CPolylineMesh const>(e),
-          *skinningData);
-    }
+  // Visual components are independent of the selected contact representation.
+  if (hasUsableVisualMesh) {
+    reg.emplace<CVisualMesh>(e, visualMesh, nullptr);
+    reg.emplace<CRodVisualMeshEmbedding>(e, visualEmbedding);
+  } else if (visualMesh) {
+    MOCHI_LOG_WARNING(
+        "Creating rod actor \"%s\" with an unskinned visual mesh. The visual mesh will be ignored.",
+        params.name.c_str());
   }
 }
 
 namespace mochi::rod {
 
+// The energies are relative to the stage start.
 static void AddExternalForces(
     CExternalForces const& externalForces,
     TransformRT const& worldFromLocal,
     ColumnVectorView<real const> displacements,
+    ColumnVectorView<real const> stageStartDisplacements,
     double* outObj,
     ColumnVectorView<real>* outRes) {
   if (!outObj && !outRes) {
@@ -1470,7 +1604,7 @@ static void AddExternalForces(
       // Treat external twisting forces as scalars in the local frame.
       real const force = externalForces.forces[i];
       if (outObj) {
-        *outObj -= StaticCast<double>(displacements[dof] * force);
+        *outObj -= StaticCast<double>((displacements[dof] - stageStartDisplacements[dof]) * force);
       }
       if (outRes) {
         (*outRes)[dof] -= force;
@@ -1484,6 +1618,7 @@ static void AddExternalForces(
           nodeStartIndex,
           worldFromLocalR,
           displacements,
+          stageStartDisplacements,
           outObj,
           outRes);
     }
@@ -1524,23 +1659,19 @@ static void AddExternalForces(
     using V = BatchReal<kBatchSize>;
     bool out = false;
 
-    if (hasGravity && (outEnergy || outRes)) {
-      out |= fem::RodGravity<kBatchSize>(
-          nodalMasses, displ, elemIndices, indicesFlat, outEnergy, outRes, gravity);
-    }
-
-    // --- Gather stage-start displacement once for mass and/or stiffness damping ---
+    // --- Gather stage-start displacement once for gravity, mass and/or stiffness damping ---
     //
-    // Stiffness damping needs the full stencil; mass damping needs only stencil node 0, whose
-    // kNumRodFields DoFs are the leading entries of that stencil. When both are active we gather
-    // the superset once and mass damping reuses the leading sub-span instead of re-reading node 0.
-    // The stiffness stage-start also feeds the stress dresidual, so it is gathered on every path;
-    // mass damping reads its target only in the energy/residual branch. (The inertia predicted
-    // target, stage-start + dt*velocity, is different data and is gathered separately below.)
+    // Stiffness damping needs the full stencil; gravity and mass damping need only stencil node 0,
+    // whose kNumRodFields DoFs are the leading entries of that stencil. When several are active we
+    // gather the superset once and the node-0 consumers reuse the leading sub-span instead of
+    // re-reading node 0. The stiffness stage-start also feeds the stress dresidual, so it is
+    // gathered on every path; mass damping reads its target only in the energy/residual branch, and
+    // gravity only in the energy branch. (The inertia predicted target, stage-start +
+    // dt*velocity, is different data and is gathered separately below.)
     NdArray<V, fem::kNumRodStencilDofs> stageStartDispBatch MOCHI_NO_INIT;
     int const numStageStartNodes = hasStiffnessDamping
         ? fem::kNumRodStencilNodes
-        : ((hasMassDamping && (outEnergy || outRes)) ? 1 : 0);
+        : (((hasGravity && outEnergy) || (hasMassDamping && (outEnergy || outRes))) ? 1 : 0);
     if (numStageStartNodes > 0) {
       alignas(alignof(V)) real staging[fem::kNumRodStencilDofs][V::kSize]{};
       for (int b = 0; b < kBatchSize; ++b) {
@@ -1555,6 +1686,18 @@ static void AddExternalForces(
       for (int dof = 0; dof < numStageStartNodes * fem::kNumRodFields; ++dof) {
         stageStartDispBatch[dof] = Load<V>(staging[dof]);
       }
+    }
+
+    if (hasGravity && (outEnergy || outRes)) {
+      out |= fem::RodGravity<kBatchSize>(
+          nodalMasses,
+          displ,
+          stageStartDispBatch,
+          elemIndices,
+          indicesFlat,
+          outEnergy,
+          outRes,
+          gravity);
     }
 
     // --- Inertia on stencil node 0 ---
@@ -1589,9 +1732,7 @@ static void AddExternalForces(
     if (hasMassDamping) {
       // Mass-proportional damping C = α·M, added as a second inertia term whose target is the
       // stage-start position with zero velocity extrapolation. This contributes residual
-      // (α/dt)·M·(x − d_stageStart), the matching energy, and the diagonal (α/dt)·M. Unlike
-      // shell (which folds inertia + mass damping into a precomputed global mass matrix), rods
-      // have no such matrix, so this call also emits the DResidual diagonal.
+      // (α/dt)·M·(x − d_stageStart), the matching energy, and the diagonal (α/dt)·M.
       // Reuse the leading kNumRodFields DoFs (stencil node 0) of the shared stage-start gather
       // above instead of re-reading them from memory.
       NdArray<V, fem::kNumRodFields> massDampingTarget MOCHI_NO_INIT;
@@ -1693,7 +1834,6 @@ void AssembleBody(
         "InitRodDResidual", 0, numValues, kMinValuesPerTask, INT_MAX, [&](int rBegin, int rEnd) {
           MOCHI_ASSERT_VERBOSE(rBegin >= 0 && rBegin <= rEnd && rEnd <= numValues);
           ColumnVectorView<real> dresValues = AsView(GetValues(outActorSnle.fullDResidual));
-          // For rods, we don't pre-scale with mass matrix, so just zero it out
           dresValues.MiddleRows(rBegin, rEnd - rBegin).SetZero();
         });
   }
@@ -1735,6 +1875,7 @@ void AssembleBody(
         externalForces,
         rootTransform.worldFromLocal,
         AsConstView(currPose.value.displacements),
+        AsConstView(stageStartPose.value.displacements),
         params.assemObj ? &outActorSnle.objective : nullptr,
         params.assemRes ? &resView : nullptr);
   }
@@ -1753,7 +1894,7 @@ void AssembleAsyncContact(
     CContactNodalBasedStructure const& contactNbs,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CRootTransform const& rootTransform,
     CDeformablePointAsyncCollisionsResponse& outResponse,
     CActorSnle& outActorSnle) {

@@ -16,17 +16,17 @@
 
 #pragma once
 
-#include <mochi_core/elements/tetrahedral/finite_element.h>
-#include <mochi_core/elements/triangular/finite_element.h>
 #include <mochi_core/linear_algebra/krylov_interop.h>
 #include <mochi_core/utils/basic_utils.h>
 #include <mochi_core/utils/constants.h>
 #include <mochi_core/utils/decomposition_utils.h>
 #include <mochi_core/utils/lie.h>
+#include <mochi_core/utils/nd_array.h>
 #include <mochi_core/utils/quaternion_utils.h>
 #include <mochi_core/utils/rigid_body_size.h>
 #include <mochi_core/utils/rodrigues_utils.h>
 #include <mochi_core/utils/simd.h>
+#include <mochi_core/utils/span.h>
 #include <mochi_core/utils/vmatrix.h>
 
 #include <limits>
@@ -78,7 +78,9 @@ inline VMatrix3x3r SecondMomentToMomentOfInertia(VMatrix3x3r const& M) {
       Vec4r{momentOfInertia[0], momentOfInertia[3], momentOfInertia[5]},
       Vec4r{momentOfInertia[1], momentOfInertia[2], momentOfInertia[4]}};
   Vec4r principalMoments;
-  AnalyticalEigendecompSym3x3(moiSym, principalMoments);
+  VMatrix3x3r principalAxes MOCHI_NO_INIT;
+  // With eigenvectors, even close principal moments, as for a slender body, are O(ε) accurate.
+  AnalyticalEigendecompSym3x3(moiSym, principalMoments, &principalAxes);
   if (!IsFinite(principalMoments)) {
     return false;
   }
@@ -117,22 +119,43 @@ inline VMatrix3x3r RotateInertia(real M, Quaternion const& /*q*/) {
  * proportionally about that reference; center of mass is never changed by @ref SetDensity.
  * @note After @ref SetDensity, calling SetDensity again with the current density reproduces all
  * properties bit-exactly (no floating-point roundtrip loss). After @ref SetInertiaProperties,
- * the reference state is changed and density is recomputed as mass / volume.
+ * the reference state is changed and density is recomputed as mass / volume (zero without volume).
  * After @ref SetInertiaProperties, calling @ref SetInertiaProperties again with the same input
  * also reproduces all properties bit-exactly.
+ * @note @ref SetDensity requires a positive density, so it must not be called on a body without
+ * volume or mass.
  */
 class RigidBodyInertia {
  public:
-  RigidBodyInertia() = default;
-
+  /// @brief Construct a rigid body with volume, whose mass and moment of inertia scale with
+  /// density.
+  ///
+  /// @param[in] comLocal Center of mass [m] in local coordinates.
+  /// @param[in] volume Volume [m^3]. Must be positive and finite.
+  /// @param[in] moi Moment of inertia [kg m^2] at @p density, in local coordinates.
+  /// @param[in] density Density [kg/m^3]. Must be positive and finite.
   RigidBodyInertia(Vec4r const& comLocal, real volume, VMatrix3x3r const& moi, real density)
       : _volume(volume), _refMoi(moi), _refDensity(density), _comLocal(comLocal) {
     MOCHI_ASSERT_VERBOSE(_volume > 0_r && IsFinite(_volume), "Volume must be positive and finite.");
     SetDensity(density);
   }
 
+  /// @brief Construct a rigid body without volume, from its mass and moment of inertia.
+  ///
+  /// @param[in] comLocal Center of mass [m] in local coordinates.
+  /// @param[in] moi Moment of inertia [kg m^2] in local coordinates. Must be finite.
+  /// @param[in] mass Mass [kg]. Must be non-negative and finite. Zero makes the body massless.
+  ///
+  /// @note Without volume, density is zero.
+  RigidBodyInertia(Vec4r const& comLocal, VMatrix3x3r const& moi, real mass) {
+    SetInertiaProperties(mass, comLocal, moi);
+  }
+
   [[nodiscard]] Vec4r const& GetCenterOfMassLocal() const {
     return _comLocal;
+  }
+  [[nodiscard]] real GetVolume() const {
+    return _volume;
   }
   [[nodiscard]] real GetMass() const {
     return _mass;
@@ -151,7 +174,7 @@ class RigidBodyInertia {
   /// Center of mass is not changed.
   void SetDensity(real density) {
     MOCHI_ASSERT_VERBOSE(
-        _volume > 0_r, "SetDensity called on a default-constructed RigidBodyInertia.");
+        _refDensity > 0_r, "SetDensity called on a RigidBodyInertia without volume or mass.");
     MOCHI_ASSERT_VERBOSE(
         density > 0_r && IsFinite(density), "Density must be positive and finite.");
     _density = density;
@@ -162,15 +185,13 @@ class RigidBodyInertia {
 
   /// @brief Directly set mass, center of mass, and moment of inertia. Re-anchors the density
   /// reference state so subsequent @ref SetDensity calls rescale mass and MoI proportionally about
-  /// this new state.
+  /// this new state. Without volume, density stays zero.
   void SetInertiaProperties(real mass, Vec4r const& comLocal, VMatrix3x3r const& moi) {
-    MOCHI_ASSERT_VERBOSE(
-        _volume > 0_r, "SetInertiaProperties called on a default-constructed RigidBodyInertia.");
-    MOCHI_ASSERT_VERBOSE(mass > 0_r && IsFinite(mass), "Mass must be positive and finite.");
+    MOCHI_ASSERT_VERBOSE(mass >= 0_r && IsFinite(mass), "Mass must be non-negative and finite.");
     MOCHI_ASSERT_VERBOSE(IsFinite(moi), "MoI must be finite.");
     _comLocal = comLocal;
     _mass = mass;
-    _density = _refDensity = mass / _volume;
+    _density = _refDensity = _volume > 0_r ? mass / _volume : 0_r;
     _refMoi = _moi = moi;
     _mtwo = MomentOfInertiaToSecondMoment(moi);
   }
@@ -207,15 +228,14 @@ class RigidBodyInertia {
 // 4. Perform time integration on both omega and vsym.
 // 5. Reconstruct dRdt_approx = (skew(omega) + sym(vsym)) * R.
 //
-// To integrate velocity and evaluate a new rotation, use the function EvalTimeSteppedRotation(),
-// which uses both omega and vsym. Do not use omega alone.
-//
-// Velocity should be updated by calling the function SetFromFiniteDifferencePose(), which
-// internally updates both omega and vsym.
-//
-// If omega is set externally, then vsym must be updated by calling the function
-// UpdateVSymIfDirty() as soon as the time-step size is known. This ensures that omega and vsym
-// together exactly reproduce a rotation when calling EvalTimeSteppedRotation().
+// How to update and integrate the rotation velocity depends on the kind of rotation:
+// - 3D rotations: update the velocity with SetFromFiniteDifferencePose(), which sets both omega and
+//   vsym. If omega is set externally with SetOmega(), update vsym with UpdateVSymIfDirty() as soon
+//   as the time-step size is known. Evaluate a new rotation with EvalTimeSteppedRotation(), which
+//   uses both omega and vsym to exactly reproduce a rotation. Do not use omega alone.
+// - 1D rotations about a fixed axis (e.g., revolute joints): store the exact angle rate times the
+//   axis with SetOmegaWithZeroVSym(), which keeps vsym zero. The angle is integrated directly, not
+//   with EvalTimeSteppedRotation().
 class RigidBodyVel {
  public:
   static constexpr int kRawSize = 4 /* _vcom */ + 4 /* _omega */ + 8 /* _vsym */;
@@ -228,6 +248,12 @@ class RigidBodyVel {
     return {_omega, _vsym};
   }
 
+  // Transposed world-space finite-step rotational velocity gradient.
+  VMatrix3x3r GetFiniteRotationVelocityGradientT() const {
+    MOCHI_ASSERT_VERBOSE(!_isVSymDirty, "vsym needs to be updated");
+    return SimdSymToFull(_vsym) - Skew3(_omega);
+  }
+
   void SetVCom(Vec4r vcom) {
     _vcom = vcom;
   }
@@ -235,6 +261,13 @@ class RigidBodyVel {
   void SetOmega(Vec4r omega) {
     _omega = omega;
     _isVSymDirty = true;
+  }
+
+  // Set an exact angular velocity without a finite-step symmetric part (see class comment).
+  void SetOmegaWithZeroVSym(Vec4r omega) {
+    _omega = omega;
+    _vsym = {};
+    _isVSymDirty = false;
   }
 
   // Warning: omega and vsym can only reproduce a rotation if |omega| < 1/h. This should be checked
@@ -321,13 +354,23 @@ class RigidBodyVel {
     _isVSymDirty = false;
   }
 
-  // Evaluate rotation matrix by time-stepping the rotation velocity. The result is not really a
-  // rotation if dtStage is the same value used for estimating vsym.
+  // Evaluate rotation matrix by time-stepping the rotation velocity. The result is a rotation only
+  // if vsym was computed by UpdateVSymIfDirty() with the same dtStage.
   VMatrix3x3r EvalTimeSteppedRotation(VMatrix3x3r const& R, real dtStage) const {
     MOCHI_ASSERT_VERBOSE(!_isVSymDirty, "vsym needs to be updated");
     // Convert the rotation velocity to rotation-matrix derivative, and then integrate
     auto dRdt = Dot3x3(Skew3(_omega) + SimdSymToFull(_vsym), R);
     return R + dtStage * dRdt;
+  }
+
+  // Rotation vector of the finite rotation step that omega describes over dt: an angle
+  // asin(|omega| * dt) about omega, since a finite step by an angle theta has
+  // |omega| * dt = sin(theta). A negative dt gives the backward step. Only valid for 3D rotations
+  // and |omega| * |dt| <= 1.
+  Vec4r GetFiniteStepRotationVector(real dt) const {
+    real const angle = ASin(Clamp(dt * Sqrt(NormSqr<3>(_omega)), -1_r, 1_r));
+    // The step is dt * omega * angle / sin(angle).
+    return (dt / Sinc(angle)) * _omega;
   }
 
   MOCHI_STRUCT_BEGIN(mochi::RigidBodyVel)
@@ -351,117 +394,80 @@ class RigidBodyVel {
   bool _isVSymDirty = false;
 };
 
-// Computes the center-of-mass of a rigid body based on a FEM discretization with uniform density
-template <int kPolyOrder, int kQuadDegree>
-inline void ComputeCenterOfMassFem(
-    Span<tetrahedral::Pk3DElement<kPolyOrder, kQuadDegree> const> finiteElements,
-    real density,
-    Vec4r& outCenterOfMass,
-    real& outMass) {
-  using ElementT = tetrahedral::Pk3DElement<kPolyOrder, kQuadDegree>;
-  constexpr int kNumQuad = ElementT::kNumQuadPoints;
-
-  // Reset
-  outMass = 0;
-  outCenterOfMass = SimdZero();
-
-  // Integrate
-  for (auto element : finiteElements) {
-    for (int q = 0; q < kNumQuad; ++q) {
-      outCenterOfMass += ToSimd(element.mapEvaluated[q]) * element.quadWeights[q];
-      outMass += element.quadWeights[q];
-    }
+// Computes the volume and centroid of a rigid body from its closed boundary triangle mesh. Each
+// face contributes the signed tetrahedron it spans with the origin, so an open mesh's result
+// depends on the origin.
+inline void ComputeVolumeAndCentroid(
+    Span<Real3 const> coordinates,
+    Span<Int3 const> connectivity,
+    Vec4r& outCentroid,
+    real& outVolume) {
+  outVolume = 0_r;
+  Vec4r firstMoment = {};
+  for (Int3 const& face : connectivity) {
+    Vec4r const a = ToSimd(coordinates[face[0]]);
+    Vec4r const b = ToSimd(coordinates[face[1]]);
+    Vec4r const c = ToSimd(coordinates[face[2]]);
+    // det(a, b, c)/6, from the edges to reduce cancellation on small faces far from the origin
+    real const tetVolume = (1_r / 6_r) * Dot<3>(a, Cross3(b - a, c - a));
+    outVolume += tetVolume;
+    firstMoment += (0.25_r * (a + b + c)) * tetVolume;
   }
 
-  outCenterOfMass /= outMass;
-  outMass *= density;
+  outCentroid = firstMoment / outVolume;
 }
 
-// Computes the center-of-mass of a rigid body based on a FEM discretization with uniform density
-template <int kPolyOrder, int kQuadDegree>
-inline void ComputeCenterOfMassFem(
-    Span<triangular::Pk2DElement<kPolyOrder, kQuadDegree> const> finiteElements,
-    real density,
-    Vec4r& outCenterOfMass,
-    real& outMass) {
-  using ElementT = triangular::Pk2DElement<kPolyOrder, kQuadDegree>;
-  constexpr int kNumQuad = ElementT::kNumQuadPoints;
-
-  // Reset
-  outMass = 0;
-  outCenterOfMass = {};
-
-  // Integrate
-  for (auto element : finiteElements) {
-    for (int q = 0; q < kNumQuad; ++q) {
-      outCenterOfMass += 0.25_r * ToSimd(element.mapEvaluated[q]) *
-          Dot(element.mapEvaluated[q], element.normals[q]) * element.quadWeights[q];
-      outMass +=
-          1_r / 3_r * Dot(element.mapEvaluated[q], element.normals[q]) * element.quadWeights[q];
-    }
-  }
-
-  outCenterOfMass /= outMass;
-  outMass *= density;
-}
-
-// Computes the volume of a rigid body based on a FEM discretization
-template <int kPolyOrder, int kQuadDegree>
-inline real ComputeVolumeFem(
-    Span<triangular::Pk2DElement<kPolyOrder, kQuadDegree> const> finiteElements) {
-  // volume = mass if density = 1
-  real volume{};
-  Vec4r com{}; // unused
-  ComputeCenterOfMassFem(finiteElements, 1_r, com, volume);
-  return volume;
-}
-
-// Computes the second moment of inertia of a rigid body based on a FEM discretization with unifor
-// density
-template <int kPolyOrder, int kQuadDegree>
-inline VMatrix3x3r ComputeSecondMomentOfInertiaFem(
-    Span<tetrahedral::Pk3DElement<kPolyOrder, kQuadDegree> const> finiteElements,
+// Computes the second moment of inertia of a rigid body with uniform density from its tetrahedral
+// mesh. A tetrahedron with unsigned volume V and vertices pᵢ relative to centerOfMass has second
+// moment V/20 · (Σᵢ pᵢpᵢᵀ + ssᵀ) per unit density, with s = Σᵢ pᵢ.
+inline VMatrix3x3r ComputeSecondMomentOfInertia(
+    Span<Real3 const> coordinates,
+    Span<Int4 const> connectivity,
     real density,
     Vec4r const& centerOfMass) {
-  using ElementT = tetrahedral::Pk3DElement<kPolyOrder, kQuadDegree>;
-  constexpr int kNumQuad = ElementT::kNumQuadPoints;
-
-  // Reset
   VMatrix3x3r outInertia = {};
-  // Integrate
-  for (auto element : finiteElements) {
-    for (int q = 0; q < kNumQuad; ++q) {
-      Vec4r y = ToSimd(element.mapEvaluated[q]) - centerOfMass;
-      outInertia += Outer3(y, y) * element.quadWeights[q];
-    }
+  for (Int4 const& tet : connectivity) {
+    Vec4r const x0 = ToSimd(coordinates[tet[0]]);
+    Vec4r const x1 = ToSimd(coordinates[tet[1]]);
+    Vec4r const x2 = ToSimd(coordinates[tet[2]]);
+    Vec4r const x3 = ToSimd(coordinates[tet[3]]);
+    // 6 times the signed volume, from the original edges to limit rounding on small tetrahedra far
+    // from centerOfMass
+    real const det = Dot<3>(x1 - x0, Cross3(x2 - x0, x3 - x0));
+    Vec4r const a = x0 - centerOfMass;
+    Vec4r const b = x1 - centerOfMass;
+    Vec4r const c = x2 - centerOfMass;
+    Vec4r const d = x3 - centerOfMass;
+    Vec4r const s = a + b + c + d;
+    outInertia +=
+        (Outer3(a, a) + Outer3(b, b) + Outer3(c, c) + Outer3(d, d) + Outer3(s, s)) * Abs(det);
   }
 
-  outInertia *= density;
+  outInertia *= density / 120_r;
   return outInertia;
 }
 
-// Computes the second moment of inertia of a rigid body based on a FEM discretization with uniform
-// density
-template <int kPolyOrder, int kQuadDegree>
-inline VMatrix3x3r ComputeSecondMomentOfInertiaFem(
-    Span<triangular::Pk2DElement<kPolyOrder, kQuadDegree> const> finiteElements,
+// Computes the second moment of inertia of a rigid body with uniform density from its closed
+// boundary triangle mesh. Each face (a, b, c) relative to centerOfMass contributes the second
+// moment of the signed tetrahedron it spans with centerOfMass,
+// det(a, b, c)/120 · (aaᵀ + bbᵀ + ccᵀ + ssᵀ) per unit density, with s = a + b + c.
+inline VMatrix3x3r ComputeSecondMomentOfInertia(
+    Span<Real3 const> coordinates,
+    Span<Int3 const> connectivity,
     real density,
     Vec4r const& centerOfMass) {
-  using ElementT = triangular::Pk2DElement<kPolyOrder, kQuadDegree>;
-  constexpr int kNumQuad = ElementT::kNumQuadPoints;
-
-  // Reset
   VMatrix3x3r outInertia = {};
-  // Integrate
-  for (auto element : finiteElements) {
-    for (int q = 0; q < kNumQuad; ++q) {
-      Vec4r normal = ToSimd(element.normals[q]);
-      Vec4r y = ToSimd(element.mapEvaluated[q]) - centerOfMass;
-      outInertia += Outer3(y, y) * Dot(y, normal) * element.quadWeights[q];
-    }
+  for (Int3 const& face : connectivity) {
+    Vec4r const a = ToSimd(coordinates[face[0]]) - centerOfMass;
+    Vec4r const b = ToSimd(coordinates[face[1]]) - centerOfMass;
+    Vec4r const c = ToSimd(coordinates[face[2]]) - centerOfMass;
+    Vec4r const s = a + b + c;
+    // det(a, b, c), from the edges to reduce cancellation on small faces far from centerOfMass
+    real const det = Dot<3>(a, Cross3(b - a, c - a));
+    outInertia += (Outer3(a, a) + Outer3(b, b) + Outer3(c, c) + Outer3(s, s)) * det;
   }
 
-  outInertia *= density / 5.0_r;
+  outInertia *= density / 120_r;
   return outInertia;
 }
 
@@ -482,27 +488,45 @@ ComputeSecondMomentOfInertiaCuboid(real density, Vec4r const& sizes, VMatrix3x3r
   outInertia = (VEye<3>() * 0.5_r * Trace3x3(I)) - I;
 }
 
-// Computes linear velocity of a pivot (e.g. the center of mass) and angular velocity in world
-// coordinates. The pivot is defined in local coordinates. The velocities are obtained by
-// finite-differencing a rigid transform.
-inline void ComputeRigidVelocityWorldSpace(
+// Moves a rigid transform for time dt at constant velocity in Lie coordinates: linear velocity of a
+// pivot (defined in local coordinates) and angular velocity, both in world coordinates. The
+// rotation is the exponential of the rotation vector angularVelocityWorld * dt, so steps compose
+// exactly. Exact inverse of FiniteDifferenceRigidTransformLie for rotations smaller than pi.
+// WARNING: Do not use for transforms and velocities that carry rigid-body inertia (e.g., dynamic
+// rigid actors, articulated links, free and spherical joints). Their velocities must use
+// RigidBodyVel, whose convention matches the inertia terms.
+[[nodiscard]] inline TransformRT IntegrateRigidTransformLie(
+    real dt,
+    TransformRT const& worldFromLocal,
+    Vec4r const& pivotLocal,
+    Vec4r const& linearVelocityWorld,
+    Vec4r const& angularVelocityWorld) {
+  Quaternion const rotation = Normalize(
+      Quaternion::FromRotationVector(angularVelocityWorld * dt) * worldFromLocal.GetRotation());
+  Vec4r const pivotWorld = worldFromLocal.TransformPoint(pivotLocal) + linearVelocityWorld * dt;
+  return TransformRT{rotation, pivotWorld - rotation * pivotLocal};
+}
+
+// Computes the constant linear velocity of a pivot (defined in local coordinates) and the constant
+// angular velocity in Lie coordinates, both in world coordinates, that move worldFromLocalPrev to
+// worldFromLocal in time dt. Exact inverse of IntegrateRigidTransformLie.
+// WARNING: Do not use for transforms and velocities that carry rigid-body inertia (e.g., dynamic
+// rigid actors, articulated links, free and spherical joints). Their velocities must use
+// RigidBodyVel, whose convention matches the inertia terms.
+inline void FiniteDifferenceRigidTransformLie(
     real dt,
     TransformRT const& worldFromLocal,
     TransformRT const& worldFromLocalPrev,
     Vec4r const& pivotLocal,
     Vec4r& outLinearVelocityWorld,
     Vec4r& outAngularVelocityWorld) {
-  Vec4r pivotWorld = worldFromLocal.TransformPoint(pivotLocal);
-  Vec4r pivotWorldPrev = worldFromLocalPrev.TransformPoint(pivotLocal);
-  outLinearVelocityWorld = (pivotWorld - pivotWorldPrev) / dt;
-
-  // For W(t) = (Wx(t), Wy(t), Wz(t), 0), angular velocity quaternion in world coordinates
-  //    dq(t)/dt = (1/2) * W(t) * q(t) = (q(t) - qprev)/h
-  // Therefore, W(t) = (2/h) * (q(t) - qprev) * Inv(q(t))
-  auto const& qrot = worldFromLocal.GetRotation();
-  auto const& qrotPrev = worldFromLocalPrev.GetRotation();
-  Quaternion dqrotdt = (qrot - qrotPrev) * (2_r / dt);
-  outAngularVelocityWorld = (dqrotdt * Conjugate(qrot)).data;
+  real const invDt = 1_r / dt;
+  outLinearVelocityWorld =
+      (worldFromLocal.TransformPoint(pivotLocal) - worldFromLocalPrev.TransformPoint(pivotLocal)) *
+      invDt;
+  Quaternion const rotationDelta =
+      worldFromLocal.GetRotation() * worldFromLocalPrev.GetRotation().GetConjugate();
+  outAngularVelocityWorld = rotationDelta.VToRotationVector() * invDt;
 }
 
 // Convert a pose (using quaternion) to dofs (using rotation vector)

@@ -25,6 +25,7 @@
 #include <mochi_core/utils/rigid_body_size.h>
 
 #include <cmath>
+#include <limits>
 
 using namespace mochi;
 using namespace mochi::articulated;
@@ -206,6 +207,72 @@ TEST(TransmissionActuator, DisplacementControlActuator_AllowCompressiveForce) {
 
   // Derivatives should still be consistent through the (formerly clamped) region.
   VerifyDerivatives(&actuator, displacement, prevDisplacement, timeStep);
+}
+
+TEST(TransmissionActuator, DisplacementControlActuator_InfiniteTimeStep) {
+  // Quasi-static solves (e.g. the IK solver) step with an infinite time step to drop the inertial
+  // terms, so every output must stay finite. The damping term is the one at risk: it is
+  // d*(dx/dt)^2*dt, which evaluates as 0*inf == NaN if written with a trailing multiply. A NaN
+  // energy silently defeats merit-based line searches, so assert finiteness explicitly.
+  real const targetDisplacement = 0.02_r;
+  real const stiffness = 1e5_r;
+  real const displacement = 0.05_r;
+  real const prevDisplacement = 0_r;
+  real const infiniteTimeStep = std::numeric_limits<real>::infinity();
+  // Couplings between joints are bidirectional, so they allow compressive force. That also keeps
+  // the actuator out of the clamped branch, which returns zeros and would hide a NaN.
+  bool const allowCompressiveForce = true;
+
+  real const dDisplacement = displacement - targetDisplacement;
+  real const expectedForce = stiffness * dDisplacement;
+  real const expectedEnergy = 0.5_r * stiffness * Sqr(dDisplacement);
+
+  // Sweep zero and non-zero damping: an infinite time step must stay finite for any damping value,
+  // including zero, since the damping term is what risks a 0*inf == NaN.
+  for (real const damping : {0_r, 1e3_r}) {
+    DisplacementControlActuator actuator(
+        targetDisplacement, stiffness, damping, allowCompressiveForce);
+
+    real energy{}, force{}, computedStiffness{};
+    actuator.EnergyGradientHessian(
+        displacement, prevDisplacement, infiniteTimeStep, &energy, &force, &computedStiffness);
+
+    EXPECT_TRUE(IsFinite(energy));
+    EXPECT_TRUE(IsFinite(force));
+    EXPECT_TRUE(IsFinite(computedStiffness));
+
+    // An infinite time step means zero velocity, so damping drops out of all three outputs and
+    // only the stiffness penalty remains.
+    EXPECT_NEAR_RTOL(energy, expectedEnergy, kRelativeTolerance);
+    EXPECT_NEAR_RTOL(force, expectedForce, kRelativeTolerance);
+    EXPECT_NEAR_RTOL(computedStiffness, stiffness, kRelativeTolerance);
+  }
+}
+
+TEST(TransmissionActuator, DisplacementControlActuator_FiniteTimeStepEnergyIncludesDamping) {
+  // Unlike the other DisplacementControl tests, which only check derivative consistency via
+  // VerifyDerivatives, this pins the absolute closed-form energy (including the damping term) for a
+  // finite time step, guarding the dt-safe damping energy against a scaling error.
+  real const targetDisplacement = 0.02_r;
+  real const stiffness = 1e5_r;
+  real const damping = 1e3_r;
+  bool const allowCompressiveForce = true;
+  DisplacementControlActuator actuator(
+      targetDisplacement, stiffness, damping, allowCompressiveForce);
+
+  real const displacement = 0.05_r;
+  real const prevDisplacement = 0.01_r;
+  real const timeStep = 0.01_r;
+
+  real energy{};
+  actuator.EnergyGradientHessian(
+      displacement, prevDisplacement, timeStep, &energy, nullptr, nullptr);
+
+  real const dDisplacement = displacement - targetDisplacement;
+  real const velocity = (displacement - prevDisplacement) / timeStep;
+  real const expectedEnergy =
+      0.5_r * (stiffness * Sqr(dDisplacement) + damping * Sqr(velocity) * timeStep);
+  EXPECT_NEAR_RTOL(energy, expectedEnergy, kRelativeTolerance);
 }
 
 /*************************************************************************************************/
@@ -518,6 +585,7 @@ void VerifyResidualIsEnergyGradient(
       assemblyParams,
       energy,
       MakeSpan(residual),
+      /*outLinkResidual*/ {},
       dresidual);
 
   // Random number generator for perturbation directions
@@ -569,6 +637,7 @@ void VerifyResidualIsEnergyGradient(
         assemblyParams,
         perturbedEnergy,
         MakeSpan(dummyResidual),
+        /*outLinkResidual*/ {},
         dummyDResidual);
 
     real const directionalDerivativeFD = (perturbedEnergy - energy) / kEpsilon;
@@ -611,6 +680,7 @@ void VerifyDResidualDerivative(
       assemblyParams,
       energy,
       MakeSpan(residual),
+      /*outLinkResidual*/ {},
       dresidual);
 
   // Random number generator for perturbation directions
@@ -664,6 +734,7 @@ void VerifyDResidualDerivative(
         assemblyParams,
         perturbedEnergy,
         MakeSpan(perturbedResidual),
+        /*outLinkResidual*/ {},
         dummyDResidual);
 
     DynamicArray<real> directionalDerivativeFD(numDofs);
@@ -854,10 +925,8 @@ constexpr real kSpatialFdEpsilon = MOCHI_USE_DOUBLE_PRECISION ? 1e-6_r : 2e-3_r;
 constexpr real kSpatialRelTol = MOCHI_USE_DOUBLE_PRECISION ? 1e-5_r : 1.5e-2_r;
 constexpr real kSpatialAbsTol = MOCHI_USE_DOUBLE_PRECISION ? 1e-8_r : 1e-3_r;
 
-// A 2-link planar chain, both joints revolute about +z. Link 0's joint is at the origin; link 1's
-// joint origin is offset by `linkOffset` along x in link 0's frame. At the rest pose both link
-// frames are axis-aligned, with link 1 translated by (linkOffset, 0, 0).
-struct TwoLinkChain {
+// A planar serial chain with all joints revolute about +z.
+struct RevoluteChain {
   ParentIndexArray parents;
   DynamicArray<ArticulatedJointType> jointTypes;
   DynamicArray<Real3> jointAxes;
@@ -866,8 +935,11 @@ struct TwoLinkChain {
   RestTransformArray restTransforms;
 };
 
-TwoLinkChain MakeTwoLinkRevoluteChain(real linkOffset) {
-  TwoLinkChain chain;
+// A 2-link chain. Link 0's joint is at the origin; link 1's joint origin is offset by `linkOffset`
+// along x in link 0's frame. At the rest pose both link frames are axis-aligned, with link 1
+// translated by (linkOffset, 0, 0).
+RevoluteChain MakeTwoLinkRevoluteChain(real linkOffset) {
+  RevoluteChain chain;
   chain.parents = {-1, 0};
   chain.jointTypes = {ArticulatedJointType::Revolute, ArticulatedJointType::Revolute};
   chain.jointAxes = {Real3{0_r, 0_r, 1_r}, Real3{0_r, 0_r, 1_r}};
@@ -879,9 +951,28 @@ TwoLinkChain MakeTwoLinkRevoluteChain(real linkOffset) {
   return chain;
 }
 
+// The 2-link chain plus a third revolute link, offset by `linkOffset` along x in link 1's frame.
+RevoluteChain MakeThreeLinkRevoluteChain(real linkOffset) {
+  RevoluteChain chain;
+  chain.parents = {-1, 0, 1};
+  chain.jointTypes = {
+      ArticulatedJointType::Revolute,
+      ArticulatedJointType::Revolute,
+      ArticulatedJointType::Revolute};
+  chain.jointAxes = {Real3{0_r, 0_r, 1_r}, Real3{0_r, 0_r, 1_r}, Real3{0_r, 0_r, 1_r}};
+  chain.dofInfo = SetupJointDofs(MakeConstSpan(chain.jointTypes));
+  chain.poseInfo = SetupJointPose(MakeConstSpan(chain.jointTypes));
+  TransformRT const offset(Quaternion::Identity(), Real3{linkOffset, 0_r, 0_r});
+  chain.restTransforms = {
+      {TransformRT::Identity(), TransformRT::Identity()},
+      {TransformRT::Identity(), offset},
+      {TransformRT::Identity(), offset}};
+  return chain;
+}
+
 // Computes link transforms at the given reduced pose via forward kinematics on the test chain.
 // Matches what the engine supplies to Displacement / AddObjResDRes.
-DynamicArray<TransformRT> ComputeLinkTransforms(TwoLinkChain const& chain, Span<real const> pose) {
+DynamicArray<TransformRT> ComputeLinkTransforms(RevoluteChain const& chain, Span<real const> pose) {
   int const numLinks = isize(chain.parents);
   DynamicArray<TransformRT> jointTransforms(numLinks);
   DynamicArray<TransformRT> linkTransforms(numLinks);
@@ -900,7 +991,7 @@ DynamicArray<TransformRT> ComputeLinkTransforms(TwoLinkChain const& chain, Span<
 
 // Computes the body Jacobian (6 * numLinks rows, reducedDofs cols, Lie/angular convention) at the
 // given reduced pose, matching what the physics engine supplies during assembly.
-RowMatrix<real> ComputeBodyJacobian(TwoLinkChain const& chain, Span<real const> pose) {
+RowMatrix<real> ComputeBodyJacobian(RevoluteChain const& chain, Span<real const> pose) {
   int const numLinks = isize(chain.parents);
   int const reducedDofs = GetReducedDofsSize(MakeConstSpan(chain.dofInfo));
   DynamicArray<TransformRT> jointTransforms(numLinks);
@@ -934,7 +1025,7 @@ RowMatrix<real> ComputeBodyJacobian(TwoLinkChain const& chain, Span<real const> 
 // since Displacement now consumes link transforms directly.
 DynamicArray<real> FiniteDiffDisplacementGradient(
     SpatialTendon const& tendon,
-    TwoLinkChain const& chain,
+    RevoluteChain const& chain,
     Span<real const> pose) {
   int const numDofs = isize(pose);
   DynamicArray<real> gradient(numDofs, 0_r);
@@ -992,7 +1083,7 @@ real AnalyticDisplacementSingleRevolute(real d, real a, real b, real phi) {
 // CoM frame for every link; we pass a zero-filled `comLocals` array so the constructor's
 // local->CoM conversion is a no-op and existing waypoint coordinates need no shift.
 SpatialTendon MakeTendon(
-    TwoLinkChain const& chain,
+    RevoluteChain const& chain,
     Span<RoutingElement const> routingElements,
     std::unique_ptr<TransmissionActuator>&& actuator = {}) {
   DynamicArray<Real3> const comLocals(chain.parents.size(), Real3{});
@@ -1012,7 +1103,7 @@ SpatialTendon MakeTendon(
 // via FK so callers don't have to.
 real DisplacementOf(
     Transmission const& transmission,
-    TwoLinkChain const& chain,
+    RevoluteChain const& chain,
     Span<real const> pose) {
   DynamicArray<TransformRT> const linkTransforms = ComputeLinkTransforms(chain, pose);
   return transmission.Displacement(MakeConstSpan(linkTransforms), pose);
@@ -1022,15 +1113,16 @@ real DisplacementOf(
 struct AssembledTransmission {
   double objective = 0.0;
   DynamicArray<real> residual;
+  DynamicArray<real> linkResidual;
   Matrix<real> dresidual;
 };
 
 // Assembles a transmission's contribution on the chain, sizing the residual and dresidual outputs
-// from the pose dimension. Computes link transforms at both the current and stage-start poses via
-// FK so callers don't have to.
+// from the pose dimension, and the link residual from the number of links. Computes link
+// transforms at both the current and stage-start poses via FK so callers don't have to.
 AssembledTransmission AssembleResDRes(
     Transmission const& transmission,
-    TwoLinkChain const& chain,
+    RevoluteChain const& chain,
     Span<real const> currentPose,
     Span<real const> stageStartPose,
     real timeStep,
@@ -1039,6 +1131,7 @@ AssembledTransmission AssembleResDRes(
   int const numDofs = isize(currentPose);
   AssembledTransmission out;
   out.residual = DynamicArray<real>(numDofs, 0_r);
+  out.linkResidual = DynamicArray<real>(isize(chain.parents) * RigidSize::kDAll, 0_r);
   out.dresidual = Matrix<real>::Zero(numDofs, numDofs);
   DynamicArray<TransformRT> const currentLinkTransforms = ComputeLinkTransforms(chain, currentPose);
   DynamicArray<TransformRT> const stageStartLinkTransforms =
@@ -1053,6 +1146,7 @@ AssembledTransmission AssembleResDRes(
       params,
       out.objective,
       MakeSpan(out.residual),
+      MakeSpan(out.linkResidual),
       out.dresidual);
   return out;
 }
@@ -1064,7 +1158,7 @@ TEST(SpatialTendon, Displacement_MatchesAnalyticLength) {
   // (d, 0, 0) and, with joint 1 rotated by phi, waypoint 1 sits at (d + b cos(phi), b sin(phi), 0).
   // Looping phi == 0 folds in the rest-pose-zero check (the closed form is exactly zero there).
   real const d = 1.0_r, a = 0.3_r, b = 0.5_r;
-  TwoLinkChain const chain = MakeTwoLinkRevoluteChain(d);
+  RevoluteChain const chain = MakeTwoLinkRevoluteChain(d);
   DynamicArray<RoutingElement> const routingElements =
       MakeWaypointElements({0, 1}, {Real3{a, 0_r, 0_r}, Real3{b, 0_r, 0_r}});
   SpatialTendon const tendon = MakeTendon(chain, MakeConstSpan(routingElements));
@@ -1080,7 +1174,7 @@ TEST(SpatialTendon, Displacement_MixedElements_MatchesHandComputed) {
   // A waypoint segment plus a linear-joint element: Displacement = (routed length change) + coef *
   // angle.
   real const d = 1.0_r, a = 0.3_r, b = 0.5_r, coef = 0.7_r;
-  TwoLinkChain const chain = MakeTwoLinkRevoluteChain(d);
+  RevoluteChain const chain = MakeTwoLinkRevoluteChain(d);
   DynamicArray<RoutingElement> routingElements =
       MakeWaypointElements({0, 1}, {Real3{a, 0_r, 0_r}, Real3{b, 0_r, 0_r}});
   routingElements.push_back(
@@ -1096,19 +1190,24 @@ TEST(SpatialTendon, Displacement_MixedElements_MatchesHandComputed) {
 }
 
 TEST(SpatialTendon, DisplacementJacobian_MatchesFiniteDifferencesAndOverwrites) {
-  TwoLinkChain const chain = MakeTwoLinkRevoluteChain(1.0_r);
+  RevoluteChain const chain = MakeThreeLinkRevoluteChain(1.0_r);
   DynamicArray<RoutingElement> const waypointOnly =
       MakeWaypointElements({0, 1}, {Real3{0.3_r, 0_r, 0_r}, Real3{0.5_r, 0_r, 0_r}});
   DynamicArray<RoutingElement> mixed = waypointOnly;
   mixed.push_back(LinearJointElement(0, -0.6_r));
   DynamicArray<RoutingElement> const allLinear = {
       LinearJointElement(0, 0.5_r), LinearJointElement(1, -0.3_r)};
-  DynamicArray<real> const pose = {0.2_r, 0.4_r};
+  // Skips link 1 and revisits link 2, so waypoint slots differ from link indices.
+  DynamicArray<RoutingElement> revisiting = MakeWaypointElements(
+      {2, 0, 2}, {Real3{0.2_r, 0.1_r, 0_r}, Real3{0.4_r, 0_r, 0_r}, Real3{0.6_r, -0.1_r, 0_r}});
+  revisiting.push_back(LinearJointElement(1, 0.4_r));
+  DynamicArray<real> const pose = {0.2_r, 0.4_r, -0.3_r};
   DynamicArray<TransformRT> const linkTransforms =
       ComputeLinkTransforms(chain, MakeConstSpan(pose));
   RowMatrix<real> const bodyJacobian = ComputeBodyJacobian(chain, MakeConstSpan(pose));
 
-  for (DynamicArray<RoutingElement> const& routingElements : {waypointOnly, mixed, allLinear}) {
+  for (DynamicArray<RoutingElement> const& routingElements :
+       {waypointOnly, mixed, allLinear, revisiting}) {
     SpatialTendon const tendon = MakeTendon(chain, MakeConstSpan(routingElements));
     DynamicArray<real> jacobian(isize(pose), 911_r);
     tendon.DisplacementJacobian(
@@ -1125,32 +1224,32 @@ TEST(SpatialTendon, DisplacementJacobian_MatchesFiniteDifferencesAndOverwrites) 
 }
 
 TEST(SpatialTendon, Residual_MatchesLengthGradient) {
-  // With a unit-force actuator the assembled residual equals force * d(Displacement)/dq, verified
-  // against an independent finite-difference of Displacement. Checked for a waypoint-only routing,
-  // a routing that mixes in a linear-joint element (so the gradient combines the waypoint lever-arm
-  // Jacobian and the linear element's constant coefficient), and an all-linear routing with no
-  // waypoint segments. The same assembly also exercises the objective branch: with a
-  // ForceControlActuator the energy is the closed form force * displacement, so the accumulated
-  // objective must equal force * Displacement (Displacement taken from the independently validated
-  // helper).
-  TwoLinkChain const chain = MakeTwoLinkRevoluteChain(1.0_r);
+  // The waypoint segments are assembled per link and the linear-joint elements per joint. Projected
+  // with the body Jacobian, they must equal force * d(Displacement)/dq at the current pose,
+  // verified against an independent finite-difference of Displacement, for every routing below.
+  // The same assembly also exercises the objective branch: with a ForceControlActuator the energy
+  // is the closed form force * displacement.
+  RevoluteChain const chain = MakeThreeLinkRevoluteChain(1.0_r);
   DynamicArray<RoutingElement> const waypointOnly =
-      MakeWaypointElements({0, 1}, {Real3{0.3_r, 0_r, 0_r}, Real3{0.5_r, 0_r, 0_r}});
+      MakeWaypointElements({0, 1}, {Real3{0.3_r, 0.1_r, 0_r}, Real3{0.5_r, -0.2_r, 0.1_r}});
   DynamicArray<RoutingElement> mixed = waypointOnly;
   mixed.push_back(LinearJointElement(0, -0.6_r));
-  // An all-linear routing (no waypoint segments) exercises the linear-joint-only gradient path.
   DynamicArray<RoutingElement> const allLinear = {
       LinearJointElement(0, 0.5_r), LinearJointElement(1, -0.3_r)};
+  // Skips link 1 and revisits link 2, so waypoint slots differ from link indices.
+  DynamicArray<RoutingElement> revisiting = MakeWaypointElements(
+      {2, 0, 2}, {Real3{0.2_r, 0.1_r, 0_r}, Real3{0.4_r, 0_r, 0_r}, Real3{0.6_r, -0.1_r, 0_r}});
+  revisiting.push_back(LinearJointElement(1, 0.4_r));
 
-  DynamicArray<real> const currentPose = {0.2_r, 0.4_r};
-  DynamicArray<real> const previousPose = {0.1_r, 0.3_r};
+  DynamicArray<real> const currentPose = {0.2_r, 0.4_r, -0.3_r};
+  DynamicArray<real> const stageStartPose = {-0.3_r, 0.9_r, 0.5_r};
   real const timeStep = 0.01_r;
-  RowMatrix<real> const jacobian = ComputeBodyJacobian(chain, MakeConstSpan(currentPose));
-  AssemblyParams const params{.assemObj = true, .assemRes = true, .assemDRes = false};
-  real const force = 1_r;
+  real const force = 2_r;
   int const numDofs = isize(currentPose);
+  RowMatrix<real> const jacobian = ComputeBodyJacobian(chain, MakeConstSpan(currentPose));
 
-  for (DynamicArray<RoutingElement> const& routingElements : {waypointOnly, mixed, allLinear}) {
+  for (DynamicArray<RoutingElement> const& routingElements :
+       {waypointOnly, mixed, allLinear, revisiting}) {
     SpatialTendon const tendon = MakeTendon(
         chain,
         MakeConstSpan(routingElements),
@@ -1159,15 +1258,18 @@ TEST(SpatialTendon, Residual_MatchesLengthGradient) {
         tendon,
         chain,
         MakeConstSpan(currentPose),
-        MakeConstSpan(previousPose),
+        MakeConstSpan(stageStartPose),
         timeStep,
-        params,
+        AssemblyParams{.assemObj = true, .assemRes = true},
         AsConstView(jacobian));
+    ColumnVector<real> const projected = jacobian.Transpose() * AsConstView(assembled.linkResidual);
     DynamicArray<real> const g =
         FiniteDiffDisplacementGradient(tendon, chain, MakeConstSpan(currentPose));
     for (int i = 0; i < numDofs; ++i) {
       EXPECT_NEAR(
-          assembled.residual[i], force * g[i], kSpatialRelTol * Abs(force * g[i]) + kSpatialAbsTol);
+          assembled.residual[i] + projected[i],
+          force * g[i],
+          kSpatialRelTol * Abs(force * g[i]) + kSpatialAbsTol);
     }
     auto const expectedObjective =
         static_cast<double>(force * DisplacementOf(tendon, chain, MakeConstSpan(currentPose)));
@@ -1178,18 +1280,21 @@ TEST(SpatialTendon, Residual_MatchesLengthGradient) {
   }
 
   // A tendon with no actuator contributes nothing: AddObjResDRes early-returns via the
-  // HasActuator() == false path and leaves the residual untouched.
+  // HasActuator() == false path and leaves the residuals untouched.
   SpatialTendon const passiveTendon = MakeTendon(chain, MakeConstSpan(waypointOnly));
   AssembledTransmission const passive = AssembleResDRes(
       passiveTendon,
       chain,
       MakeConstSpan(currentPose),
-      MakeConstSpan(previousPose),
+      MakeConstSpan(stageStartPose),
       timeStep,
-      params,
+      AssemblyParams{.assemObj = true, .assemRes = true},
       AsConstView(jacobian));
-  for (int i = 0; i < numDofs; ++i) {
-    EXPECT_EQ(passive.residual[i], 0_r);
+  for (real const value : passive.residual) {
+    EXPECT_EQ(value, 0_r);
+  }
+  for (real const value : passive.linkResidual) {
+    EXPECT_EQ(value, 0_r);
   }
 }
 
@@ -1198,7 +1303,7 @@ TEST(SpatialTendon, DResidual_MatchesQuadraticApproximation) {
   // (Gauss-Newton approximation that drops the second-derivative term). We obtain g independently
   // via finite differences of Displacement. A linear-joint element is included so g mixes both
   // gradient contributions.
-  TwoLinkChain const chain = MakeTwoLinkRevoluteChain(1.0_r);
+  RevoluteChain const chain = MakeTwoLinkRevoluteChain(1.0_r);
   DynamicArray<RoutingElement> routingElements =
       MakeWaypointElements({0, 1}, {Real3{0.3_r, 0_r, 0_r}, Real3{0.5_r, 0_r, 0_r}});
   routingElements.push_back(LinearJointElement(0, 0.4_r));

@@ -104,10 +104,9 @@ void FlushLog();
   int len = vsnprintf(nullptr, 0, format, args1);
   std::string str;
   str.resize((size_t)len); // +1 makes it cheap to append "\n" for logging
-  if (len)
-    MOCHI_LIKELY {
-      vsnprintf(&str[0], len + 1, format, args2); // This use of &str[0] guaranteed by C++11
-    }
+  if (len) MOCHI_LIKELY {
+    vsnprintf(&str[0], len + 1, format, args2); // This use of &str[0] guaranteed by C++11
+  }
   va_end(args2);
   va_end(args1);
   return str;
@@ -181,11 +180,10 @@ inline void SetLogCallback([[maybe_unused]] LogFn fn) {
 }
 
 inline void EnableLogChannel(LogChannel channel, [[maybe_unused]] bool enable) {
-  if ((size_t)channel >= (size_t)LogChannel::Count)
-    MOCHI_UNLIKELY {
-      MOCHI_LOG_WARNING("Requested LogChannel (%d) is invalid and will be ignored.", (int)channel);
-      return;
-    }
+  if ((size_t)channel >= (size_t)LogChannel::Count) MOCHI_UNLIKELY {
+    MOCHI_LOG_WARNING("Requested LogChannel (%d) is invalid and will be ignored.", (int)channel);
+    return;
+  }
 #if MOCHI_ARCH_CPU
   std::lock_guard<std::recursive_mutex> lock(log_impl::GetLogMutexRef());
   log_impl::GetLogChannelsDisabledArrayRef()[(size_t)channel] = !enable;
@@ -193,10 +191,9 @@ inline void EnableLogChannel(LogChannel channel, [[maybe_unused]] bool enable) {
 }
 
 inline bool IsLogChannelEnabled(LogChannel channel) {
-  if ((size_t)channel >= (size_t)LogChannel::Count)
-    MOCHI_UNLIKELY {
-      return false;
-    }
+  if ((size_t)channel >= (size_t)LogChannel::Count) MOCHI_UNLIKELY {
+    return false;
+  }
 #if MOCHI_ARCH_CPU
   std::lock_guard<std::recursive_mutex> lock(log_impl::GetLogMutexRef());
   auto const& isChannelDisabled = log_impl::GetLogChannelsDisabledArrayRef();

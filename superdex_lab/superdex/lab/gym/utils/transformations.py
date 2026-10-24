@@ -42,3 +42,30 @@ def unwrap_angle_sequence(x: npt.NDArray[float]) -> npt.NDArray[float]:
     out = np.copy(x)
     out[1:] = out[0] + np.cumsum(angular_distance(x[:-1], x[1:]))
     return out
+
+
+########################################################################################
+# Vector utilities
+########################################################################################
+
+
+def normalize(vector: npt.NDArray, fallback: npt.NDArray | None = None) -> npt.NDArray:
+    """Return ``vector`` scaled to unit length, or ``fallback`` if it is degenerate."""
+    norm = np.linalg.norm(vector)
+    if norm < 1e-9:
+        return vector if fallback is None else fallback
+    return vector / norm
+
+
+def rotate_about_axis(
+    vector: npt.NDArray, axis: npt.NDArray, angle: float
+) -> npt.NDArray:
+    """Rotate ``vector`` about ``axis`` by ``angle`` radians (Rodrigues' formula)."""
+    axis = normalize(axis)
+    cos_a = np.cos(angle)
+    sin_a = np.sin(angle)
+    return (
+        vector * cos_a
+        + np.cross(axis, vector) * sin_a
+        + axis * np.dot(axis, vector) * (1.0 - cos_a)
+    )

@@ -222,6 +222,7 @@ class TestActor(MochiTestBase):
             surface_mesh.coordinates.tolist(),
         )
         self.assertEqual(mochi.MeshDataView(), visual_mesh)
+        self.assertEqual(mochi.MeshDataView(), soft_actor.get_contact_skin_mesh())
 
         # Rigid actors with tetrahedral mesh shapes must return the boundary surface simulation mesh.
         rigid_tet_actor = self._create_rigid_box_actor(scene)
@@ -833,6 +834,13 @@ class TestActor(MochiTestBase):
         self.assertEqual(
             [0.0] * 3, dof_values.tolist()
         )  # Initial displacement must be zero
+
+        read_only_values = np.ones(3, dtype=np_real)
+        read_only_values.setflags(write=False)
+        with self.assertRaises(TypeError):
+            actor.get_dof_values(
+                dof_indices=dof_indices, out_dof_values=read_only_values
+            )
 
         mochi.destroy_scene(scene)
 
@@ -2117,6 +2125,8 @@ class TestActor(MochiTestBase):
 # - get_articulated_dof_limits()
 # - add_boundary_condition_constrained_nodes_at_rest(), add_boundary_condition_constrained_nodes_at_rest_permanent()
 # - Visual node queries (VISUAL_NODE_POSITIONS, VISUAL_NODE_NORMALS). Requires an actor with a visual mesh.
+# - Contact skin node queries (CONTACT_SKIN_NODE_POSITIONS, CONTACT_SKIN_NODE_NORMALS). Requires a shell
+#   or rod actor with a contact skin.
 #
 # TODO: Experimental methods not yet tested:
 # - get_contact_force_world_batch()

@@ -15,6 +15,7 @@
  */
 
 #include "mochi_context.h"
+#include "mochi_debug_draw.h"
 #include "mochi_ecs.h"
 #include "mochi_scene.h"
 #include "mochi_scene_debugger.h"
@@ -102,6 +103,7 @@ class DebugServerImpl : public DebugServerInternal {
       std::unique_ptr<protocol::SceneRequest>&& request,
       protocol::SceneReply&& reply);
 
+  ContextImpl* const _context;
   net::MessageServer _server;
   RecursiveGuarded<State> _state;
 };
@@ -134,8 +136,7 @@ static DynamicString FormatLabel(DebugServerImpl::State const& state) {
   }
 }
 
-DebugServerImpl::DebugServerImpl([[maybe_unused]] ContextImpl* context) {
-  // In the future, we will need to store the context pointer. For now, it is unused.
+DebugServerImpl::DebugServerImpl(ContextImpl* context) : _context(context) {
   MOCHI_ASSERT_VERBOSE(context);
 
   // NOTE: Protocol registration is deferred until StartImpl to minimize the cost
@@ -279,6 +280,17 @@ static void FillSceneList(DebugServerImpl::State const& state, protocol::SceneLi
   }
 }
 
+// Copy the debug draw feature catalog into the message. Scenes start with debug draw off, and the
+// client is authoritative from then on, so all the flags are false.
+static void FillDbgDrawFeatures(protocol::DbgDrawFeatures& outFeatures) {
+  auto const catalog = GetDebugDrawFeatureCatalog();
+  outFeatures.features.resize(catalog.size());
+  for (int i = 0; i < isize(catalog); ++i) {
+    outFeatures.features[i].name = catalog[i].name;
+    outFeatures.features[i].description = catalog[i].description;
+  }
+}
+
 void DebugServerImpl::OnClientConnect(net::ClientId client) {
   _state.Mutate([&](auto& state) {
     MOCHI_ASSERT_VERBOSE(state.client == 0, "Currently only supports one client at a time");
@@ -295,6 +307,8 @@ void DebugServerImpl::OnClientConnect(net::ClientId client) {
     protocol::WelcomeMessage welcome;
     FillSceneList(state, welcome.scenes);
     welcome.coordinateSpace = state.coordinateSpace;
+    welcome.numWorkerThreads = _context->GetNumThreads();
+    FillDbgDrawFeatures(welcome.debugDraw);
     _server.SendTo(client, welcome);
   });
 }
@@ -317,7 +331,7 @@ void DebugServerImpl::AttachSceneDebuggerForClient(
 void DebugServerImpl::ReleaseSceneDebugger(SceneInfo& info) {
   if (info.debugger) {
     // Call PreShutdown (thread-safe). This prevents any future messages from being sent
-    info.debugger->PreShutdownAsync(info.scene);
+    info.debugger->PreShutdownAsync();
 
     // Release our shared_ptr
     info.debugger.reset();
@@ -354,6 +368,8 @@ void DebugServerImpl::RegisterSceneRequest() {
 }
 
 void DebugServerImpl::RegisterProtocol() {
+  _server.Register<protocol::DebugDrawReply>();
+  RegisterSceneRequest<protocol::DebugDrawRequest>();
   _server.Register<protocol::LogMessage>();
   _server.Register<protocol::PingReply>();
   _server.Register<protocol::PingRequest>(
@@ -363,6 +379,8 @@ void DebugServerImpl::RegisterProtocol() {
   RegisterSceneRequest<protocol::SceneStepRequest>();
   _server.Register<protocol::SceneSyncReply>();
   RegisterSceneRequest<protocol::SceneSyncRequest>();
+  _server.Register<protocol::SleepParamsReply>();
+  RegisterSceneRequest<protocol::SleepParamsRequest>();
   _server.Register<protocol::WelcomeMessage>();
 
   // Set version so connection will be refused if the client does not register exactly the

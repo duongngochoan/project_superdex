@@ -42,11 +42,6 @@ enum class GridExtrapolation {
   Count
 };
 
-/** @brief Empty utility class to make the passing of compile-time sampler options to trilinear
- * sampler function easier. */
-template <GridExtrapolation kExtrapolationType>
-struct TrilinearSamplerOptions {};
-
 /** @brief Scalar field implemented through a dense volumetric grid of samples interpolated using
 tri-linear interpolation. Samples are locate at the CORNERS of each voxel. */
 template <typename T>
@@ -169,24 +164,6 @@ class DenseGrid3D {
       Simd<T, kBatchSize>* outValues,
       NdArray<Simd<T, kBatchSize>, 3>* outGradients = nullptr) const;
 
-  /** @brief Sample using trilinear interpolation with the given options. */
-  template <GridExtrapolation kExtrapolationType>
-  void TrilinearSample(
-      Span<Real3 const> points,
-      Span<T> outValues,
-      TrilinearSamplerOptions<kExtrapolationType>) const;
-
-  /**
-   * @brief Sample gradient using trilinear interpolation with the given options.
-   * @note For points outside the grid region, the gradient is an approximation (the gradient of the
-   * SDF at the closest point on the grid boundary is assumed to be zero).
-   */
-  template <GridExtrapolation kExtrapolationType>
-  void TrilinearSampleGradient(
-      Span<Real3 const> points,
-      Span<Scalar3> outGradients,
-      TrilinearSamplerOptions<kExtrapolationType>) const;
-
  private:
   /** @brief Computes the parametric coordinates within the grid volume of 'kBatchSize' points. */
   template <int kBatchSize, GridExtrapolation kExtrapolationType>
@@ -196,51 +173,12 @@ class DenseGrid3D {
       NdArray<Simd<IType, kBatchSize>, 3>& outLowerIndex,
       NdArray<Simd<IType, kBatchSize>, 3>& outUpperIndex) const;
 
-  /** @brief SIMDify up to kBatchSize points. */
-  template <int kBatchSize>
-  MOCHI_FORCE_INLINE NdArray<Simd<T, kBatchSize>, 3> VectorizePoints(
-      Span<Real3 const> points) const;
-
   Aabb _bounds = {};
   Aabb _negativeValueBounds = {};
   Real3 _delta = {};
   Real3 _deltaInv = {}; // 1 / _delta
   Int3 _shape = {};
   DynamicArray<T> _data;
-};
-
-/**
- * @brief Samples an SDF from a grid with support for extrapolation outside of the grid.
- * @note When outside the grid, it provides an upper bound of the true distance (not the true
- * distance).
- */
-template <typename T>
-struct TrilinearSdfGridUpperBoundSampler {
-  using Scalar3 = typename DenseGrid3D<T>::Scalar3;
-  using Options = TrilinearSamplerOptions<GridExtrapolation::UpperBound>;
-  MOCHI_FORCE_INLINE void
-  operator()(DenseGrid3D<T> const& grid, Span<Real3 const> points, Span<T> outValues) const {
-    grid.TrilinearSample(points, outValues, Options{});
-  }
-  MOCHI_FORCE_INLINE void
-  Gradient(DenseGrid3D<T> const& grid, Span<Real3 const> points, Span<Scalar3> outGradients) const {
-    grid.TrilinearSampleGradient(points, outGradients, Options{});
-  }
-};
-
-/** @brief Samples an SDF from a grid without support for extrapolation outside of the grid. */
-template <typename T>
-struct TrilinearSdfGridInteriorSampler {
-  using Scalar3 = typename DenseGrid3D<T>::Scalar3;
-  using Options = TrilinearSamplerOptions<GridExtrapolation::Unsupported>;
-  MOCHI_FORCE_INLINE void
-  operator()(DenseGrid3D<T> const& grid, Span<Real3 const> points, Span<T> outValues) const {
-    grid.TrilinearSample(points, outValues, Options{});
-  }
-  MOCHI_FORCE_INLINE void
-  Gradient(DenseGrid3D<T> const& grid, Span<Real3 const> points, Span<Scalar3> outGradients) const {
-    grid.TrilinearSampleGradient(points, outGradients, Options{});
-  }
 };
 
 } // namespace mochi

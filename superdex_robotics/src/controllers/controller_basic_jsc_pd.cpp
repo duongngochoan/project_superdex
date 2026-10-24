@@ -17,8 +17,16 @@
 #include <superdex_robotics/controllers/controller_basic_jsc_pd.h>
 #include <superdex_robotics/utils/file_utils.h>
 
+#include <array>
+#include <numeric>
+#include <vector>
+
 using namespace mochi;
 using namespace superdex::robotics;
+
+namespace {
+constexpr std::string_view kStateStreamName = "state";
+} // namespace
 
 /* Implementation */
 
@@ -170,4 +178,25 @@ void ControllerBasicJscPdParams::SaveToFile(std::string_view path, Error& error)
 void ControllerBasicJscPd::Reset() {
   _prevTargetPose.clear();
   _prevTargetPoseInitialized = false;
+}
+
+void ControllerBasicJscPd::ConfigureRecording(ControllerRecordingSink& sink, Error& error) const {
+  sink.WriteConstantScalars("jsc_kp", _params.Kp, error);
+  sink.WriteConstantScalars("jsc_kd", _params.Kd, error);
+  sink.WriteConstantScalars("jsc_saturation", _params.saturation, error);
+  sink.WriteConstantScalars("jsc_deadband", _params.deadband, error);
+  std::vector<real> targetDofIndices(_params.Kp.size());
+  std::iota(targetDofIndices.begin(), targetDofIndices.end(), 0_r);
+  sink.WriteConstantScalars("target_dof_indices", targetDofIndices, error);
+}
+
+void ControllerBasicJscPd::Record(ControllerRecordingSink& sink, Error& error) const {
+  if (!_prevTargetPoseInitialized) {
+    return;
+  }
+  std::array<ControllerScalarValues, 2> const fields{{
+      {"joint_position_target", _prevTargetPose},
+      {"joint_effort_output", _efforts},
+  }};
+  sink.WriteScalars(kStateStreamName, fields, error);
 }

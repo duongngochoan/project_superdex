@@ -208,7 +208,7 @@ class TaskScheduler final {
     See GetNumOtherThreads.
   */
   template <typename FN>
-  void AddTask(TaskSemaphore sem, std::string_view debugNameStringLiteral, FN&& fn);
+  void AddTask(TaskSemaphore const& sem, std::string_view debugNameStringLiteral, FN&& fn);
 
   /**
     Add a task with no profiling overhead. Used to implement parallel algorithms that handle the
@@ -245,7 +245,7 @@ class TaskScheduler final {
   */
   using BatchTaskFn = std::function<void(int, int)>;
   int BatchEnqueueOnAvailableWorkers(
-      TaskSemaphore sem,
+      TaskSemaphore const& sem,
       BatchTaskFn&& task,
       int minWorkers,
       int targetWorkers,
@@ -310,7 +310,7 @@ class TaskScheduler final {
 
   Example:
       TaskSemaphore sem(1);
-      scheduler.AddTask([sem]() { // capture semaphore BY VALUE
+      scheduler.AddTask("DoWork", [sem]() { // capture semaphore BY VALUE
         // Do work
         sem.Done();
       });
@@ -319,7 +319,7 @@ class TaskScheduler final {
 class TaskSemaphore {
  public:
   // Constructs the WaitGroup with the specified initial count.
-  TaskSemaphore(int initialCount = 0);
+  explicit TaskSemaphore(int initialCount = 0);
 
   // Increments the internal counter by count.
   void Add(int count = 1) const;
@@ -368,7 +368,7 @@ void Schedule(std::string_view debugNameStringLiteral, FN&& fn);
 // or if the TaskScheduler has no other threads that could performance the work concurrently. If you
 // have a task that must be scheduled to avoid deadlocks, then use TaskScheduler::AddTask directly.
 template <typename FN>
-void Schedule(TaskSemaphore sem, std::string_view debugNameStringLiteral, FN&& fn);
+void Schedule(TaskSemaphore const& sem, std::string_view debugNameStringLiteral, FN&& fn);
 
 /**
   Subdivide a range of indices into one or more sub-ranges. Then, calls forRange(subRangeBegin,
@@ -377,6 +377,9 @@ void Schedule(TaskSemaphore sem, std::string_view debugNameStringLiteral, FN&& f
 
   If each call is very expensive then set minPerTask to 1 to indicate it is OK to create a task for
   each index. If each call is very cheap, then set minPerTask to a larger value to reduce overhead.
+
+  The calling thread runs the last sub-range itself. Callers may rely on this, e.g. to keep work on
+  the calling thread.
 */
 template <typename FN>
 void ParallelForRange(
@@ -394,6 +397,9 @@ void ParallelForRange(
 
   If each call is very expensive then set minPerTask to 1 to indicate it is OK to create a task for
   each index. If each call is very cheap, then set minPerTask to a larger value to reduce overhead.
+
+  The calling thread runs the sub-range containing index n - 1. Callers may rely on this, e.g. to
+  keep work on the calling thread.
 
   Example:
     ParallelForN("DoSomething", 100, 1, [](int i) { DoSomething(i); });
@@ -502,7 +508,7 @@ void BusyWaitFor(Predicate&& condition, TimeSpan yieldPeriod = TimeSpanFromSecon
   EXAMPLE:
       ParallelBarrier barrier(5);
       for (int workerId = 0; workerId < 5; ++workerId) {
-        scheduler.AddTask([barrier]() { // Capture barrier BY VALUE
+        scheduler.AddTask("ParallelBarrier", [barrier]() { // Capture barrier BY VALUE
           // Do work
           barrier.Wait();
           // Do more work
@@ -521,13 +527,17 @@ class ParallelBarrier final {
   ParallelBarrier(ParallelBarrier&&) = default;
   MOCHI_DECLARE_NO_ASSIGN(ParallelBarrier);
 
-  explicit ParallelBarrier(int numWorkers) : _numWorkers(numWorkers), _target(numWorkers) {
+  explicit ParallelBarrier(int numWorkers)
+      : _numWorkers(numWorkers),
+        _count(numWorkers > 1 ? std::make_shared<std::atomic<uint64_t>>() : nullptr),
+        _target(numWorkers) {
     MOCHI_ASSERT_VERBOSE(_numWorkers > 0, "Number of workers must be positive.");
   }
 
   // Reduce the number of workers that use the parallel barrier.
   void ReduceNumWorkers(int numWorkers, bool /*isMaster*/) {
-    MOCHI_ASSERT_VERBOSE(numWorkers <= _numWorkers, "Invalid new number of workers.");
+    MOCHI_ASSERT_VERBOSE(
+        numWorkers > 0 && numWorkers <= _numWorkers, "Invalid new number of workers.");
     _target -= (_numWorkers - numWorkers);
     _numWorkers = numWorkers;
   }
@@ -547,7 +557,7 @@ class ParallelBarrier final {
 
  private:
   int _numWorkers = {};
-  std::shared_ptr<std::atomic<uint64_t>> const _count = std::make_shared<std::atomic<uint64_t>>();
+  std::shared_ptr<std::atomic<uint64_t>> _count;
   mutable uint64_t _target = 0;
 };
 

@@ -31,6 +31,7 @@
 #include <mochi_core/utils/nd_array.h>
 #include <mochi_core/utils/quaternion.h>
 
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -90,6 +91,12 @@ struct LoadedPipeline {
   ProcessingEditorState editorState;
   bool hasEditorState = false; // whether the file actually contained an editorState block
   std::vector<ReferenceModelState> referenceModels;
+  // Indices into modifiers of the passthrough placeholders for unrecognized entries.
+  std::vector<std::size_t> unrecognized;
+  // What the file holds that the loader could not use as written, one line each: unknown fields,
+  // enum values, modifiers and methods, and values of the wrong type. The pipeline loads anyway,
+  // with defaults for what it could not read and placeholders for unknown modifiers.
+  std::vector<std::string> issues;
 };
 
 // Serializes @p modifiers + @p editorState + @p referenceModels into the pipeline JSON document
@@ -119,7 +126,8 @@ bool WriteProcessingPipelineFile(
 
 // Reads a pipeline from @p path into @p out. Returns false and sets @p error if the file is
 // missing, unparsable, or structurally invalid (callers should then NOT overwrite it). Unknown
-// object-shaped modifiers/methods become placeholders (no error).
+// object-shaped modifiers/methods become placeholders (no error), and everything else the file
+// holds that cannot be used as written is listed in out.issues.
 //
 // Every stored path is resolved to absolute via superdex::robotics::MakePathAbsolute against
 // @p baseFile, so the rest of the editor works in absolute paths. @p baseFile is the pipeline file

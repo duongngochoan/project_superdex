@@ -319,13 +319,7 @@ class ConstraintRodElementRotationToRigidClosedLoop
         Real3{kSideLength, 0_r, kSideLength},
         Real3{0_r, 0_r, kSideLength},
     };
-    // NOTE: DynamicArray fill constructor for Real3 is miscompiled by MSVC in double precision,
-    // leading to a zero vector for the last element. Filling with an explicit for loop to work
-    // around it.
-    DynamicArray<Real3> frameAxes(kNumNodes);
-    for (int i = 0; i < kNumNodes; ++i) {
-      frameAxes[i] = Real3{0_r, 1_r, 0_r};
-    }
+    DynamicArray<Real3> frameAxes(kNumNodes, Real3{0_r, 1_r, 0_r});
 
     RodActorParams rodParams;
     rodParams.shape = CreatePolylineShape(
@@ -355,4 +349,47 @@ TEST_F(ConstraintRodElementRotationToRigid, Test) {
 
 TEST_F(ConstraintRodElementRotationToRigidClosedLoop, Test) {
   RunAllTests();
+}
+
+class ContactSkinnedRodConstraintTest : public test::MochiSceneTestBase {};
+
+TEST_F(ContactSkinnedRodConstraintTest, ConstraintUsesCenterlineNodeIndices) {
+  using namespace mochi::experimental;
+
+  ModelData model;
+  model.mesh.emplace();
+  model.mesh->nodesPerElement = 2;
+  model.mesh->coordinates = {0_r, 0_r, 0_r, 1_r, 0_r, 0_r, 2_r, 0_r, 0_r, 3_r, 0_r, 0_r};
+  model.mesh->connectivity = {0, 1, 1, 2, 2, 3};
+  model.elementFrameAxes = DynamicArray<real>{0_r, 1_r, 0_r, 0_r, 1_r, 0_r, 0_r, 1_r, 0_r};
+  model.contactSkinMesh.emplace();
+  model.contactSkinMesh->nodesPerElement = 3;
+  model.contactSkinMesh->coordinates = {0.5_r, 0_r, 0_r, 0.5_r, 0.1_r, 0_r, 0.5_r, 0_r, 0.1_r};
+  model.contactSkinMesh->connectivity = {0, 1, 2};
+  model.contactSkinMesh->skinning.emplace();
+  model.contactSkinMesh->skinning->weightsPerNode = 1;
+  model.contactSkinMesh->skinning->indices = {0, 0, 0};
+  model.contactSkinMesh->skinning->weights = {1_r, 1_r, 1_r};
+
+  RodActorParams rodParams;
+  rodParams.shape = _scene->GetContext()->CreateModelShape(model, ExpectOK{});
+  Actor* const rod = CreateRodActor(_scene, rodParams, ExpectOK{});
+  ASSERT_EQ(4, rod->GetMesh().GetNumNodes());
+  ASSERT_EQ(3, rod->GetContactSkinMesh().GetNumNodes());
+
+  RigidActorParams rigidParams;
+  rigidParams.shape = GetUnitCubeShape(_scene->GetContext());
+  rigidParams.colliderType = ColliderType::None;
+  Actor* const rigid = _scene->CreateRigidActor(rigidParams, ExpectOK{});
+
+  DeformableNodeToRigidConstraintParams params;
+  params.rigidActor = rigid->GetHandle();
+  params.deformableActor = rod->GetHandle();
+  params.deformableNodeIndex = 3;
+  params.findClosest = false;
+  Constraint* const constraint = _scene->CreateDeformableNodeToRigidConstraint(params, ExpectOK{});
+
+  auto const& info = GetRegistry().get<CConstraintInfo const>(GetEntity(constraint->GetHandle()));
+  ASSERT_EQ(2, isize(info.actorDofs));
+  EXPECT_EQ((std::vector<int>{12, 13, 14}), info.actorDofs[1]);
 }

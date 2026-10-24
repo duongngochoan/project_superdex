@@ -24,6 +24,7 @@
 #include "mochi_island.h"
 #include "mochi_pose_controller.h"
 #include "mochi_rod.h"
+#include "mochi_sleep.h"
 #include "mochi_soft.h"
 #include "mochi_soft_skinned.h"
 
@@ -32,13 +33,32 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
-#include <vector>
 
 using namespace mochi;
 
-QueryHandle CQueryHandleAllocator::NewHandleThreadSafe(QueryType type) {
-  return CreateQueryHandle(type, ++(*nextId));
+namespace {
+// Adds, removes or refs an auxiliary (visual or contact skin) mesh query, whose positions and
+// normals are computed together.
+template <typename PositionsT, typename NormalsT, typename RodSystemT, typename SystemT>
+void AddRemoveOrRefAuxiliaryMeshQuery(
+    entt::registry& reg,
+    entt::entity e,
+    bool add,
+    bool computeImmediately,
+    RodSystemT rodSystem,
+    SystemT system) {
+  if (!reg.any_of<TagRigidActor, TagStaticActor, TagRodActor>(e)) {
+    // Prerequisite for deformable actors (rods don't have CSimplicialMesh).
+    AddRemoveOrRefComponentsForQuery(reg, e, QueryType::NodePositions, add, computeImmediately);
+  }
+  auto* component = AddRemoveOrRefComponent<PositionsT>(reg, e, add);
+  AddRemoveOrRefComponent<NormalsT>(reg, e, add);
+  if (computeImmediately && component && component->nodePositions.empty()) {
+    ecs::TryInvokeOnEntity(rodSystem, reg, e);
+    ecs::TryInvokeOnEntity(system, reg, e);
+  }
 }
+} // namespace
 
 void mochi::AddRemoveOrRefComponentsForQuery(
     entt::registry& reg,
@@ -91,16 +111,27 @@ void mochi::AddRemoveOrRefComponentsForQuery(
     // These two are computed together
     case QueryType::VisualNodePositions:
     case QueryType::VisualNodeNormals: {
-      if (!reg.any_of<TagRigidActor>(e) && !reg.any_of<TagRodActor>(e)) {
-        // Prerequisite for deformable actors (rods don't have CSimplicialMesh).
-        AddRemoveOrRefComponentsForQuery(reg, e, QueryType::NodePositions, add, computeImmediately);
-      }
-      auto* component = AddRemoveOrRefComponent<CQueryVisualNodePositions>(reg, e, add);
-      AddRemoveOrRefComponent<CQueryVisualNodeNormals>(reg, e, add);
-      if (computeImmediately && component && component->nodePositions.empty()) {
-        ecs::TryInvokeOnEntity(&rod::UpdateQueryRodVisualNodePositionsAndNormals, reg, e);
-        ecs::TryInvokeOnEntity(&UpdateQueryVisualNodePositionsAndNormals, reg, e);
-      }
+      AddRemoveOrRefAuxiliaryMeshQuery<CQueryVisualNodePositions, CQueryVisualNodeNormals>(
+          reg,
+          e,
+          add,
+          computeImmediately,
+          &rod::UpdateQueryVisualNodePositionsAndNormals,
+          &UpdateQueryVisualNodePositionsAndNormals);
+    } break;
+
+    // These two are computed together
+    case QueryType::ContactSkinNodePositions:
+    case QueryType::ContactSkinNodeNormals: {
+      AddRemoveOrRefAuxiliaryMeshQuery<
+          CQueryContactSkinNodePositions,
+          CQueryContactSkinNodeNormals>(
+          reg,
+          e,
+          add,
+          computeImmediately,
+          &rod::UpdateQueryContactSkinNodePositionsAndNormals,
+          &UpdateQueryContactSkinNodePositionsAndNormals);
     } break;
 
     case QueryType::ContactPoints: {
@@ -175,7 +206,7 @@ void mochi::SetErrorIfQueryNotSupported(
     QueryType type,
     Error& error) {
   static_assert(
-      static_cast<int>(QueryType::Count) == 13,
+      static_cast<int>(QueryType::Count) == 15,
       "Please update the switch statement below if QueryType enum changes");
   switch (type) {
     case QueryType::NodePositions:
@@ -195,11 +226,20 @@ void mochi::SetErrorIfQueryNotSupported(
     case QueryType::VisualNodeNormals:
       MOCHI_ERROR_IF_NOT(
           reg.all_of<CVisualMesh const>(e) &&
-              (reg.any_of<TagRigidActor const, CRodVisualMeshEmbedding const>(e) ||
+              (reg.any_of<TagRigidActor const, TagStaticActor const, CRodVisualMeshEmbedding const>(
+                   e) ||
                reg.get<CVisualMesh>(e).embedding),
           error,
           "Visual node queries are only supported for actors with a visual mesh. "
           "Deformable actors also require a visual mesh embedding.");
+      break;
+    case QueryType::ContactSkinNodePositions:
+    case QueryType::ContactSkinNodeNormals:
+      MOCHI_ERROR_IF_NOT(
+          reg.all_of<CContactSkinMesh const>(e),
+          error,
+          "Contact skin node queries are only supported for actors with a contact skin and its "
+          "embedding.");
       break;
     case QueryType::ArticulatedControllerForce:
       MOCHI_ERROR_IF_NOT(
@@ -248,18 +288,6 @@ void mochi::SetErrorIfQueryNotSupported(
   }
 }
 
-QueryHandle mochi::RegisterQuery(
-    entt::registry& reg,
-    entt::entity e,
-    QueryType type,
-    bool computeImmediately,
-    Error& error) {
-  MOCHI_ERROR_RETURN(error, {});
-  QueryHandle newHandle = reg.ctx<CQueryHandleAllocator>().NewHandleThreadSafe(type);
-  RegisterQuery(reg, e, newHandle, computeImmediately, error);
-  return error.IsOK() ? newHandle : QueryHandle{};
-}
-
 void mochi::RegisterQuery(
     entt::registry& reg,
     entt::entity e,
@@ -290,6 +318,13 @@ void mochi::RegisterQuery(
   // No partial success
   if (!error.IsOK()) {
     querySet.handles.erase(preallocatedHandle.value);
+    return;
+  }
+
+  // Sleeping islands don't compute queries. Waking is conservative: some queries could be satisfied
+  // without it.
+  if (!reg.all_of<TagStaticActor>(e)) {
+    sleep::WakeUp(reg, e);
   }
 }
 
@@ -330,7 +365,6 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CQueryArticulatedControllerForce>(reg);
   ecs::RegisterComponent<CQueryContactPoints>(reg);
   ecs::RegisterComponent<CQueryContactSamples>(reg);
-  ecs::RegisterComponent<CQueryHandleAllocator>(reg);
   ecs::RegisterComponent<CQuerySdfDistances>(reg);
   ecs::RegisterComponent<CQueryElasticEnergy>(reg);
   ecs::RegisterComponent<CQueryNodePositions>(reg);
@@ -340,13 +374,12 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CQuerySurfaceNodePositions>(reg);
   ecs::RegisterComponent<CQueryVisualNodeNormals>(reg);
   ecs::RegisterComponent<CQueryVisualNodePositions>(reg);
+  ecs::RegisterComponent<CQueryContactSkinNodeNormals>(reg);
+  ecs::RegisterComponent<CQueryContactSkinNodePositions>(reg);
   ecs::RegisterComponent<CQueryQuadraturePointsPosition>(reg);
   ecs::RegisterComponent<CQueryElementsDeformationGradient>(reg);
   ecs::RegisterComponent<TagQueryActiveContacts>(reg);
   ecs::RegisterComponent<CQueryConstraintForce>(reg);
-
-  // Global Context
-  reg.set<CQueryHandleAllocator>();
 }
 } // namespace mochi::query
 
@@ -363,7 +396,7 @@ void Reserve(size_t size, TupleContainers& outContainers) {
 // Selective cast for ActorHandle
 template <typename T>
 auto Cast(T data) {
-  if constexpr (std::is_same<T, ActorHandle>::value) {
+  if constexpr (std::is_same_v<T, ActorHandle>) {
     return static_cast<int>(data.value);
   } else {
     return data;
@@ -383,7 +416,7 @@ void Emplace(TupleData const& data, TupleContainers& outContainers) {
 // Selective Flatten for Real3
 template <typename T>
 auto Flatten(Span<T const> data) {
-  if constexpr (std::is_same<T, Real3>::value) {
+  if constexpr (std::is_same_v<T, Real3>) {
     return Flatten<real>(data);
   } else {
     return data;
@@ -414,14 +447,14 @@ void mochi::RecordQueryContactPoints(CQueryContactPoints const& contacts, CRecor
   }
 
   // Create temp containers of contact data for all contacts
-  std::vector<int> actorA, actorB, sampleIndex, elementIndex;
-  std::vector<real> distance, intWeight;
-  std::vector<Real3> posA, posB, normal, force, pointVelocityA, pointVelocityB, parametricCoords;
+  DynamicArray<int> actorA, actorB, sampleIndex, elementIndex;
+  DynamicArray<real> distance, intWeight;
+  DynamicArray<Real3> posA, posB, normal, force, pointVelocityA, pointVelocityB, parametricCoords;
   // clang-format off
   auto containers = std::make_tuple(
       std::ref(actorA), std::ref(actorB), std::ref(distance), std::ref(posA), std::ref(posB), std::ref(normal), std::ref(force), std::ref(pointVelocityA), std::ref(pointVelocityB), std::ref(sampleIndex), std::ref(intWeight), std::ref(elementIndex), std::ref(parametricCoords));
   // clang-format on
-  constexpr size_t kNumContainers = std::tuple_size<decltype(containers)>::value;
+  constexpr size_t kNumContainers = std::tuple_size_v<decltype(containers)>;
   Reserve<kNumContainers>(contacts.contactPoints.size(), containers);
 
   // Copy the data to the containers
@@ -450,10 +483,10 @@ void mochi::RecordQueryNodeContactForces(
   }
 
   // Create temp containers of contact data for all contacts
-  std::vector<int> nodeIndex;
-  std::vector<Real3> force;
+  DynamicArray<int> nodeIndex;
+  DynamicArray<Real3> force;
   auto containers = std::make_tuple(std::ref(nodeIndex), std::ref(force));
-  constexpr size_t kNumContainers = std::tuple_size<decltype(containers)>::value;
+  constexpr size_t kNumContainers = std::tuple_size_v<decltype(containers)>;
   Reserve<kNumContainers>(forces.nodeContactForces.size(), containers);
 
   // Copy the data to the containers
@@ -478,7 +511,7 @@ void mochi::RecordQuerySdfDistances(CQuerySdfDistances const& distances, CRecord
       std::cref(distances.distances),
       std::cref(distances.distanceGrads),
       std::cref(distances.worldPositions));
-  constexpr size_t kNumContainers = std::tuple_size<decltype(containers)>::value;
+  constexpr size_t kNumContainers = std::tuple_size_v<decltype(containers)>;
 
   // Write to CRecordingData
   std::array<std::string, kNumContainers> names = {

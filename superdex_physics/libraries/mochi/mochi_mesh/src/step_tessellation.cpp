@@ -16,9 +16,11 @@
 
 #include <mochi_mesh/step_tessellation.h>
 
+#include "mesh_cli_adapter.h"
 #include "mesh_cli_client.h"
 
 #include <string_view>
+#include <vector>
 
 // TessellateStep marshals the request and routes it to the superdex_mesh_cli helper process, which
 // runs the OpenCascade tessellation. Input validation lives in the helper, so an invalid request
@@ -37,4 +39,38 @@ MeshData mochi::mesh::TessellateStep(
   writer.WriteByteArray(stepFilePath);
   writer.WriteStepTessellationParams(params);
   return InvokeMeshOp(cli::GeometryOp::TessellateStep, writer, error);
+}
+
+std::vector<StepColorMesh> mochi::mesh::TessellateStepByColor(
+    std::string_view stepFilePath,
+    StepTessellationParams const& params,
+    Error& error) {
+  MOCHI_ERROR_RETURN(error, {});
+
+  cli::PayloadWriter writer;
+  writer.WriteByteArray(stepFilePath);
+  writer.WriteStepTessellationParams(params);
+  std::vector<char> const response =
+      InvokeMeshCli(cli::GeometryOp::TessellateStepByColor, writer.Bytes(), error);
+  MOCHI_ERROR_RETURN(error, {});
+
+  cli::PayloadReader reader(response);
+  std::vector<cli::ColorMeshData> cliMeshes;
+  MOCHI_ERROR_IF(
+      !reader.ReadColorMeshes(cliMeshes) || !reader.AtEnd(),
+      error,
+      "Malformed TessellateStepByColor response from superdex_mesh_cli.");
+  MOCHI_ERROR_RETURN(error, {});
+
+  std::vector<StepColorMesh> meshes;
+  meshes.reserve(cliMeshes.size());
+  for (cli::ColorMeshData const& cliMesh : cliMeshes) {
+    StepColorMesh& mesh = meshes.emplace_back();
+    if (cliMesh.hasColor) {
+      mesh.rgb = cliMesh.rgb;
+    }
+    mesh.mesh = cli_adapter::FromCliMeshData(cliMesh.mesh, error);
+    MOCHI_ERROR_RETURN(error, {});
+  }
+  return meshes;
 }

@@ -20,55 +20,53 @@
 
 #if !MOCHI_INTERNAL
 
-#include <pybind11/pybind11.h>
 #include "../pybind_include.h"
 
+#include <nanobind/nanobind.h>
+
+#include <limits>
+
 using namespace mochi;
-namespace py = pybind11;
-using namespace pybind11::literals;
+namespace nb = nanobind;
 
 namespace mochi {
-  void DefineMochiCore_MochiCore([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiCore_MochiCoreExt([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsHandle([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsEnums([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsStructs([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsContext([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsActor([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsConstraint([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsScene([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsDebugDraw([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsDebugServer([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsModel([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsPrefab([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsExperimental([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DefineMochiPhysics_MochiPhysicsExt([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiCore_MochiCore([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiCore_MochiCoreExt([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsHandle([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsEnums([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsStructs([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsContext([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsActor([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsConstraint([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsScene([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsDebugDraw([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsDebugServer([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsModel([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsPrefab([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsExperimental([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiDiffsim([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
-  void DeclareMochiPhysics_MochiPhysicsExt([[maybe_unused]] py::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiCore_MochiCore([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsHandle([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsEnums([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsStructs([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsContext([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsActor([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsConstraint([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsScene([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsDebugDraw([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsDebugServer([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsModel([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsPrefab([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiPhysicsExperimental([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DefineMochiPhysics_MochiDiffsim([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiCore_MochiCore([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsHandle([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsEnums([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsStructs([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsContext([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsActor([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsConstraint([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsScene([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsDebugDraw([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsDebugServer([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsModel([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsPrefab([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiPhysicsExperimental([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
+  void DeclareMochiPhysics_MochiDiffsim([[maybe_unused]] nb::module_& m, [[maybe_unused]] PybindRegistry& registry);
 
-  inline void DefineNamespaces([[maybe_unused]] py::module_& m) {
+  inline void DefineNamespaces([[maybe_unused]] nb::module_& m) {
     auto m_diffsim = m.def_submodule("diffsim");
     auto m_experimental = m.def_submodule("experimental");
     auto m_model = m.def_submodule("model");
     auto m_prefab = m.def_submodule("prefab");
   }
 
-  inline void DefineSpecializations([[maybe_unused]] py::module_& m) {
+  inline void DefineSpecializations([[maybe_unused]] nb::module_& m) {
     auto m_experimental = m.def_submodule("experimental");
     auto m_prefab = m.def_submodule("prefab");
 
@@ -95,6 +93,7 @@ namespace mochi {
     DefDynamicArray<char>(m, "DynamicArrayChar");
     DefDynamicArray<mochi::Color>(m, "DynamicArrayColor");
     DefDynamicArray<mochi::Constraint*>(m, "DynamicArrayConstraint");
+    DefDynamicArray<mochi::prefab::ContactPairParamsOverrideEntry>(m_prefab, "DynamicArrayContactPairParamsOverrideEntry");
     DefDynamicArray<mochi::ContactPoint>(m, "DynamicArrayContactPoint");
     DefDynamicArray<mochi::experimental::ControlType>(m_experimental, "DynamicArrayControlType");
     DefDynamicArray<mochi::prefab::DeformableNodePositionConstraintPrefab>(m_prefab, "DynamicArrayDeformableNodePositionConstraintPrefab");
@@ -152,20 +151,19 @@ namespace mochi {
     DefSpan<mochi::TransformRT>(m, "SpanTransformRT");
   }
 
-  inline void DefineFinalize([[maybe_unused]] py::module_& m) {
-    py::implicitly_convertible<mochi::BlendingData, mochi::BlendingDataView>();
-    py::implicitly_convertible<mochi::SkinningData, mochi::SkinningDataView>();
-    py::implicitly_convertible<mochi::MeshData, mochi::MeshDataView>();
-    py::implicitly_convertible<mochi::GridSdfData, mochi::GridSdfDataView>();
-    py::implicitly_convertible<mochi::ModelData, mochi::ModelDataView>();
-    py::implicitly_convertible<mochi::PerElementSoftMaterialData, mochi::PerElementSoftMaterialDataView>();
+  inline void DefineFinalize([[maybe_unused]] nb::module_& m) {
+    nb::implicitly_convertible<mochi::BlendingData, mochi::BlendingDataView>();
+    nb::implicitly_convertible<mochi::SkinningData, mochi::SkinningDataView>();
+    nb::implicitly_convertible<mochi::MeshData, mochi::MeshDataView>();
+    nb::implicitly_convertible<mochi::GridSdfData, mochi::GridSdfDataView>();
+    nb::implicitly_convertible<mochi::ModelData, mochi::ModelDataView>();
+    nb::implicitly_convertible<mochi::PerElementSoftMaterialData, mochi::PerElementSoftMaterialDataView>();
   }
 
-  void DefineAll(py::module_& m) {
+  void DefineAll(nb::module_& m) {
     PybindRegistry registry;
     DefineNamespaces(m);
     DeclareMochiCore_MochiCore(m, registry);
-    DeclareMochiCore_MochiCoreExt(m, registry);
     DeclareMochiPhysics_MochiPhysicsHandle(m, registry);
     DeclareMochiPhysics_MochiPhysicsEnums(m, registry);
     DeclareMochiPhysics_MochiPhysicsStructs(m, registry);
@@ -179,10 +177,8 @@ namespace mochi {
     DeclareMochiPhysics_MochiPhysicsPrefab(m, registry);
     DeclareMochiPhysics_MochiPhysicsExperimental(m, registry);
     DeclareMochiPhysics_MochiDiffsim(m, registry);
-    DeclareMochiPhysics_MochiPhysicsExt(m, registry);
     DefineSpecializations(m);
     DefineMochiCore_MochiCore(m, registry);
-    DefineMochiCore_MochiCoreExt(m, registry);
     DefineMochiPhysics_MochiPhysicsHandle(m, registry);
     DefineMochiPhysics_MochiPhysicsEnums(m, registry);
     DefineMochiPhysics_MochiPhysicsStructs(m, registry);
@@ -196,7 +192,6 @@ namespace mochi {
     DefineMochiPhysics_MochiPhysicsPrefab(m, registry);
     DefineMochiPhysics_MochiPhysicsExperimental(m, registry);
     DefineMochiPhysics_MochiDiffsim(m, registry);
-    DefineMochiPhysics_MochiPhysicsExt(m, registry);
     DefineFinalize(m);
   }
 } // namespace mochi

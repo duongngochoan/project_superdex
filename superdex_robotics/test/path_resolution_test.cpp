@@ -807,7 +807,7 @@ TEST_F(PathResolutionTest, RoundTrip_AllSupportedInputForms) {
     auto const back = UnresolveBotPath(abs, base, kBotPathMaxParentDepth, ExpectOK{});
     EXPECT_EQ(std::string(back), "//other/asset.glb");
     // But the result is itself a valid ResolveBotPath input that resolves to the same place.
-    auto const reabs = ResolveBotPath(back.c_str(), base, kBotPathMaxParentDepth, ExpectOK{});
+    auto const reabs = ResolveBotPath(back, base, kBotPathMaxParentDepth, ExpectOK{});
     EXPECT_EQ(reabs, abs);
   }
 }
@@ -948,7 +948,7 @@ TEST_F(PathResolutionTest, MakeParamsPath_InlineJsonIsLeftUntouched) {
   std::string const whitespaceLeadingJson = "  \n{\"a\": 1}";
 
   for (std::string const& original : {objectJson, arrayJson, whitespaceLeadingJson}) {
-    DynamicString params{original.c_str()};
+    DynamicString params{original};
     MakeParamsPathAbsolute(params, base, ExpectOK{});
     EXPECT_EQ(std::string(params), original);
     MakeParamsPathRelative(params, base, ExpectOK{});
@@ -968,7 +968,7 @@ TEST_F(PathResolutionTest, MakeParamsPath_FilePathRoundTrips) {
   TouchFile(sub / "params" / "ctrl.superdex_sensor");
 
   std::string const original = "params/ctrl.superdex_sensor";
-  DynamicString params{original.c_str()};
+  DynamicString params{original};
 
   MakeParamsPathAbsolute(params, base, ExpectOK{});
   EXPECT_TRUE(fs::path(params.c_str()).is_absolute());

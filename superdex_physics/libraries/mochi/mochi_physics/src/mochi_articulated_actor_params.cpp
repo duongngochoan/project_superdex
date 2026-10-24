@@ -334,8 +334,27 @@ static void ValidateLink(int index, ArticulatedLinkParams const& link, Error& er
   }
   MOCHI_IMPL_VALIDATE_TRANSFORM_RT(link.parentJointFromLink, error, "Parent-joint-from-link");
 
-  // The following fields are ignored for dummy links (links with no shape)
-  if (link.shape.IsValid()) {
+  // Links with no shape have no volume. They are massless unless given a positive mass together
+  // with a center of mass and moment of inertia. Other mass properties are ignored (a partial
+  // explicit inertia with a warning), so removing a link's shape does not invalidate it.
+  if (!link.shape.IsValid()) {
+    if (link.mass.has_value() && link.centerOfMass.has_value() &&
+        link.momentOfInertia.has_value()) {
+      MOCHI_ERROR_IF(
+          !IsFinite(*link.mass) || *link.mass < 0_r || !IsFinite(*link.centerOfMass) ||
+              !IsFinite(*link.momentOfInertia),
+          error,
+          "Link mass must be non-negative and finite, and center-of-mass and moment-of-inertia "
+          "must be finite.");
+    } else if (
+        (link.mass.has_value() && *link.mass != 0_r) || link.centerOfMass.has_value() ||
+        link.momentOfInertia.has_value()) {
+      MOCHI_LOG_WARNING(
+          "Link \"%s\" has no shape and only part of an explicit inertia (mass, center of mass, "
+          "and moment of inertia), so it is massless.",
+          link.name.c_str());
+    }
+  } else {
     // Density
     if (link.density.has_value()) {
       MOCHI_ERROR_IF(

@@ -37,112 +37,52 @@
 
 using namespace mochi;
 
-template <ContactType kContactType>
+template <bool kIsSync>
 void mochi::AddMissingStageStartCollisions(
-    CActiveCollisions<kContactType, TimeStep::StageStart> const& stageStartCollisions,
-    CActiveCollisions<kContactType, TimeStep::Current>& outCurrentCollisions) {
-  // outCurrentCollisions is laid out as consecutive blocks of numPartitions entries per
-  // colliderEntity (see CActiveCollisions::SetUp). We must preserve this invariant: when a
-  // collider is in stageStartCollisions but missing from outCurrentCollisions, add ALL of
-  // its partitions, including ones whose sampleIndices are empty. Otherwise SetUp on the
-  // next step would observe size() % numPartitions != 0.
-
-  // First pass: identify [first, last] (inclusive) ranges in stageStartCollisions that
-  // belong to colliders missing from outCurrentCollisions and that have at least one
-  // partition with contacts.
-  // Each std::pair<int, int> is 8 bytes; 1024 bytes covers ~128 missing colliders before
-  // the FILO falls back to heap pages.
-  MOCHI_FILO_STACK_ALLOCATOR(filoAllocator, 128 * sizeof(std::pair<int, int>));
-  DynamicArray<std::pair<int, int>> missingRanges(&filoAllocator);
-  int totalMissing = 0;
-
-  int s = 0;
-  int c = 0;
-  while (s < isize(stageStartCollisions)) {
-    auto const colliderEntity = stageStartCollisions[s].colliderEntity;
-
-    // Find the end of this collider's block in stageStartCollisions.
-    int sEnd = s + 1;
-    while (sEnd < isize(stageStartCollisions) &&
-           stageStartCollisions[sEnd].colliderEntity == colliderEntity) {
-      ++sEnd;
+    CActiveCollisions<kIsSync, TimeStep::StageStart> const& stageStartCollisions,
+    CActiveCollisions<kIsSync, TimeStep::Current>& outCurrentCollisions) {
+  // Both inputs are sorted. Activation only appends, so entries [0, numCurrent) keep their position
+  // and order during the merge traversal.
+  int const numCurrent = isize(outCurrentCollisions);
+  int currentIdx = 0;
+  for (auto const& stageStartCollision : stageStartCollisions) {
+    auto const& stageStartResult = stageStartCollision.collisionResult;
+    if (stageStartResult.sampleIndices.empty()) {
+      continue;
     }
 
-    // Advance c past entries with smaller colliderEntity in outCurrentCollisions.
-    while (c < isize(outCurrentCollisions) &&
-           outCurrentCollisions[c].colliderEntity < colliderEntity) {
-      ++c;
+    auto const key = ColliderPartitionLess::GetKey(stageStartCollision);
+    while (currentIdx < numCurrent &&
+           ColliderPartitionLess::GetKey(outCurrentCollisions[currentIdx]) < key) {
+      ++currentIdx;
     }
-
-    // If colliderEntity is present, skip its block in outCurrentCollisions.
-    bool inCurrent = false;
-    while (c < isize(outCurrentCollisions) &&
-           outCurrentCollisions[c].colliderEntity == colliderEntity) {
-      inCurrent = true;
-      ++c;
-    }
-    if (!inCurrent) {
-      // Missing collider. Add the block iff at least one partition has contacts.
-      bool anyNonEmpty = false;
-      for (int i = s; i < sEnd; ++i) {
-        if (!stageStartCollisions[i].collisionResult.sampleIndices.empty()) {
-          anyNonEmpty = true;
-          break;
-        }
-      }
-      if (anyNonEmpty) {
-        missingRanges.emplace_back(s, sEnd - 1);
-        totalMissing += sEnd - s;
-      }
-    }
-    s = sEnd;
-  }
-
-  if (totalMissing == 0) {
-    return;
-  }
-
-  // Second pass: merge missing blocks into current, back to front. Because totalMissing
-  // entries are appended to the end first, we can shift in place without a temp buffer.
-  int const originalSize = isize(outCurrentCollisions);
-  int const newSize = originalSize + totalMissing;
-  outCurrentCollisions.resize(newSize);
-
-  c = originalSize - 1;
-  int m = newSize - 1;
-  for (int r = isize(missingRanges) - 1; r >= 0; --r) {
-    auto const [rangeBegin, rangeEnd] = missingRanges[r];
-    auto const colliderEntity = stageStartCollisions[rangeBegin].colliderEntity;
-
-    // Shift current entries with greater colliderEntity to the right of the new block.
-    while (c >= 0 && outCurrentCollisions[c].colliderEntity > colliderEntity) {
-      outCurrentCollisions[m] = outCurrentCollisions[c];
-      --c;
-      --m;
-    }
-
-    // Insert all partitions of this collider, preserving their order.
-    for (int i = rangeEnd; i >= rangeBegin; --i) {
-      outCurrentCollisions[m].colliderEntity = colliderEntity;
-      outCurrentCollisions[m].collisionResult = {};
-      outCurrentCollisions[m].collisionResult.collidingPartitionId =
-          stageStartCollisions[i].collisionResult.collidingPartitionId;
-      outCurrentCollisions[m].collisionResult.isSdfGradUnitary =
-          stageStartCollisions[i].collisionResult.isSdfGradUnitary;
-      --m;
+    if (currentIdx == numCurrent ||
+        ColliderPartitionLess::GetKey(outCurrentCollisions[currentIdx]) != key) {
+      // Preserve metadata needed when the contacts are copied later.
+      outCurrentCollisions
+          .ActivatePartitionResult(
+              stageStartCollision.colliderEntity, stageStartResult.collidingPartitionId)
+          .isSdfGradUnitary = stageStartResult.isSdfGradUnitary;
     }
   }
-  MOCHI_ASSERT_VERBOSE(c == m, "Internal error: merge index mismatch");
+
+  if (isize(outCurrentCollisions) != numCurrent) {
+    outCurrentCollisions.FinalizeActiveCollisions();
+  }
+  MOCHI_ASSERT_VERBOSE(
+      std::is_sorted(
+          outCurrentCollisions.begin(), outCurrentCollisions.end(), ColliderPartitionLess{}),
+      "Expected sorted active collisions.");
 }
 
 // Explicit template instantiations
-template void mochi::AddMissingStageStartCollisions<ContactType::Async>(
-    CActiveCollisions<ContactType::Async, TimeStep::StageStart> const& stageStartCollisions,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& outCurrentCollisions);
+template void mochi::AddMissingStageStartCollisions</*kIsSync*/ false>(
+    CActiveCollisions</*kIsSync*/ false, TimeStep::StageStart> const& stageStartCollisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& outCurrentCollisions);
 
-template void mochi::AddMissingStageStartCollisions<ContactType::Sync>(
-    CActiveCollisions<ContactType::Sync, TimeStep::StageStart> const& stageStartCollisions,
-    CActiveCollisions<ContactType::Sync, TimeStep::Current>& outCurrentCollisions);
+template void mochi::AddMissingStageStartCollisions</*kIsSync*/ true>(
+    CActiveCollisions</*kIsSync*/ true, TimeStep::StageStart> const& stageStartCollisions,
+    CActiveCollisions</*kIsSync*/ true, TimeStep::Current>& outCurrentCollisions);
 
 static void TransformToColliderSpaceMapped(
     ContactDetectionResult const& stageStart,
@@ -201,7 +141,7 @@ static void TransformToColliderSpaceRigid(
   }
 }
 
-template <ContactType kContactType>
+template <bool kIsSync>
 static void AddPerCollisionMissingStageStartContacts(
     entt::registry const& reg,
     entt::entity collider,
@@ -210,7 +150,7 @@ static void AddPerCollisionMissingStageStartContacts(
     bool addPadding,
     ContactDetectionResult const& stageStart,
     ContactDetectionResult& current,
-    CContactCorrespondence<kContactType>& correspondence) {
+    CContactCorrespondence<kIsSync>& correspondence) {
   // Identify stage-start contacts missing in current using correspondence lookup.
   Span<ContactCorrespondence::Pair const> missingSamples = correspondence.GetMissingSamples(
       stageStart.sampleIndices,
@@ -316,21 +256,25 @@ static void AddPerCollisionMissingStageStartContacts(
   }
 }
 
-template <ContactType kContactType>
+template <bool kIsSync>
 static void AddMissingStageStartContacts(
     entt::registry const& reg,
     CContactSamples<TimeStep::Current> const& samples,
     TransformRT const& worldFromColliding,
     bool addPadding,
-    CActiveCollisions<kContactType, TimeStep::StageStart> const& stageStartCollisions,
-    CActiveCollisions<kContactType, TimeStep::Current>& outCurrentCollisions,
-    CContactCorrespondence<kContactType>& correspondence) {
+    CActiveCollisions<kIsSync, TimeStep::StageStart> const& stageStartCollisions,
+    CActiveCollisions<kIsSync, TimeStep::Current>& outCurrentCollisions,
+    CContactCorrespondence<kIsSync>& correspondence) {
   int s = 0;
   for (int c = 0; c < isize(outCurrentCollisions); ++c) {
-    while (s < isize(stageStartCollisions) && stageStartCollisions[s] < outCurrentCollisions[c]) {
+    while (s < isize(stageStartCollisions) &&
+           ColliderPartitionLess::GetKey(stageStartCollisions[s]) <
+               ColliderPartitionLess::GetKey(outCurrentCollisions[c])) {
       ++s;
     }
-    if (s < isize(stageStartCollisions) && stageStartCollisions[s] == outCurrentCollisions[c]) {
+    if (s < isize(stageStartCollisions) &&
+        ColliderPartitionLess::GetKey(stageStartCollisions[s]) ==
+            ColliderPartitionLess::GetKey(outCurrentCollisions[c])) {
       AddPerCollisionMissingStageStartContacts(
           reg,
           outCurrentCollisions[c].colliderEntity,
@@ -345,15 +289,15 @@ static void AddMissingStageStartContacts(
   }
 }
 
-template <ContactType kContactType>
+template <bool kIsSync>
 void mochi::AddStageStartCollisionDetection(
     entt::registry const& reg,
     entt::entity e,
     CColliderInfo const& colliderInfo,
     CContactSamples<TimeStep::Current> const& samples,
-    CActiveCollisions<kContactType, TimeStep::StageStart> const& stageStartCollisions,
-    CActiveCollisions<kContactType, TimeStep::Current>& outCurrentCollisions,
-    CContactCorrespondence<kContactType>& correspondence) {
+    CActiveCollisions<kIsSync, TimeStep::StageStart> const& stageStartCollisions,
+    CActiveCollisions<kIsSync, TimeStep::Current>& outCurrentCollisions,
+    CContactCorrespondence<kIsSync>& correspondence) {
   bool const addPadding = ShouldAddPenaltyPadding(colliderInfo.type);
   auto const& worldFromColliding = GetRootTransform<TimeStep::Current>(reg, e);
   AddMissingStageStartCollisions(stageStartCollisions, outCurrentCollisions);
@@ -368,20 +312,20 @@ void mochi::AddStageStartCollisionDetection(
 }
 
 // Explicit template instantiations
-template void mochi::AddStageStartCollisionDetection<ContactType::Async>(
+template void mochi::AddStageStartCollisionDetection</*kIsSync*/ false>(
     entt::registry const& reg,
     entt::entity e,
     CColliderInfo const& colliderInfo,
     CContactSamples<TimeStep::Current> const& samples,
-    CActiveCollisions<ContactType::Async, TimeStep::StageStart> const& stageStartCollisions,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& outCurrentCollisions,
-    CContactCorrespondence<ContactType::Async>& correspondence);
+    CActiveCollisions</*kIsSync*/ false, TimeStep::StageStart> const& stageStartCollisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& outCurrentCollisions,
+    CContactCorrespondence</*kIsSync*/ false>& correspondence);
 
-template void mochi::AddStageStartCollisionDetection<ContactType::Sync>(
+template void mochi::AddStageStartCollisionDetection</*kIsSync*/ true>(
     entt::registry const& reg,
     entt::entity e,
     CColliderInfo const& colliderInfo,
     CContactSamples<TimeStep::Current> const& samples,
-    CActiveCollisions<ContactType::Sync, TimeStep::StageStart> const& stageStartCollisions,
-    CActiveCollisions<ContactType::Sync, TimeStep::Current>& outCurrentCollisions,
-    CContactCorrespondence<ContactType::Sync>& correspondence);
+    CActiveCollisions</*kIsSync*/ true, TimeStep::StageStart> const& stageStartCollisions,
+    CActiveCollisions</*kIsSync*/ true, TimeStep::Current>& outCurrentCollisions,
+    CContactCorrespondence</*kIsSync*/ true>& correspondence);

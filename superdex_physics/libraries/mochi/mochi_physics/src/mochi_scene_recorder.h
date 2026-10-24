@@ -23,6 +23,7 @@
 #include <mochi_core/linear_algebra/matrix.h>
 #include <mochi_core/utils/defer.h>
 #include <mochi_core/utils/group_rw.h>
+#include <mochi_physics/mochi_physics_experimental.h>
 
 #include <cstddef>
 #include <map>
@@ -34,6 +35,8 @@
 #include <vector>
 
 namespace mochi {
+
+class SceneImpl;
 
 /**********************************************************************************************
   SceneRecorder captures data from a mochi::Scene and records it to disk using a GroupWriter
@@ -50,8 +53,8 @@ class SceneRecorder final {
   // Construct a SceneRecorder. It will take ownership of the provided RecordWriter.
   SceneRecorder(
       std::unique_ptr<GroupWriter> writer,
-      entt::registry& registry,
-      RecordingParams const& params = {});
+      SceneImpl& scene,
+      experimental::RecordingParams const& params = {});
 
   // Call before a simulation step
   void OnStepBegin(double timeStepSec, Real3 stepGravity);
@@ -80,6 +83,7 @@ class SceneRecorder final {
   void OnCreateActor(entt::registry& reg, entt::entity e);
   void OnDestroyActor(entt::registry& reg, entt::entity e);
 
+  SceneImpl& _scene;
   entt::registry& _registry;
   std::unique_ptr<GroupWriter> _writer;
   std::unique_ptr<GroupWriter::ScopeGuard> _eventsGroup;
@@ -91,7 +95,7 @@ class SceneRecorder final {
   Real3 _gravity = {};
   uint64_t _eventCounter = 0;
   bool _hasReportedError = false;
-  RecordingParams _params;
+  experimental::RecordingParams _params;
   std::vector<std::pair<entt::entity, QueryHandle>> _queries;
 };
 
@@ -136,17 +140,17 @@ struct CRecordingData : public NoCopy {
   };
 
   std::map<std::string, Entry> entries;
-  RecordingParams params = {};
+  experimental::RecordingParams params = {};
 
   CRecordingData() = default;
-  inline CRecordingData(RecordingParams params) : params(params) {}
+  inline CRecordingData(experimental::RecordingParams params) : params(params) {}
 };
 
 // This tag on the global ctx when recording is active.
 struct TagSceneRecordingEnabled {};
 
 // Global context component stores the current recording parameters
-using CRecordingParams = RecordingParams;
+using CRecordingParams = experimental::RecordingParams;
 
 /**********************************************************************************************
 Helper Functions
@@ -193,78 +197,6 @@ void RecordDataset(
     CRecordingData& outData) {
   int dims[] = {view.Rows()};
   RecordDataset(name, MakeSpan(dims), view.GetConstSpan(), outData);
-}
-
-template <typename Scalar>
-void RecordEmptySparseMatrixCSR(
-    std::string_view name,
-    int numRows,
-    int numCols,
-    CRecordingData& outData) {
-  std::string dsName{name};
-
-  // H5 does not allow empty datasets. Represent empty CSR matrices with a dummy value and
-  // numNonZeros=0 metadata.
-  auto data = static_cast<Scalar>(0);
-  auto const* bytesBegin = reinterpret_cast<std::byte const*>(&data);
-  std::byte const* bytesEnd = bytesBegin + sizeof(Scalar);
-
-  // Add dataset
-  auto& entry = outData.entries[dsName];
-  entry.isAttribute = false;
-  entry.type = CRecordingData::TypeOf<Scalar>();
-  entry.dims = {1};
-  entry.data.assign(bytesBegin, bytesEnd);
-
-  // Add attributes to the dataset (denoted by a forward slash in the name)
-  int numNonZeros = 0;
-  RecordAttribute(dsName + "/numRows", Span<int const>{&numRows, 1}, outData);
-  RecordAttribute(dsName + "/numCols", Span<int const>{&numCols, 1}, outData);
-  RecordAttribute(dsName + "/numNonZeros", Span<int const>{&numNonZeros, 1}, outData);
-}
-
-// Add a dataset to CRecordingData using a sparse matrix in CSR format. The non-zero values will be
-// stored in the dataset itself. The dimensions, offsets, and indices will be stored as attributes
-// on the dataset.
-template <typename Scalar>
-void RecordDatasetSparseMatrixCSR(
-    std::string_view name,
-    int numRows,
-    int numCols,
-    Span<int const> rowOffsets,
-    Span<int const> colIndices,
-    Span<Scalar const> nonZeroValues,
-    CRecordingData& outData) {
-  if (isize(nonZeroValues) == 0) {
-    RecordEmptySparseMatrixCSR<Scalar>(name, numRows, numCols, outData);
-  } else {
-    MOCHI_ASSERT(isize(nonZeroValues) > 0, "Empty dataset not allowed");
-    MOCHI_ASSERT(isize(rowOffsets) == (numRows + 1), "Expected offsets for each row plus one");
-    MOCHI_ASSERT(isize(colIndices) == isize(nonZeroValues), "Expected 1 col index per value");
-    int const numNonZeros = isize(nonZeroValues);
-    auto const* bytesBegin = reinterpret_cast<std::byte const*>(&nonZeroValues[0]);
-    std::byte const* bytesEnd = bytesBegin + numNonZeros * sizeof(Scalar);
-    std::string dsName{name};
-
-    // Add dataset
-    auto& entry = outData.entries[dsName];
-    entry.isAttribute = false;
-    entry.type = CRecordingData::TypeOf<Scalar>();
-    entry.dims.assign(&numNonZeros, &numNonZeros + 1);
-    entry.data.assign(bytesBegin, bytesEnd);
-
-    // Add attributes to the dataset (denoted by a forward slash in the name)
-    RecordAttribute(dsName + "/numRows", Span<int const>{&numRows, 1}, outData);
-    RecordAttribute(dsName + "/numCols", Span<int const>{&numCols, 1}, outData);
-    RecordAttribute(dsName + "/numNonZeros", Span<int const>{&numNonZeros, 1}, outData);
-
-    // The row offsets and column indices are potentially too large for attributes in HDF5 format
-    // (64Kb limit), so we save them as separate datasets.
-    int rowOffsetsDims[1] = {numRows + 1};
-    int colIndicesDims[1] = {numNonZeros};
-    RecordDataset(dsName + "_rowOffsets", rowOffsetsDims, rowOffsets, outData);
-    RecordDataset(dsName + "_colIndices", colIndicesDims, colIndices, outData);
-  }
 }
 
 // Writes a transform to recording data by writing the translation and rotations separately

@@ -21,7 +21,7 @@
 namespace mochi::ecs {
 
 namespace detail {
-MOCHI_API void RegisterComponentImpl(
+void RegisterComponentImpl(
     entt::registry& reg,
     SReflect::TypeInfo const* reflectionInfo,
     entt::type_info const& enttInfo,
@@ -31,7 +31,17 @@ MOCHI_API void RegisterComponentImpl(
     std::function<void*(entt::registry::base_type& storage)>&& compactAndGetRawStorage,
     std::function<void*(entt::registry& reg)>&& tryCtx);
 
+void DetectUnregisteredComponentImpl(
+    entt::registry const& reg,
+    entt::type_info const& enttInfo,
+    std::type_info const& stdInfo);
+
 } // namespace detail
+
+template <class ComponentT>
+void DetectUnregisteredComponent(entt::registry const& reg) {
+  detail::DetectUnregisteredComponentImpl(reg, entt::type_id<ComponentT>(), typeid(ComponentT));
+}
 
 template <class ComponentT>
 void RegisterComponent(entt::registry& reg) {

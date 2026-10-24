@@ -23,6 +23,7 @@
 #include <mochi_core/linear_algebra/krylov/tools/tensor_traits.h>
 #include <mochi_core/linear_algebra/matrix.h>
 #include <mochi_core/linear_algebra/utils/matrix_concepts.h>
+#include <mochi_core/mochi_config.h>
 #include <mochi_core/solvers/island_operators.h>
 #include <mochi_core/solvers/krylov_solver.h>
 #include <mochi_core/utils/math_utils.h>
@@ -40,6 +41,8 @@ namespace parallel_pcg {
 template <typename MatType>
 int GetNumParallelWorkers(MatType const& A) {
   // Empirically chosen values: ~100k FLOPs per worker for dense matrices, ~25k otherwise.
+  // TODO(T290274539): Revisit this threshold. When it selects only two or three workers,
+  // ParallelPCG's synchronization overhead can exceed the work saved by parallel execution.
   int const numTargetFlopsPerWorker = IsMatrix<MatType> ? 100000 : 25000;
   int const numTargetWorkers = Min(FlopsPerApply(A) / numTargetFlopsPerWorker, GetNumRows(A));
   return Min(numTargetWorkers, TaskScheduler::StaticGetNumOtherThreads() + 1);
@@ -63,7 +66,7 @@ int GetNumParallelWorkers(MatType const& A) {
  * @param[in] b The right-hand side vector of \f$ A x = b\f$.
  * @param[in,out] x Vector containing the initial guess at input and the solution at output.
  * @param[in] prec The preconditioner.
- * @param[in] maxIter Maximum number of iterations.
+ * @param[in] maxIter Maximum number of iterations. Must be positive.
  * @param[in,out] statusCheck A functor called every iteration to check the stop criteria. The norm
  * used in the stop criteria is determined by this object.
  * @param[in] abortIfNotSpd Boolean to abort the solve if the matrix is detected not to be symmetric
@@ -71,14 +74,15 @@ int GetNumParallelWorkers(MatType const& A) {
  * @param[in] verbosity Verbosity level for logging output.
  * @param[in] usePolakRibiere Boolean to use the Polak-Ribiere formula for beta (if true) or the
  * Fletcher-Reeves formula (if false). Default is true.
+ * @param[in] initialGuessHint Indicates whether @p x is known to be zero. The zero hint skips the
+ * initial matrix-vector product and requires @p x to be exactly zero.
  * @param[in] dot The dot operator.
  * @param[in] vectorFactory Factory to create vectors of a given type.
  *
- * @return Linear solver status. Contains the number of iterations and the achieved absolute and
- * relative residuals. "maxIter+1" is used to indicate that the maximum number of iterations was
- * reached without convergence.
+ * @return Linear solver status. Contains the convergence status, number of iterations, and achieved
+ * absolute and relative residuals.
  *
- * @note The preconditioner must implement a 'ConcurrentSolve' method.
+ * @note The preconditioner must implement @ref PrepareConcurrentSolve and @ref ConcurrentSolve.
  * @note The input matrix must be a supported matrix or linear operator type. Matrix application
  * functors are NOT supported.
  * @note CUDA matrices are not supported.
@@ -91,6 +95,9 @@ int GetNumParallelWorkers(MatType const& A) {
  * - Assess variations of PCG that require fewer synchronization points
  *   (https://www.sciencedirect.com/science/article/abs/pii/S0167819113000719).
  * - Assess using only a subset of the workers to perform BLAS1 operations.
+ * - If the @ref StatusResidualPreconditionerInduced specialization using a dot other than
+ *   @ref UsualDot becomes performance-sensitive, compute the status and recurrence dot products in
+ *   one collective reduction using the criterion's and solver's respective dot instances.
  */
 template <
     typename MatType,
@@ -110,6 +117,7 @@ LinearSolverStatus ParallelPCG(
     bool abortIfNotSpd = false,
     VerbosityLevel verbosity = VerbosityLevel::Warning,
     bool usePolakRibiere = true,
+    InitialGuessHint initialGuessHint = InitialGuessHint::Unknown,
     Dot dot = {},
     VectorFactory vectorFactory = {}) {
   MOCHI_PROFILE_SCOPE();
@@ -124,19 +132,26 @@ LinearSolverStatus ParallelPCG(
   constexpr bool kNeedPrecResidual =
       std::is_same_v<StopCriterion, StatusPreconditionedResidualL2<Dot, NonConstScalar>> ||
       std::is_same_v<StopCriterion, StatusResidualPreconditionerInduced<Dot, NonConstScalar>>;
-  constexpr bool kCheckStatusComputesRTz =
+  // The criterion owns a separate Dot. Reusing its rTz or replacing its Dot with the solver's is
+  // safe only when both instances produce identical results. UsualDot guarantees this.
+  constexpr bool kCanReuseCriterionRTz = std::is_same_v<Dot, UsualDot> &&
       std::is_same_v<StopCriterion, StatusResidualPreconditionerInduced<Dot, NonConstScalar>>;
+  constexpr bool kPairStatusAndRTz = std::is_same_v<Dot, UsualDot> &&
+      std::is_same_v<StopCriterion, StatusPreconditionedResidualL2<Dot, NonConstScalar>>;
+  MOCHI_ASSERT_VERBOSE(maxIter > 0, "Maximum number of iterations must be positive.");
+  MOCHI_ASSERT_VERBOSE(
+      initialGuessHint != InitialGuessHint::Zero || dot(x, x) == 0,
+      "InitialGuessHint::Zero requires an exactly zero initial guess.");
 
   auto* scheduler = TaskScheduler::TryGet();
   auto const numTargetWorkers = parallel_pcg::GetNumParallelWorkers(A);
-  std::atomic<bool> success = (scheduler && numTargetWorkers > 1); // At least 2 workers
+  std::atomic<bool> success = scheduler && numTargetWorkers > 1; // At least 2 workers
   LinearSolverStatus solverStatus = {};
   if (success) {
     auto r = vectorFactory.GetCopy(b);
     auto Ap = vectorFactory.GetSameAs(b);
     auto p = vectorFactory.GetSameAs(x);
     auto z = vectorFactory.GetSameAs(x);
-    statusCheck.SetScaling(r, prec, z);
 
     ParallelBarrier barrier(numTargetWorkers);
     ParallelDot<NonConstScalar> parDot(numTargetWorkers);
@@ -147,7 +162,8 @@ LinearSolverStatus ParallelPCG(
     // WARNING: Each worker must own a COPY (not a reference) of the lambda.
     TaskSemaphore ready1(numTargetWorkers), ready2(numTargetWorkers);
     TimePoint const timeoutTime = Timer::Now() +
-        /* Empirically chosen wait time */ TimeSpanFromSeconds(50e-6 + numTargetWorkers * 5e-6);
+        /* Empirically chosen wait time */
+        TimeSpanFromSeconds((MOCHI_DEBUG ? 5e-3 : 50e-6) + numTargetWorkers * 5e-6);
     auto areAllWorkersReady = [/* By VALUE */ ready1,
                                /* By VALUE */ ready2,
                                numTargetWorkers](
@@ -190,7 +206,9 @@ LinearSolverStatus ParallelPCG(
       // Notes:
       // - The task is executed by either none or all of the workers. If it's executed, the workers
       //   do NOT yield until the task is completed.
-      // - Workers write exclusively to their range of rows. Writing outside their range is illegal.
+      // - Workers write within their matrix-vector-product row range unless a preconditioner uses a
+      //   different prepared distribution. Such a preconditioner must synchronize cross-worker
+      //   writes before returning.
       // - Workers may read from rows outside their range, e.g. in matrix-vector products and
       //   preconditioner solves. Barriers are used in those cases to avoid race conditions.
       // - The master worker is defined as the worker with workerIdx = 0.
@@ -198,6 +216,10 @@ LinearSolverStatus ParallelPCG(
       //   workers to modify it.
       MOCHI_PROFILE_SCOPE_N("PcgWorkerTask");
       bool const isMaster = (workerIdx == 0);
+
+      // Copy the status check before workers wait for one another. After that wait, the master may
+      // modify statusCheck.
+      auto workerStatusCheckCopy = statusCheck;
       if (!areAllWorkersReady(timeoutTime, numWorkers, isMaster)) {
         success = false;
         return;
@@ -210,11 +232,18 @@ LinearSolverStatus ParallelPCG(
       MOCHI_ASSERT_VERBOSE(
           numRows >= 0 && rowBegin >= 0 && rowEnd <= A.Rows(), "Invalid row ranges.");
 
-      auto workerStatusCheck = statusCheck; // Worker copy to prevent race conditions.
+      auto& workerStatusCheck = isMaster ? statusCheck : workerStatusCheckCopy;
       auto workerBarrier = barrier; // Worker copy. The copy is mandatory for 'ParallelBarrier'.
       auto workerParDot = parDot; // Worker copy. The copy is mandatory for 'ParallelDot'.
       workerBarrier.ReduceNumWorkers(numWorkers, isMaster);
       workerParDot.ReduceNumWorkers(numWorkers, isMaster);
+
+      if (isMaster) {
+        prec.PrepareConcurrentSolve(MakeConstSpan(workerRowRanges));
+        // Before the first ConcurrentSolve, every worker reaches either the initial status-check
+        // dot or the explicit barrier below. Both wait for all workers, ensuring they all see the
+        // state prepared by the master.
+      }
 
       ParallelWorkerInfo workerInfo{workerIdx, numWorkers, rowBegin, rowEnd, workerBarrier};
 
@@ -226,6 +255,7 @@ LinearSolverStatus ParallelPCG(
 
       IterationStatus iterStatus = {};
       NonConstScalar beta = 0;
+      NonConstScalar rTz = 0;
       int iter = 0;
 
       auto computeBetaAndPrecResidual = [&]() {
@@ -233,22 +263,49 @@ LinearSolverStatus ParallelPCG(
           beta = workerParDot.Dot(dot, r, z, rowBegin, rowEnd, workerIdx); // r_i^T z_{i-1}
         } else {
           beta = 0;
-          workerBarrier.Wait(); // TODO: Not needed for some preconditioners.
+          if constexpr (kNeedPrecResidual) {
+            // TODO: Avoid this barrier for preconditioners with worker-local input reads. The first
+            // application must still synchronize after PrepareConcurrentSolve.
+            workerBarrier.Wait();
+          }
         }
         prec.ConcurrentSolve(r, z, workerInfo); // z_{i} = Prec^{-1} r_{i}
-        // Post-solve barrier not needed. The next 'Dot' serves as implicit barrier and prevents
-        // 'r' from being modified before the solve is complete.
+        // ConcurrentSolve completes and makes visible any writes to z rows owned by another
+        // worker before that row owner returns from ConcurrentSolve. The next parallel dot cannot
+        // complete until every worker has returned from ConcurrentSolve, so no worker can update
+        // r while another preconditioner worker may still be reading it. Therefore, no additional
+        // post-solve barrier is needed here.
       };
 
-      // Pre- and post-ApplyToRange barriers not needed: 'x' is up-to-date and the next 'Dot'
-      // prevents 'x' from being modified before the product is complete.
-      ApplyToRange(A, x, Ap, rowBegin, rowEnd);
-      rWorker -= ApWorker;
+      auto checkPreconditionedStatus = [&]() {
+        if constexpr (kPairStatusAndRTz) {
+          auto const [zNormSqr, rTzNew] =
+              workerParDot.DotPair(dot, z, z, dot, r, z, rowBegin, rowEnd, workerIdx);
+          rTz = rTzNew;
+          return workerStatusCheck.ParallelCheckStatus(iter, zNormSqr);
+        } else {
+          return workerStatusCheck.ParallelCheckStatus(
+              iter, r, z, {}, {}, rowBegin, rowEnd, workerIdx, workerParDot);
+        }
+      };
 
       if constexpr (kNeedPrecResidual) {
-        computeBetaAndPrecResidual();
-        iterStatus = workerStatusCheck.ParallelCheckStatus(
-            iter, r, z, {}, {}, rowBegin, rowEnd, workerIdx, workerParDot);
+        computeBetaAndPrecResidual(); // z = Prec^{-1} b
+      }
+      workerStatusCheck.SetConcurrentScaling(r, z, rowBegin, rowEnd, workerIdx, workerParDot);
+
+      if (initialGuessHint != InitialGuessHint::Zero) {
+        // Pre- and post-ApplyToRange barriers not needed: 'x' is up-to-date and the next 'Dot'
+        // prevents 'x' from being modified before the product is complete.
+        ApplyToRange(A, x, Ap, rowBegin, rowEnd);
+        rWorker -= ApWorker;
+        if constexpr (kNeedPrecResidual) {
+          computeBetaAndPrecResidual();
+        }
+      }
+
+      if constexpr (kNeedPrecResidual) {
+        iterStatus = checkPreconditionedStatus();
       } else {
         iterStatus = workerStatusCheck.ParallelCheckStatus(
             iter, r, {}, {}, {}, rowBegin, rowEnd, workerIdx, workerParDot);
@@ -262,16 +319,16 @@ LinearSolverStatus ParallelPCG(
               .numIterDone = iter,
               .residualNorm = workerStatusCheck.GetLatestResidualNorm(),
               .relativeResidualNorm = workerStatusCheck.GetLatestRelativeResidualNorm(),
-              .converged = IsConverged(iterStatus)};
+              .convergence = IsConverged(iterStatus) ? LinearSolverConvergenceStatus::Converged
+                                                     : LinearSolverConvergenceStatus::Diverged};
         }
         return;
       }
 
       pWorker = zWorker;
-      NonConstScalar rTz{}; // r_0^T z_0
-      if constexpr (kCheckStatusComputesRTz) {
+      if constexpr (kCanReuseCriterionRTz) {
         rTz = workerStatusCheck.GetLatestResidualNormSqr();
-      } else {
+      } else if constexpr (!kPairStatusAndRTz) {
         rTz = workerParDot.Dot(dot, r, z, rowBegin, rowEnd, workerIdx);
       }
       for (iter = 1; iter <= maxIter; ++iter) {
@@ -283,36 +340,35 @@ LinearSolverStatus ParallelPCG(
         ApplyToRange(A, p, Ap, rowBegin, rowEnd);
 
         auto const pTAp = workerParDot.Dot(dot, p, Ap, rowBegin, rowEnd, workerIdx);
-        if (pTAp <= 0)
-          MOCHI_UNLIKELY {
-            if (!abortIfNotSpd) {
-              if (isMaster && verbosity >= VerbosityLevel::Warning) {
-                MOCHI_LOG_WARNING(
-                    "Matrix does not seem to be SPD at iteration %d. A-dot product: %e.",
-                    iter,
-                    static_cast<double>(pTAp));
-              }
-            } else {
-              if (isMaster) {
-                solverStatus = {
-                    .numIterDone = iter,
-                    .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
-                    .relativeResidualNorm =
-                        static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-                    .converged = false};
-              }
-              return;
+        if (pTAp <= 0) MOCHI_UNLIKELY {
+          if (!abortIfNotSpd) {
+            if (isMaster && verbosity >= VerbosityLevel::Warning) {
+              MOCHI_LOG_WARNING(
+                  "Matrix does not seem to be SPD at iteration %d. A-dot product: %e.",
+                  iter,
+                  static_cast<double>(pTAp));
             }
+          } else {
+            if (isMaster) {
+              solverStatus = {
+                  .numIterDone = iter,
+                  .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
+                  .relativeResidualNorm =
+                      static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
+                  .convergence = LinearSolverConvergenceStatus::Diverged};
+            }
+            return;
           }
+        }
 
         auto const alpha = rTz / pTAp;
         xWorker += alpha * pWorker; // x_i = x_{i-1} + alpha_i p_i
         rWorker -= alpha * ApWorker; // r_i = r_{i-1} - alpha_i A * p_i
+        auto const rTzPrev = rTz; // The status check may update rTz.
 
         if constexpr (kNeedPrecResidual) {
           computeBetaAndPrecResidual();
-          iterStatus = workerStatusCheck.ParallelCheckStatus(
-              iter, r, z, {}, {}, rowBegin, rowEnd, workerIdx, workerParDot);
+          iterStatus = checkPreconditionedStatus();
         } else {
           iterStatus = workerStatusCheck.ParallelCheckStatus(
               iter, r, {}, {}, {}, rowBegin, rowEnd, workerIdx, workerParDot);
@@ -328,34 +384,33 @@ LinearSolverStatus ParallelPCG(
                 .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
                 .relativeResidualNorm =
                     static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-                .converged = IsConverged(iterStatus)};
+                .convergence = IsConverged(iterStatus) ? LinearSolverConvergenceStatus::Converged
+                                                       : LinearSolverConvergenceStatus::Diverged};
           }
           return;
         }
 
-        auto const rTzPrev = rTz;
-        if constexpr (kCheckStatusComputesRTz) {
+        if constexpr (kCanReuseCriterionRTz) {
           rTz = workerStatusCheck.GetLatestResidualNormSqr();
-        } else {
+        } else if constexpr (!kPairStatusAndRTz) {
           rTz = workerParDot.Dot(dot, r, z, rowBegin, rowEnd, workerIdx);
         }
 
-        if (rTz == 0)
-          MOCHI_UNLIKELY {
-            if (isMaster) {
-              if (verbosity >= VerbosityLevel::Error) {
-                // The residual is not zero at this point. The preconditioner may be singular.
-                MOCHI_LOG_ERROR("Zero Preconditioner-dot product at iteration %d.", iter);
-              }
-              solverStatus = {
-                  .numIterDone = iter,
-                  .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
-                  .relativeResidualNorm =
-                      static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-                  .converged = false};
+        if (rTz == 0) MOCHI_UNLIKELY {
+          if (isMaster) {
+            if (verbosity >= VerbosityLevel::Error) {
+              // The residual is not zero at this point. The preconditioner may be singular.
+              MOCHI_LOG_ERROR("Zero Preconditioner-dot product at iteration %d.", iter);
             }
-            return;
+            solverStatus = {
+                .numIterDone = iter,
+                .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
+                .relativeResidualNorm =
+                    static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
+                .convergence = LinearSolverConvergenceStatus::Diverged};
           }
+          return;
+        }
 
         beta = (rTz - beta) / rTzPrev;
         pWorker = zWorker + beta * pWorker;
@@ -363,11 +418,11 @@ LinearSolverStatus ParallelPCG(
 
       if (isMaster) {
         solverStatus = {
-            .numIterDone = maxIter + 1,
+            .numIterDone = maxIter,
             .residualNorm = static_cast<double>(workerStatusCheck.GetLatestResidualNorm()),
             .relativeResidualNorm =
                 static_cast<double>(workerStatusCheck.GetLatestRelativeResidualNorm()),
-            .converged = false};
+            .convergence = LinearSolverConvergenceStatus::Stopped};
       }
     };
 
@@ -408,6 +463,7 @@ LinearSolverStatus ParallelPCG(
             abortIfNotSpd,
             verbosity,
             usePolakRibiere,
+            initialGuessHint,
             dot,
             vectorFactory);
   }

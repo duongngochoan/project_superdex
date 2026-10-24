@@ -194,8 +194,6 @@ void ApplySsorOperator(
   ColumnVectorView<Scalar> tview(t, A.Rows());
   //--- Create storage space for column-major product
   [[maybe_unused]] ColumnVector<Scalar> xTmp;
-  [[maybe_unused]] auto const xTmpRequiredSize = static_cast<NonConstIdx>(
-      mochi::details::RowMultiplier<Scalar, kBlockSizeA>::GetWorkspaceSize(A.MaxNnzPerRow()));
   [[maybe_unused]] ColumnVector<Scalar, kBlockSizeA> Ly;
   [[maybe_unused]] auto aLy = mochi::details::GetAccessor(Ly);
   //
@@ -227,8 +225,7 @@ void ApplySsorOperator(
             aLy,
             /*br*/ 0,
             /*c*/ 0,
-            xTmp,
-            xTmpRequiredSize);
+            xTmp);
         ti -= Ly;
       } else {
         static_assert(mochi::details::MatTraits<Output>::kMajorDir == krylov::Direction::RowMajor);
@@ -269,8 +266,7 @@ void ApplySsorOperator(
             aLy,
             /*br*/ 0,
             /*c*/ 0,
-            xTmp,
-            xTmpRequiredSize);
+            xTmp);
         ti -= Ly;
       } else {
         static_assert(mochi::details::MatTraits<Output>::kMajorDir == krylov::Direction::RowMajor);

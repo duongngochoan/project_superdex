@@ -25,9 +25,10 @@
 
 namespace mochi {
 
-// Function to add rigid-body gravity terms.
+// Function to add rigid-body gravity terms. The energy is relative to the stage start.
 inline void AddRigidBodyGravity(
     TransformRT const& state,
+    TransformRT const& stageStartPos,
     RigidBodyInertia const& inertia,
     Real3 gravityAcc,
     double* outEnergy,
@@ -40,7 +41,7 @@ inline void AddRigidBodyGravity(
   Vec4r mg = ToSimd(gravityAcc * inertia.GetMass());
 
   if (outEnergy) {
-    (*outEnergy) -= Get0(VDot(state.VGetTranslation(), mg));
+    (*outEnergy) -= Get0(VDot(state.VGetTranslation() - stageStartPos.VGetTranslation(), mg));
   }
 
   if (outGradient) {
@@ -592,7 +593,7 @@ inline void AddRigidBodyFriction(
   }
 }
 
-// Function to add rigid-body external force terms.
+// Function to add rigid-body external force terms. The energy is relative to the stage start.
 inline void AddRigidBodyExternalForces(
     TransformRT const& state,
     TransformRT const& stageStartPos,
@@ -628,7 +629,7 @@ inline void AddRigidBodyExternalForces(
   Vec4r torque = ToSimd(torque3);
 
   if (outEnergy) {
-    (*outEnergy) -= Dot(state.VGetTranslation(), force);
+    (*outEnergy) -= Dot(state.VGetTranslation() - stageStartPos.VGetTranslation(), force);
     // The rotation residual term is given simply by the torque. However, this residual is not
     // integrable. Here, we approximate a merit function that is valid only near rotStep = eye.
     // Psi = 0.5 * tr(skew(torque) * rotStep), with rotStep = rot * rotStart^T

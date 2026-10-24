@@ -18,10 +18,12 @@
 
 #include <mochi_core/geometry/geometry_utils.h>
 #include <mochi_core/utils/basic_utils.h>
+#include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/span.h>
-#include <mochi_core/utils/spmat_utils.h>
 #include <mochi_core/utils/subset_map.h>
 
+#include <algorithm>
+#include <functional>
 #include <set>
 #include <unordered_map>
 #include <variant>
@@ -46,10 +48,11 @@
  * and outputs the partitions resulting from the combined descriptor (f, g).
  *
  * Currently, contact partitions may be created according to two possible descriptors/strategies:
- * 1) IndexGroups: This descriptor/strategy is used for partitioning the surface of skinned meshes,
- * based on the underlying articulated-body DoFs that govern the contact samples.
- * 2) int: This descriptor/strategy is used for partitioning the surface of soft skinned actors,
+ * 1) int: This descriptor/strategy is used for partitioning the surface of soft skinned actors,
  * based on the id of the governing soft actor.
+ * 2) DynamicArray<int>: This descriptor/strategy is used for partitioning the surface of skinned
+ * meshes, based on the set of governing bones that depend on simulation DoFs. Producers must store
+ * the bone ids sorted and unique, so that equal sets compare equal.
  */
 
 namespace mochi {
@@ -59,7 +62,7 @@ namespace mochi {
  * At simulation runtime, the DoF representation will be fetched by contact assembly and used
  * appropriately assuming knowledge of the underlying partition descriptor/strategy. This variant
  * wraps the DoF representations for the currently supported descriptors:
- * - std::vector<int>: For IndexGroups descriptor. It stores the DoF indices of an articulated body.
+ * - DynamicArray<int>: For BoneIdsDescriptor, it stores the governing bone ids.
  * - int: For int descriptor. It stores the soft-actor id.
  */
 using VariantDofDescriptor = std::variant<DynamicArray<int>, int>;
@@ -90,27 +93,44 @@ class PartitionDescriptorImpl {
 };
 
 /**************************************************************************************************
- * Partition descriptor for index groups. Used with articulated bodies.
- */
-class IndexGroupsDescriptor : public PartitionDescriptorImpl<IndexGroups> {
- public:
-  // Overwrite Map and Set with type-specific compare classes
-  using Map = std::unordered_multimap<IndexGroups, int, IndexGroupsHash, IndexGroupsEqual>;
-  using Set = std::set<IndexGroups, IndexGroupsLess>;
-
-  IndexGroupsDescriptor(IndexGroups const& descriptor) : PartitionDescriptorImpl(descriptor) {}
-
-  VariantDofDescriptor GetDoFs() const override {
-    return _descriptor.GetAllDofs();
-  }
-};
-
-/**************************************************************************************************
  * Partition descriptor for ids. Used with soft actors.
  */
 class IdDescriptor : public PartitionDescriptorImpl<int> {
  public:
   IdDescriptor(int const& descriptor) : PartitionDescriptorImpl(descriptor) {}
+
+  VariantDofDescriptor GetDoFs() const override {
+    return _descriptor;
+  }
+};
+
+/**************************************************************************************************
+ * Partition descriptor for a set of active governing bone ids. Used with skinned meshes.
+ */
+class BoneIdsDescriptor : public PartitionDescriptorImpl<DynamicArray<int>> {
+  struct Hash {
+    size_t operator()(DynamicArray<int> const& boneIds) const {
+      size_t hash = 0;
+      std::hash<int> hashInt;
+      for (int id : boneIds) {
+        hash ^= hashInt(id) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+      }
+      return hash;
+    }
+  };
+
+  struct Less {
+    bool operator()(DynamicArray<int> const& a, DynamicArray<int> const& b) const {
+      return std::lexicographical_compare(a.begin(), a.end(), b.begin(), b.end());
+    }
+  };
+
+ public:
+  // Overwrite Map and Set with type-specific hash/less classes
+  using Map = std::unordered_multimap<DynamicArray<int>, int, Hash>;
+  using Set = std::set<DynamicArray<int>, Less>;
+
+  BoneIdsDescriptor(DynamicArray<int> const& descriptor) : PartitionDescriptorImpl(descriptor) {}
 
   VariantDofDescriptor GetDoFs() const override {
     return _descriptor;

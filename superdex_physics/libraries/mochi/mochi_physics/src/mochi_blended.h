@@ -25,7 +25,8 @@
 
 namespace mochi {
 
-// Actor composition of a blended actor
+// Nested soft actors driven by an articulated actor. Present even when there is no blended
+// surface.
 struct CBlendedComposition : public NoCopy {
   std::vector<entt::entity> soft;
   std::vector<ActorHandle> softHandles;
@@ -63,34 +64,27 @@ void PreStagePipeline(entt::registry& reg, Span<entt::entity const> entities);
 void PostLastStagePipeline(entt::registry& reg, Span<entt::entity const> entities);
 
 /*
+ * Pipeline to resolve current blending displacements for all nodes, including inactive nodes when
+ * subsampling is enabled.
+ */
+void ResolveAllNodeBlendingDisplacementsPipeline(
+    entt::registry& reg,
+    Span<entt::entity const> entities);
+
+// Blend world-space nested soft velocities into world-space skinning velocity.
+void UpdateBlendingVelocity(
+    ecs::PartialRegistry<CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned> const>
+        reg,
+    CBlendedComposition const& composition,
+    CBlendingData const& blendingData,
+    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& inOutVelocity);
+
+/*
  * Pipeline to update quantities that are a function of the state (aka derived state) of the
  * blended actor and make them consistent with the state. Must be called after
  * skinned::UpdateDerivedStatePipeline()
  */
 void UpdateDerivedStatePipeline(entt::registry& reg, Span<entt::entity const> entities);
-
-/*
- * Pipeline to update Jacobians for contact. Must be called after
- * skinned::UpdateJacobiansPipeline()
- */
-void UpdateJacobiansPipeline(entt::registry& reg, Span<entt::entity const> entities);
-
-/*
- * System to compute contact Jacobians as colliding actor. It is called after the collision
- * detection pipeline, within each nonlinear solver iteration.
- */
-template <typename DiscretizationT>
-void SetupCollidingJacobians(
-    ecs::Included<TagBlendedActor>,
-    ecs::PartialRegistry<CDofOffset const, rom::CRomJacobian const> reg,
-    CBlendedComposition const& composition,
-    CDofOffset const& dofOffset,
-    DiscretizationT const& discretization,
-    CBlendingData const& blendingData,
-    CContactPartitions const& contactPartitions,
-    CArticulatedSkinningData const& skinningInfo,
-    CArticulatedLinkTransforms<TimeStep::Current> const& linkTransforms,
-    CCollJacs<CollRole::Colliding>& outJacobians);
 
 void InitializeOnce(entt::registry& reg);
 

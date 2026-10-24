@@ -94,10 +94,6 @@ struct CSoftExportParams : NoCopy {
   Soft Actor Utils
 */
 
-// Set the displacements to zero. Note this is the local displacement thus does not zero out
-// recentering transform.
-void SetZeroDisplacements(entt::registry& reg, entt::entity e, Error& error);
-
 // Set the position of all nodes by replacing the contents of the solution vector.
 // Size of inPositionsLocal == numNodes * kSpaceDim.
 void SetNodePositionsLocal(
@@ -105,9 +101,6 @@ void SetNodePositionsLocal(
     entt::entity e,
     Span<real const> inPositionsLocal,
     Error& error);
-
-// Zero out the velocities.
-void SetZeroVelocities(entt::registry& reg, entt::entity e, Error& error);
 
 // Set the velocity of all nodes in the CGlobalKinematics component.
 // Size of inVelocitiesLocal == numNodes * kSpaceDim.
@@ -137,7 +130,7 @@ void UpdateQueryElasticEnergy(
     ecs::RequiredTag<TagSoftActor>,
     ecs::OptionalTag<TagUseStress> hasStressTag,
     CStressDisplacementRef const& currDisp,
-    FemInfo const& femVolLow,
+    FemInfo const& femVolDisc,
     CSoftMaterialParams const& material,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
@@ -161,7 +154,7 @@ void UpdateQueryQuadraturePointsPosition(
     CQueryQuadraturePointsPosition& outQuery);
 
 // Compute the TransformRT at the eval point.
-MOCHI_API void ComputeTransformAtEvalPoint(
+void ComputeTransformAtEvalPoint(
     ColumnVectorView<real const> displ,
     CLocal2GlobalMap const& l2g,
     CRigidTransformEvalPoint const& evalPoint,
@@ -177,7 +170,7 @@ inline void UpdateRigidTransformEval(
 }
 
 // Use the information in CRigidTransformEval to perform a recentering of data.
-MOCHI_API void RecenterSolutionUsingRigidTransformEval(
+void RecenterSolutionUsingRigidTransformEval(
     ecs::RequiredTag<TagSoftActor>,
     ecs::Excluded<TagRomActor>,
     CRecenteringParams const& params,
@@ -191,8 +184,7 @@ MOCHI_API void RecenterSolutionUsingRigidTransformEval(
     CVelocitySlice<real, TimeStep::Previous>& prevVel,
     CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels,
     CRigidTransformEval& pivotEval,
-    CBoundingVolume<TimeStep::Current>* currBounds,
-    CBoundingVolume<TimeStep::Previous>* prevBounds);
+    CBoundingVolume* bounds);
 
 // Get SoftMaterialParams from CSoftMaterialParams
 void GetMaterialParams(CSoftMaterialParams const& material, SoftMaterialParams& outParams);
@@ -229,17 +221,17 @@ void SetMaterialParamsField(
 // Sets an error if there is anything wrong with the given SoftMaterialParams.
 void ValidateSoftMaterialParams(SoftMaterialParams const& param, Error& error);
 
-// Update inertia
+// Update the lumped mass and, if the actor keeps one, the mass matrix. With active volume elements,
+// both sum only them, with their weights.
 void UpdateSoftMass(
-    CActorSnle const& actorSnle,
+    CTetrahedralMesh const& mesh,
+    CSoftMaterialParams const& material,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CSoftMaterialParams const& material,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
-    CFullSparsityPattern const& sparsity,
-    CMassMatrix& outMassMatrix,
-    CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4>& outPerElemMass,
+    CActorSnle const& actorSnle,
     CLumpedMassMatrix& outLumpedMass,
+    CMassMatrix* outMassMatrix,
     CActiveVolumeElements const* activeVolElems = nullptr);
 
 // Update CSdfMapping based on the deformation of the soft mesh. Must be called for all soft actors
@@ -255,16 +247,14 @@ void UpdateMap(
 }
 
 /**
- * @brief Per-stage damping and inertia scale factors derived from the material and time step.
+ * @brief Per-stage damping scale factors derived from the material and time step.
  *
  * @details Computed once per assembly. Mass damping requires inertia; stiffness damping requires
- * stress. @ref massScale folds the inertia term (1/dt²) and the mass-damping term together for the
- * mass-matrix-scaled dresidual initialization. @ref massDampingScale [1/s²] (mass-damping
- * coefficient / dtStage) and @ref stiffnessDampingFactor [dimensionless] (stiffness-damping
- * coefficient / dtStage) are passed to the body assembly operator.
+ * stress. @ref massDampingScale [1/s²] (mass-damping coefficient / dtStage) and @ref
+ * stiffnessDampingFactor [dimensionless] (stiffness-damping coefficient / dtStage) are passed to
+ * the body assembly operator.
  */
 struct SoftDampingScales {
-  real massScale;
   real massDampingScale;
   real stiffnessDampingFactor;
   bool includeStiffnessDampingGeometricTerm;
@@ -283,13 +273,11 @@ struct SoftDampingScales {
     real dtStage,
     bool hasInertia,
     bool hasStress) {
-  real const dtfi2 = 1_r / Sqr(dtStage);
   bool const hasMassDamping = hasInertia && materialParams.massDampingCoefficient > 0_r;
   bool const hasStiffnessDamping = hasStress && materialParams.stiffnessDampingCoefficient > 0_r;
   real const massDampingScale =
       hasMassDamping ? materialParams.massDampingCoefficient / dtStage : 0_r;
   return SoftDampingScales{
-      .massScale = (hasInertia ? dtfi2 : 0_r) + massDampingScale,
       .massDampingScale = massDampingScale,
       .stiffnessDampingFactor =
           hasStiffnessDamping ? materialParams.stiffnessDampingCoefficient / dtStage : 0_r,
@@ -297,30 +285,25 @@ struct SoftDampingScales {
 }
 
 /**
- * @brief Creates a batched volume assembly operator composing stress, gravity, and inertia work.
+ * @brief Creates a batched volume assembly operator composing stress, gravity, inertia and damping
+ * work.
  *
  * @warning @p batchedConstitutive and @p referenceMaterialStiffness are captured by reference. They
  * must outlive the returned op and must not be mutated until all invocations of the op have
  * completed.
- * @warning Inertia and mass damping contribute to the objective and residual only. This operator
- * does NOT assemble their dresidual. When assembling the dresidual with @p hasInertia set, the
- * caller must first initialize it with the mass matrix scaled by @ref SoftDampingScales::massScale,
- * which folds together the inertia (1/dt^2) and mass-damping terms (see @ref AssembleBodyImpl).
- * Otherwise the inertia and mass-damping dresidual is missing.
  *
- * @note Mass damping (residual/objective only) is active only when @p hasInertia is true and @p
- * massDampingScale > 0; its dresidual is folded into the mass-matrix-scaled initialization by the
- * caller. Stiffness damping (viscous stress) is active only when @p hasStress is true and @p
- * stiffnessDampingFactor > 0, and contributes to the objective, residual, and dresidual.
+ * @note Inertia and mass damping use each element's mass matrix in closed form; their dresidual is
+ * that matrix scaled by 1/dt² + @p massDampingScale. Mass damping is active only when @p hasInertia
+ * is true and @p massDampingScale > 0. Stiffness damping (viscous stress) is active only when @p
+ * hasStress is true and @p stiffnessDampingFactor > 0. Both contribute to the objective, residual,
+ * and dresidual.
+ *
+ * @param[in] predTarget Predicted target u₀ + dt·v₀ of each DoF. Read only with @p hasInertia, for
+ * the objective and residual.
  */
-template <
-    class ElementLow,
-    class ElementHigh,
-    class ConstitutiveFn,
-    int kBatchSize = kDefaultFemBatchSize>
+template <class ElementT, class ConstitutiveFn, int kBatchSize = kDefaultFemBatchSize>
 [[nodiscard]] ElOpFnType<SoftStencilElement> MakeBatchedBodyOp(
-    Span<ElementLow const> lowVolElements,
-    Span<ElementHigh const> highVolElements,
+    Span<ElementT const> elements,
     ConstitutiveFn const& batchedConstitutive,
     materials::PerElementReferenceMaterialStiffness const& referenceMaterialStiffness,
     bool hasStress,
@@ -328,14 +311,15 @@ template <
     bool hasInertia,
     Real3 gravity,
     real density,
+    Span<real const> predTarget,
     Span<real const> stageStartDispl,
-    Span<real const> stageStartVel,
     real dtStage,
     real massDampingScale,
     real stiffnessDampingFactor,
     bool includeStiffnessDampingGeometricTerm,
     Span<real const> activeVolWeights) {
   real const dtfi2 = 1_r / Sqr(dtStage);
+  real const massScale = dtfi2 + massDampingScale;
 
   // Hoist the homogeneous reference-stiffness broadcast out of the per-batch lambda. When the store
   // is homogeneous (size()==1), the Voigt tensor gathered by GatherReferenceMaterialStiffnessVoigt
@@ -361,10 +345,31 @@ template <
     bool out = false;
     bool const hasMassDamping = hasInertia && massDampingScale > 0_r;
 
+    // Stage-start displacement, shared by the gravity energy, which is relative to the stage start,
+    // and by mass and stiffness damping, which encode velocity and strain rate, respectively, as
+    // differences from the stage start.
+    //
+    // Only gather it when a consumer will actually read it: gravity reads it for the objective
+    // only, mass damping for the objective/residual only, and stiffness damping reads the
+    // stage-start strain only for the objective, residual, or geometric tangent term (see @ref
+    // fem::StressDampingWork). A material-tangent-only stiffness-damping assembly (dresidual-only
+    // with the geometric term off) leaves it unread, so the gather is skipped in that common
+    // modified-Newton case; the condition below must stay in sync with StressDampingWork's
+    // needStrainWork.
+    bool const wantObjOrRes = (outEnergy != nullptr) || (outRes != nullptr);
+    bool const needStageStartDispl = (hasGravity && (outEnergy != nullptr)) ||
+        (hasMassDamping && wantObjOrRes) ||
+        (hasStiffnessDamping && (wantObjOrRes || includeStiffnessDampingGeometricTerm));
+    fem::BatchElementVector<kBatchSize, SoftStencilElement> stageStartDisplBatch MOCHI_NO_INIT;
+    if (needStageStartDispl) {
+      fem::GatherBatchElementVector<kBatchSize, SoftStencilElement>(
+          indicesFlat, elemIndices, stageStartDispl, stageStartDisplBatch);
+    }
+
     if (hasStress) {
       out |= fem::StressWork<kBatchSize>(
           elemIndices,
-          lowVolElements,
+          elements,
           displ,
           outEnergy,
           outRes,
@@ -376,8 +381,9 @@ template <
     if (hasGravity && (outEnergy || outRes)) {
       out |= fem::GravityWork<kBatchSize>(
           elemIndices,
-          lowVolElements,
+          elements,
           displ,
+          stageStartDisplBatch,
           outEnergy,
           outRes,
           gravity,
@@ -385,14 +391,14 @@ template <
           activeVolWeights);
     }
     if (hasInertia && (outEnergy || outRes)) {
-      fem::BatchElementVector<kBatchSize, SoftStencilElement> stageStartTarget MOCHI_NO_INIT;
-      fem::GatherPredTarget<kBatchSize, SoftStencilElement>(
-          indicesFlat, elemIndices, stageStartDispl, stageStartVel, dtStage, stageStartTarget);
+      fem::BatchElementVector<kBatchSize, SoftStencilElement> predTargetBatch MOCHI_NO_INIT;
+      fem::GatherBatchElementVector<kBatchSize, SoftStencilElement>(
+          indicesFlat, elemIndices, predTarget, predTargetBatch);
       out |= fem::InertiaWork<kBatchSize>(
           elemIndices,
-          highVolElements,
+          elements,
           displ,
-          stageStartTarget,
+          predTargetBatch,
           outEnergy,
           outRes,
           density,
@@ -400,36 +406,12 @@ template <
           activeVolWeights);
     }
 
-    // Stage-start displacement only (no velocity), shared by mass and stiffness damping. Their
-    // strain-rate dependence is encoded as a displacement difference, so the velocity span is not
-    // read (it may be empty, e.g. a posed-stress skinned actor without posed inertia).
-    //
-    // Only gather it when a consumer will actually read it: mass damping contributes to the
-    // objective/residual only, and stiffness damping reads the stage-start strain only for the
-    // objective, residual, or geometric tangent term (see @ref fem::StressDampingWork). A
-    // material-tangent-only stiffness-damping assembly (dresidual-only with the geometric term off)
-    // leaves it unread, so the gather is skipped in that common modified-Newton case; the condition
-    // below must stay in sync with StressDampingWork's needStrainWork.
-    bool const wantObjOrRes = (outEnergy != nullptr) || (outRes != nullptr);
-    bool const needStageStartDispl = (hasMassDamping && wantObjOrRes) ||
-        (hasStiffnessDamping && (wantObjOrRes || includeStiffnessDampingGeometricTerm));
-    fem::BatchElementVector<kBatchSize, SoftStencilElement> stageStartDisplBatch MOCHI_NO_INIT;
-    if (needStageStartDispl) {
-      fem::GatherPredTarget<kBatchSize, SoftStencilElement, /*kGatherVelocity*/ false>(
-          indicesFlat,
-          elemIndices,
-          stageStartDispl,
-          stageStartVel,
-          /*dtStage*/ 0_r,
-          stageStartDisplBatch);
-    }
-
-    // Mass damping (residual/objective only): α/dt · M · (displ − stageStartDispl). Reuses
-    // InertiaWork with massDampingScale as the time-scale. DRes handled via mass-matrix init.
+    // Mass damping: α/dt · M · (displ − stageStartDispl). Reuses InertiaWork with massDampingScale
+    // as the time-scale. Its dresidual is added with inertia's, below.
     if (hasMassDamping && (outEnergy || outRes)) {
       out |= fem::InertiaWork<kBatchSize>(
           elemIndices,
-          highVolElements,
+          elements,
           displ,
           stageStartDisplBatch,
           outEnergy,
@@ -458,7 +440,7 @@ template <
       }
       out |= fem::StressDampingWork<kBatchSize>(
           elemIndices,
-          lowVolElements,
+          elements,
           displ,
           stageStartDisplBatch,
           outEnergy,
@@ -470,6 +452,12 @@ template <
           *referenceMaterialStiffnessVoigt,
           referenceMaterialStiffness.isIsotropic,
           activeVolWeights);
+    }
+
+    // Inertia and mass-damping dresidual.
+    if (hasInertia && outDRes) {
+      out |= fem::AddMassToDRes<kBatchSize, SoftStencilElement>(
+          elemIndices, elements, density * massScale, *outDRes, activeVolWeights);
     }
     return out;
   };
@@ -567,6 +555,23 @@ void EntityIncrementStep(
     CVelocitySlice<real, TimeStep::Previous>& prevVel);
 
 /*
+ * Reconstructs the begin-of-step @ref TimeStep::Previous state from the integration history if
+ * history is present and the integration method allows, otherwise it estimates the state from
+ * constant velocity.
+ */
+void EntityReconstructPreviousStep(
+    ecs::Included<TagSoftActor>,
+    ecs::Excluded<TagRomActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CDisplacementSlice<real, TimeStep::Current> const& currDispl,
+    CVelocitySlice<real, TimeStep::Current> const& currVel,
+    CIntegrationDisplacementSlices const& intDispls,
+    CIntegrationVelocitySlices<DisplacementLayer::Default> const& intVels,
+    CDisplacementSlice<real, TimeStep::Previous>& outPrevDispl,
+    CVelocitySlice<real, TimeStep::Previous>& outPrevVel);
+
+/*
  * System executed after the solution of the non-linear problem is updated. It MUST update the
  * position components of the soft actor state (aka position state) to make it
  * consistent with the new solution. It may OPTIONALLY update other quantities that are a function
@@ -659,7 +664,7 @@ void EntityPostLastStage(
     CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels);
 
 // Assemble just the volume term into CActorSnle.
-MOCHI_API void AssembleBody(
+void AssembleBody(
     AssemblyParams const& params, // external parameter
     ecs::Included<TagSoftActor>,
     ecs::CtxGlobal<CSceneGravity const> sceneGravity,
@@ -667,22 +672,21 @@ MOCHI_API void AssembleBody(
     ecs::OptionalTag<TagUseInertia> hasInertiaTag,
     ecs::OptionalTag<TagUseStress> hasStressTag,
     ecs::OptionalTag<TagRomActor> isRom,
-    ecs::OptionalTag<TagSoftSkinnedActor> isSkinned,
+    ecs::OptionalTag<TagNestedSoftActor> isNestedSoft,
     CSkinnedEnergy const& skinnedEnergy,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CRootTransform const& rootTransform,
     CSoftMaterialParams const& materialParams,
     CTimeIntegratorState const& intState,
     CDisplacementSlice<real, TimeStep::Current> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart> const& stageStartDispl,
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
-    CMassMatrix const& massMatrix,
+    CMassMatrix const* massMatrix,
     CRomProjectionStrategy const* romProjectionStrategy,
     CActorSnle& outActorSnle,
-    CActiveVolumeElements const* activeVolumeElems = nullptr);
+    CActiveVolumeElements const* activeVolElems = nullptr);
 
 // Implementation of AssembleBody, which admits different components for the result Snle.
 void AssembleBodyImpl(
@@ -693,15 +697,14 @@ void AssembleBodyImpl(
     bool hasStress,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     TransformRT const& worldFromLocal,
     CSoftMaterialParams const& materialParams,
     CTimeIntegratorState const& intState,
     ColumnVectorView<real const> currDispl,
     ColumnVectorView<real const> stageStartDispl,
     ColumnVectorView<real const> stageStartVel,
-    CMassMatrix const& massMatrix,
+    CMassMatrix const* massMatrix,
     ActorSnle& outSnle,
     CActiveVolumeElements const* activeVolElems = nullptr);
 
@@ -710,7 +713,7 @@ void AssembleAsyncContact(
     entt::entity e,
     ecs::Included<TagSoftActor, TagUseContact>,
     ecs::OptionalTag<TagRomActor> isRom,
-    ecs::Excluded<TagSoftSkinnedActor>,
+    ecs::Excluded<TagNestedSoftActor, TagUseDeformableContactSkin>,
     ecs::OptionalTag<TagQueryActiveContacts> queryActiveContacts,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     CTimeIntegratorState const& intState,
@@ -720,7 +723,7 @@ void AssembleAsyncContact(
     CBoundaryNodalBasedStructure const& bdNbs,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CRootTransform const& rootTransform,
     CRomProjectionStrategy const* romProjectionStrategy,
     CDeformablePointAsyncCollisionsResponse& outResponse,
@@ -750,32 +753,31 @@ void EntitySetSolution(
     CDisplacementSlice<real, TimeStep::Current>& currSol);
 
 // Update CRigidVelocityLocal by approximating the movement of the center-of-mass
-MOCHI_API void UpdateRigidVelocity(
+void UpdateRigidVelocity(
     ecs::Included<TagSoftActor>,
     ecs::Excluded<TagRomActor>,
     ecs::CtxGlobal<CSceneTime const> time,
     CRootTransform const& root,
-    CBoundingVolume<TimeStep::Current> const& bounds,
+    CBoundingVolume const& bounds,
     CPrevRigidVelocity& outRigidVelWorld);
 
-// Update CBoundingVolume<TimeStep::Current>.localShape based on the deformation of the mesh. kStep
-// defines the data to be used in the update, not the component storing the result. There's no
-// CBoundingVolume<TimeStep::StageStart>, as it's not needed. We do bound checks in stage-start
-// collision detection, but we can use CBoundingVolume<TimeStep::Current> for this.
+// Update CBoundingVolume.localShape based on the deformation of the mesh. kStep selects the
+// displacement state used to compute the bounds.
 template <TimeStep kStep>
 void UpdateBounds(
+    ecs::Excluded<TagUseDeformableContactSkin>,
     CColliderInfo const& /*collider*/, // TODO: Is this actually required for the ECS system?
     CTetrahedralMesh const& meshSolver,
     CFinalDisplacementRef<kStep> const& solSolver,
-    CBoundingVolume<TimeStep::Current>& outBounds) {
+    CBoundingVolume& outBounds) {
   static_assert(kStep == TimeStep::Current || kStep == TimeStep::StageStart);
   MOCHI_PROFILE_SCOPE();
   auto const& sol = solSolver.value;
   auto boundaryIndices = meshSolver.mesh->GetBoundaryNodes();
   auto nodeCoordinates = meshSolver.mesh->GetNodeCoordinates();
   auto nodeDisplacements = Unflatten<Real3 const>(sol.GetConstSpan());
-  outBounds.localShape =
-      GetObb(CalcAabbWithSortedIndices(nodeCoordinates, nodeDisplacements, boundaryIndices));
+  outBounds.localShape = GetObb(CalcAabbWithDisplacementsAndSortedIndices(
+      nodeCoordinates, nodeDisplacements, boundaryIndices));
 }
 
 // Call once on startup

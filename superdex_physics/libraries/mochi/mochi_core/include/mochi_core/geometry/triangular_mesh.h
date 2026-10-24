@@ -75,14 +75,6 @@ class TriangularMesh final : public SimplicialMesh {
   // Get the unit normal for each element
   Span<Real3 const> GetElementNormals() const;
 
-  // Computes the node coordinates with the given displacements.
-  void ComputeNodeCoordinates(Span<Real3 const> nodeDisplacements, Span<Real3> outNodeCoordinates)
-      const;
-
-  // Get the unit normal for each element given a different set of node coordinates.
-  void ComputeElementNormals(Span<Real3 const> nodeCoordinates, Span<Real3> outElementNormals)
-      const;
-
   // Compute angle-weighted normals at mesh nodes (half-edge structure required)
   void ComputeNodeNormals(Span<Real3> outNodeNormals) const;
   void ComputeNodeNormals(

@@ -18,15 +18,18 @@
 
 #include <mochi_core/geometry/model_data.h>
 #include <mochi_core/utils/coordinate_space_converter.h>
+#include <mochi_mesh/step_tessellation.h>
 #include <mochi_physics/utils/mochi_model_utils.h>
-#include <mochi_renderer/mesh.h> // BuildMochiModelGeometry
+#include <mochi_renderer/model_geometry.h> // BuildMochiModelGeometry
 #include <mochi_renderer/render_space.h> // RenderSpace
 #include <mochi_renderer/utils.h> // Read*FromFile, Write*ToFile, ConvertMeshSectionsSpace, normals
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <string_view>
 #include <utility>
 
 namespace superdex::studio::processing {
@@ -77,6 +80,23 @@ mochi::CoordinateSpaceConverter const& RenderToMochiConverter() {
   static mochi::CoordinateSpaceConverter const converter(
       mochi_renderer::RenderSpace(), mochi::CoordinateSpace::Default());
   return converter;
+}
+
+// sRGB transfer function, decoding direction (IEC 61966-2-1:1999): converts a nonlinear sRGB
+// component in [0, 1], as CAD tools and color pickers store it, to linear light, PBR
+float SrgbToLinear(float srgb) {
+  constexpr float kLinearThreshold = 0.04045f;
+  constexpr float kLinearSlope = 12.92f;
+  constexpr float kOffset = 0.055f;
+  constexpr float kExponent = 2.4f;
+  return srgb <= kLinearThreshold ? srgb / kLinearSlope
+                                  : std::pow((srgb + kOffset) / (1.0f + kOffset), kExponent);
+}
+
+// One 8-bit channel of a packed 0xRRGGBB color as a component in [0, 1]. @p shift selects it:
+// 16 = red, 8 = green, 0 = blue.
+float UnpackChannel(uint32_t rgb, int shift) {
+  return static_cast<float>((rgb >> shift) & 0xFFu) / 255.0f;
 }
 
 } // namespace
@@ -172,7 +192,7 @@ bool EndsWithNoCase(std::string const& text, char const* suffix) {
 }
 
 // No .step/.stp case here on purpose: STEP is tessellated by the superdex_mesh_cli helper, which
-// converts to renderer space itself. See TessellateCadModelFile (cad_model_asset.cpp).
+// converts to renderer space itself. See TessellateStepSections.
 std::vector<MeshSection> ReadSectionsInRenderSpace(std::string const& path) {
   std::vector<MeshSection> sections;
   bool sourceIsMochiSpace = false;
@@ -205,6 +225,31 @@ mochi::MeshData LoadRenderMesh(std::string const& path, mochi::Error& error) {
   MOCHI_ERROR_IF(mesh.GetNumElements() == 0, error, "Render model produced no triangles.");
   MOCHI_ERROR_RETURN(error, {});
   return mesh;
+}
+
+std::vector<MeshSection> TessellateStepSections(
+    std::string const& path,
+    mochi::mesh::StepTessellationParams const& params,
+    mochi::Error& error) {
+  MOCHI_ERROR_RETURN(error, {});
+
+  std::vector<mochi::mesh::StepColorMesh> const meshes =
+      mochi::mesh::TessellateStepByColor(path, params, error);
+  MOCHI_ERROR_RETURN(error, {});
+
+  std::vector<MeshSection> sections;
+  sections.reserve(meshes.size());
+  for (auto const& [rgb, mesh] : meshes) {
+    MeshSection& section = sections.emplace_back(SectionFromMeshData(mesh));
+    if (rgb) {
+      section.baseColor = {
+          SrgbToLinear(UnpackChannel(*rgb, 16)),
+          SrgbToLinear(UnpackChannel(*rgb, 8)),
+          SrgbToLinear(UnpackChannel(*rgb, 0)),
+          1.0f};
+    }
+  }
+  return sections;
 }
 
 mochi::MeshData LoadMochiMesh(std::string const& path, mochi::Error& error) {
@@ -305,14 +350,6 @@ std::string ExportDialogStartPath(
   std::filesystem::path folder = std::filesystem::path(modelFolder) / "";
   folder.make_preferred();
   return folder.string();
-}
-
-bool SamePath(std::string_view a, std::string_view b) {
-  if (a.empty() || b.empty()) {
-    return false; // an unset path collides with nothing
-  }
-  return std::filesystem::path(a).lexically_normal().generic_string() ==
-      std::filesystem::path(b).lexically_normal().generic_string();
 }
 
 } // namespace superdex::studio::processing

@@ -106,26 +106,47 @@ template <
 
 /**********************************************************************
   Fused Multiply-Add (and friends)
+
+  Like the Simd overloads, floating-point results are rounded once, so a sequence of these calls
+  rounds the same wherever it is compiled, regardless of compiler contraction. The arguments share
+  one type, so that mixed types cannot silently fall back to unfused arithmetic. Negation is exact,
+  so the variants are fused too.
 */
 
-template <typename A, typename B, typename C>
-[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr auto MulAdd(A a, B b, C c) {
-  return (a * b) + c;
+template <typename T>
+[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr T MulAdd(T a, T b, T c) {
+  if constexpr (std::is_floating_point_v<T>) {
+    return std::fma(a, b, c);
+  } else {
+    return (a * b) + c;
+  }
 }
 
-template <typename A, typename B, typename C>
-[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr auto MulSub(A a, B b, C c) {
-  return (a * b) - c;
+template <typename T>
+[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr T MulSub(T a, T b, T c) {
+  if constexpr (std::is_floating_point_v<T>) {
+    return std::fma(a, b, -c);
+  } else {
+    return (a * b) - c;
+  }
 }
 
-template <typename A, typename B, typename C>
-[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr auto NegMulAdd(A a, B b, C c) {
-  return -(a * b) + c;
+template <typename T>
+[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr T NegMulAdd(T a, T b, T c) {
+  if constexpr (std::is_floating_point_v<T>) {
+    return std::fma(-a, b, c);
+  } else {
+    return -(a * b) + c;
+  }
 }
 
-template <typename A, typename B, typename C>
-[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr auto NegMulSub(A a, B b, C c) {
-  return -(a * b) - c;
+template <typename T>
+[[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr T NegMulSub(T a, T b, T c) {
+  if constexpr (std::is_floating_point_v<T>) {
+    return std::fma(-a, b, -c);
+  } else {
+    return -(a * b) - c;
+  }
 }
 
 /**********************************************************************

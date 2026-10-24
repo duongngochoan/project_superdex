@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <mochi_core/mochi_platform.h>
 #include <mochi_core/utils/matrix_utils.h> // for intellisense
 
 #include <cmath>
@@ -58,7 +59,7 @@ template <typename T, size_t N, size_t M>
 MOCHI_FORCE_INLINE constexpr NdArray<T, N> DotMatVec(
     NdArray<T, N, M> const& a,
     NdArray<T, M> const& b) {
-  NdArray<T, N> result = {};
+  NdArray<T, N> result MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
   for (size_t i = 0; i < result.size(); ++i) {
     result[i] = Dot(a[i], b);
   }
@@ -75,7 +76,7 @@ MOCHI_FORCE_INLINE void DotMatVec(NdArray<T, N, M> const& a, Span<T const> b, Sp
 
 template <typename T, size_t N, size_t M>
 MOCHI_FORCE_INLINE constexpr NdArray<T, N> DotMatVec(NdArray<T, N, M> const& a, Span<T const> b) {
-  NdArray<T, N> result = {};
+  NdArray<T, N> result MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
   DotMatVec(a, b, Span<T>(result));
   return result;
 }
@@ -163,7 +164,7 @@ template <typename T, size_t N, size_t M, size_t L>
 MOCHI_FORCE_INLINE constexpr NdArray<T, N, L> Dot(
     NdArray<T, N, M> const& a,
     NdArray<T, M, L> const& b) {
-  NdArray<T, N, L> result = {};
+  NdArray<T, N, L> result MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
   NdArray<T, L, M> bT = Transpose(b);
   for (int n = 0; n < N; ++n) {
     result[n] = DotMatVec(bT, a[n]);
@@ -243,6 +244,13 @@ MOCHI_FORCE_INLINE constexpr NdArray<T, 3, 3> Outer(
       NdArray<T, 3>{a[0] * b[0], a[0] * b[1], a[0] * b[2]},
       NdArray<T, 3>{a[1] * b[0], a[1] * b[1], a[1] * b[2]},
       NdArray<T, 3>{a[2] * b[0], a[2] * b[1], a[2] * b[2]}};
+}
+
+template <typename T>
+MOCHI_FORCE_INLINE constexpr NdArray<T, 6> OuterSym(
+    NdArray<T, 3> const& a,
+    NdArray<T, 3> const& b) {
+  return {a[0] * b[0], a[1] * b[1], a[2] * b[2], a[0] * b[1], a[0] * b[2], a[1] * b[2]};
 }
 
 // Outer product of 3 component vectors (assumed 4th component unused)
@@ -356,6 +364,11 @@ MOCHI_FORCE_INLINE constexpr T Colon(NdArray<T, N, M> const& A, NdArray<T, N, M>
   return result;
 }
 
+template <typename T>
+MOCHI_FORCE_INLINE constexpr T ColonSym2x2(NdArray<T, 3> const& A, NdArray<T, 3> const& B) {
+  return A[0] * B[0] + T{2_r} * A[1] * B[1] + A[2] * B[2];
+}
+
 /**************************************************************************************************
   Invert
 */
@@ -396,16 +409,6 @@ MOCHI_FORCE_INLINE constexpr NdArray<T, 3, 3> Invert(NdArray<T, 3, 3> const& A, 
           A[0][1] * A[2][0] - A[0][0] * A[2][1],
           A[0][0] * A[1][1] - A[0][1] * A[1][0]}};
   return cofactorTranspose / det;
-}
-
-template <typename T>
-inline void PseudoInvert(NdArray<T, 3, 2> const& a, NdArray<T, 2, 3>* outInv, T* outDet) {
-  NdArray<T, 2, 3> const at = Transpose(a);
-  NdArray<T, 3, 3> const coef_1 = Outer(at[0], at[1]) - Outer(at[1], at[0]);
-  T const coef_2 = Dot(DotVecMat(at[0], coef_1), at[1]);
-  (*outInv)[0] = DotMatVec(coef_1, at[1]) / coef_2;
-  (*outInv)[1] = -DotMatVec(coef_1, at[0]) / coef_2;
-  *outDet = Norm(Cross(at[0], at[1]));
 }
 
 template <typename T>
@@ -560,25 +563,54 @@ MOCHI_FORCE_INLINE NdArray<Simd<T, 4>, 4> InvertTransformation(NdArray<Simd<T, 4
 
 template <size_t N, typename T>
 MOCHI_FORCE_INLINE constexpr NdArray<T, N, N> DiagonalMatrix(T valueOnDiagonal) {
-  NdArray<T, N, N> result = {};
-  for (size_t i = 0; i < result.size(); ++i) {
-    result[i][i] = valueOnDiagonal;
+  NdArray<T, N, N> result MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
+  for (size_t i = 0; i < N; ++i) {
+    for (size_t j = 0; j < N; ++j) {
+      result[i][j] = (i == j) ? valueOnDiagonal : T{};
+    }
   }
   return result;
 }
 
 template <size_t N, typename T>
 MOCHI_FORCE_INLINE constexpr NdArray<T, N, N> DiagonalMatrix(NdArray<T, N> const& diagonalVector) {
-  NdArray<T, N, N> result = {};
-  for (size_t i = 0; i < result.size(); ++i) {
-    result[i][i] = diagonalVector[i];
+  NdArray<T, N, N> result MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
+  for (size_t i = 0; i < N; ++i) {
+    for (size_t j = 0; j < N; ++j) {
+      result[i][j] = (i == j) ? diagonalVector[i] : T{};
+    }
   }
   return result;
 }
 
 template <typename T>
+MOCHI_FORCE_INLINE constexpr NdArray<T, 3> Sym2x2Components(T a00, T a01, T a11) {
+  return {a00, a01, a11};
+}
+
+template <typename T>
+MOCHI_FORCE_INLINE constexpr NdArray<T, 3> Sym2x2Components(NdArray<T, 2, 2> const& m) {
+  return {m[0][0], T{0.5_r} * (m[0][1] + m[1][0]), m[1][1]};
+}
+
+template <typename T>
 MOCHI_FORCE_INLINE constexpr NdArray<T, 2, 2> SymMatrix2x2(T a00, T a01, T a11) {
   return {NdArray<T, 2>{a00, a01}, NdArray<T, 2>{a01, a11}};
+}
+
+template <typename T>
+MOCHI_FORCE_INLINE constexpr NdArray<T, 3, 3> SymToFull3x3(NdArray<T, 6> const& m) {
+  return {
+      NdArray<T, 3>{m[0], m[3], m[4]},
+      NdArray<T, 3>{m[3], m[1], m[5]},
+      NdArray<T, 3>{m[4], m[5], m[2]}};
+}
+
+template <typename T>
+MOCHI_FORCE_INLINE constexpr void AddToDiagonalSym3x3(NdArray<T, 6>& m, T const& s) {
+  m[0] += s;
+  m[1] += s;
+  m[2] += s;
 }
 
 template <size_t N, typename T>
@@ -675,7 +707,7 @@ MOCHI_FORCE_INLINE T Det2x2(Simd<T, 4> const& A) {
 
 template <typename T, size_t N, size_t M>
 MOCHI_FORCE_INLINE constexpr NdArray<T, M, N> Transpose(NdArray<T, N, M> const& mat) {
-  NdArray<T, M, N> result = {};
+  NdArray<T, M, N> result MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
   for (size_t i = 0; i < M; ++i) {
     for (size_t j = 0; j < N; ++j) {
       result[i][j] = mat[j][i];
@@ -800,33 +832,6 @@ inline NdArray<Simd<T, 4>, 3> Cofactor3x3(NdArray<Simd<T, 4>, 3> const& mat) {
   };
 }
 
-// Calculate the cofactor matrix from the symmetric 2x2 SIMD matrix.
-template <typename T>
-MOCHI_FORCE_INLINE Simd<T, 4> CofactorSym2x2(Simd<T, 4> const& mat) {
-  return Neg<false, true, false, false>(Shuffle<2, 1, 0, 3>(mat));
-}
-
-// Calculate the cofactor matrix from the symmetric 3x3 SIMD matrix.
-template <typename T>
-MOCHI_FORCE_INLINE NdArray<Simd<T, 4>, 2> CofactorSym3x3(NdArray<Simd<T, 4>, 2> const& mat) {
-  // Equivalent to Transpose(Invert(mat, 1_r)), which reduces to:
-  //
-  //  |bc - ff, ef - dc, df - be|
-  //  |   ·   , ac - ee, de - af|
-  //  |   ·   ,    ·   , ab - dd|
-  //
-  // diag = (bc - ff, ac - ee, ab - dd)
-  // offd = (ef - dc, df - be, de - af)
-
-  auto diag = Shuffle<1, 0, 0, 3>(mat[0]) * Shuffle<2, 2, 1, 3>(mat[0]) -
-      Shuffle<2, 1, 0, 3>(mat[1] * mat[1]);
-
-  auto offd = Shuffle<1, 0, 0, 3>(mat[1]) * Shuffle<2, 2, 1, 3>(mat[1]) -
-      mat[1] * Shuffle<2, 1, 0, 3>(mat[0]);
-
-  return NdArray<Simd<T, 4>, 2>{diag, offd};
-}
-
 /**************************************************************************************************
   Matrix Trace (sum of diagonal elements)
 */
@@ -933,7 +938,7 @@ MOCHI_FORCE_INLINE constexpr NdArray<T, N, N> DNormalize(NdArray<T, N> const& v,
   static_assert(kMin > 0); // Check numeric_limits has been correctly specialized.
   T const invNorm = T(1) / (Sqrt(sqrNorm) + T(kMin));
   NdArray<T, N> const n = v * invNorm;
-  NdArray<T, N, N> result{};
+  NdArray<T, N, N> result MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
   for (size_t i = 0; i < N; ++i) {
     for (size_t j = 0; j < N; ++j) {
       result[i][j] = -n[i] * n[j] * invNorm;
@@ -967,55 +972,6 @@ inline constexpr auto LargestRow(NdArray<T, D0, D1> const& A, T* sqrNorm) {
 
   // Return largest row.
   return A[index];
-}
-
-inline auto LargestRowColSym2x2(VSymMatrix2x2r A, Vec4r& outNormSqr) {
-  // Vectors are:
-  // r₁ = (a, c)
-  // r₂ = (c, b)
-
-  // Evaluate squared norms.
-  Vec4r entriesSqr = A * A; // (a², c², b², ?)
-  Vec4r temp0 = Broadcast<1>(entriesSqr); // (c², c², ?, ?)
-  Vec4r normSqr = entriesSqr + temp0; // (|r₁|², ?, |r₂|², ?)
-  real r1NormSqr = Get<0>(normSqr);
-  real r2NormSqr = Get<2>(normSqr);
-
-  // Shuffle values according depending on which row was larger
-  if (r1NormSqr > r2NormSqr) {
-    outNormSqr = r1NormSqr;
-    return Shuffle<0, 1, 3, 3>(A);
-  } else {
-    outNormSqr = r2NormSqr;
-    return Shuffle<1, 2, 3, 3>(A);
-  }
-}
-
-inline auto LargestRowColSym3x3(VSymMatrix3x3r A, Vec4r& outNormSqr) {
-  // Vectors are:
-  // r₁ = (a, d, e)
-  // r₂ = (d, b, f)
-  // r₃ = (e, f, c)
-
-  // Evaluate squared norms.
-  Vec4r diagSqr = A[0] * A[0]; // (a², b², c², ?)
-  Vec4r offdSqr = A[1] * A[1]; // (d², e², f², ?)
-  Vec4r temp0 = Shuffle<0, 0, 2, 3>(offdSqr); // (d², d², f², ?)
-  Vec4r temp1 = Shuffle<1, 2, 1, 3>(offdSqr); // (e², f², e², ?)
-  Vec4r normSqr = diagSqr + temp0 + temp1; // (|r₁|², |r₂|², |r₃|², ?)
-
-  // Blend entries according to norms.
-  real max = HMax<3>(normSqr);
-  if (max == Get<0>(normSqr)) { // If r1 was the largest row
-    outNormSqr = Broadcast<0>(normSqr);
-    return Blend<0, 1, 1, 0>(A[0], Shuffle<0, 0, 1, 0>(A[1]));
-  } else if (max == Get<1>(normSqr)) { // If r2 was the largest row
-    outNormSqr = Broadcast<1>(normSqr);
-    return Blend<1, 0, 1, 0>(A[0], Shuffle<0, 0, 2, 0>(A[1]));
-  } else { // If r3 was the largest row
-    outNormSqr = Broadcast<2>(normSqr);
-    return Blend<1, 1, 0, 0>(A[0], Shuffle<1, 2, 0, 0>(A[1]));
-  }
 }
 
 } // namespace mochi

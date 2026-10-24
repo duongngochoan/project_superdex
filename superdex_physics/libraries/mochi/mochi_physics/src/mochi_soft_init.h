@@ -34,9 +34,12 @@ void InitSoftActor(
     SoftActorParams const& params,
     experimental::ExperimentalSoftActorParams const& experimentalParams,
     bool useContact,
-    bool isSkinned,
+    bool isNestedSoft,
     std::shared_ptr<TetrahedralMeshShape const> shapePtr,
     std::shared_ptr<DeepFlowShape const> flow,
     Error& error);
+
+// Warns about nonzero mass (stiffness) damping on a soft actor without inertia (stress).
+void WarnIfSoftDampingInactive(entt::registry const& reg, entt::entity e);
 
 } // namespace mochi

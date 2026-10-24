@@ -344,14 +344,13 @@ int LDLtFactorize(MatrixType& L, bool failOnSingularity, SingularityCheckFn&& si
     // Factor diagonal block into D = L D L^t.
     int blockSingularities = 0;
     kernel::FactorBlock(D, blockSingularities, check);
-    if (blockSingularities > 0)
-      MOCHI_UNLIKELY {
-        singularities += blockSingularities;
-        if (failOnSingularity) {
-          MOCHI_LOG_ERROR("Matrix is singular or needs pivoting.");
-          return singularities;
-        }
+    if (blockSingularities > 0) MOCHI_UNLIKELY {
+      singularities += blockSingularities;
+      if (failOnSingularity) {
+        MOCHI_LOG_ERROR("Matrix is singular or needs pivoting.");
+        return singularities;
       }
+    }
     auto firstBottomRow = iCol + kBlockSize;
     auto subPanel = panel.BottomRows(size - firstBottomRow);
     // Apply L^-T to lower part.
@@ -373,14 +372,13 @@ int LDLtFactorize(MatrixType& L, bool failOnSingularity, SingularityCheckFn&& si
     }
     int const blockSingularities = kernel::Factor<Scalar>(D, check);
 
-    if (blockSingularities > 0)
-      MOCHI_UNLIKELY {
-        singularities += blockSingularities;
-        if (failOnSingularity) {
-          MOCHI_LOG_ERROR("Matrix is singular or needs pivoting.");
-          return singularities;
-        }
+    if (blockSingularities > 0) MOCHI_UNLIKELY {
+      singularities += blockSingularities;
+      if (failOnSingularity) {
+        MOCHI_LOG_ERROR("Matrix is singular or needs pivoting.");
+        return singularities;
       }
+    }
   }
   return singularities;
 }
@@ -475,7 +473,7 @@ void LDLt<InputScalar, kRowsAtCT, kColsAtCT, kEquilibration, kBlockSize, kTrSize
   using namespace blocking;
   PartDown<kBlockSize, kSizeAtCT>(
       _size,
-      [](auto&& X, auto&& L) {
+      [](auto&& X, auto&& L) MOCHI_FORCE_INLINE_LAMBDA {
         auto currentX = X(DiagRows);
         auto prevX = X(Above);
         if (prevX.Rows() > 0) {
@@ -494,7 +492,7 @@ void LDLt<InputScalar, kRowsAtCT, kColsAtCT, kEquilibration, kBlockSize, kTrSize
   // Apply L^-T in blocks.
   PartUp<kBlockSize, kSizeAtCT>(
       _size,
-      [](auto&& X, auto&& L) {
+      [](auto&& X, auto&& L) MOCHI_FORCE_INLINE_LAMBDA {
         auto currentX = X(DiagRows);
         auto prevX = X(Below);
         if (prevX.Rows() > 0) {

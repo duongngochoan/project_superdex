@@ -83,12 +83,12 @@ static int ComputeTargetNodesPerGroup(int numElements, int numReferencedNodes) {
 
 NodalBasedStructure::NodalBasedStructure(Graph<int, int> eToN, Graph<int, int> const& nToN)
     : _eToN(std::move(eToN)) {
-  _nToE = Reverse<int, int>(_eToN);
+  Graph<int, int> const nToE = Reverse<int, int>(_eToN);
 
 #if MOCHI_ASSERT_VERBOSE_ENABLED
   if (nToN.size() != 0) {
     MOCHI_ASSERT_VERBOSE(
-        nToN.size() >= _nToE.size(), "nToN must cover all nodes referenced by eToN.");
+        nToN.size() >= nToE.size(), "nToN must cover all nodes referenced by eToN.");
     for (auto const elemNodes : _eToN) {
       for (int ei : elemNodes.targets) {
         auto const row = nToN[ei];
@@ -102,7 +102,7 @@ NodalBasedStructure::NodalBasedStructure(Graph<int, int> eToN, Graph<int, int> c
   }
 #endif // MOCHI_ASSERT_VERBOSE_ENABLED
 
-  _nToN = nToN.size() == 0 ? Traverse(_nToE, _eToN).SortTargets() : nToN;
+  _nToN = nToN.size() == 0 ? Traverse(nToE, _eToN).SortTargets() : nToN;
 
   int const numElements = isize(_eToN);
   // Find the maximum number of nodes per element first, for allocation and lookup purposes.
@@ -128,11 +128,11 @@ NodalBasedStructure::NodalBasedStructure(Graph<int, int> eToN, Graph<int, int> c
     }
   }
 
-  int const nodeGroupSize = ComputeTargetNodesPerGroup(numElements, CountReferencedNodes(_nToE));
+  int const nodeGroupSize = ComputeTargetNodesPerGroup(numElements, CountReferencedNodes(nToE));
   auto nDec = GreedyDecompose(
-      /*nToN without sorting targets*/ Traverse(_nToE, _eToN),
+      /*nToN without sorting targets*/ Traverse(nToE, _eToN),
       /*subdomainSize*/ nodeGroupSize);
-  _elemGroups = AggregateElements(nDec, _nToE, isize(_eToN));
+  _elemGroups = AggregateElements(nDec, nToE, isize(_eToN));
 
   CreateSubTasks();
   CreateDepMasks();
@@ -319,6 +319,7 @@ static auto CreateDependencyGraph(Graph<int, int> const& coloring, Graph<int, in
 }
 
 /** @brief Create groupings via greedy decompositions.
+ *
  * @details The decomposition is first done on a nodal basis. In the second step, elements are
  * aggregated based to one of the nodal subdomain that they touch. The order of aggregation is done
  * to avoid tiny subdomain. Some nodal subdomains have only one node. Under the assumption of a
@@ -342,13 +343,14 @@ void NodalBasedStructure::CreateSubTasks() {
 
 void WorkState::Complete(int group, Span<uint64_t> taskReadyMask) {
   auto [mask, uIdx] = AtomicIdx(group);
-  // Sequentially consistent ordering to ensure (1) at least one thread seeing 'isReady' as true,
-  // and (2) visibility of side effects in threads executing dependent groups.
+  // Both the completion RMWs and dependency observations must participate in the same sequentially
+  // consistent order. This ensures at least one thread observes a dependent group as ready and
+  // makes the completed groups' side effects visible to the thread that executes it.
   finished[uIdx].fetch_or(mask, std::memory_order_seq_cst);
   for (auto depGr : dependents[group]) {
     bool isReady = true;
     for (auto [depMask, depIdx] : dependsOn[depGr]) {
-      isReady &= ((finished[depIdx].load(std::memory_order_acquire) & depMask) ^ depMask) == 0;
+      isReady &= ((finished[depIdx].load(std::memory_order_seq_cst) & depMask) ^ depMask) == 0;
     }
     if (isReady) {
       auto [rMask, rIdx] = AtomicIdx(depGr);
@@ -406,7 +408,7 @@ int WorkState::AcquireAny() {
     }
     msk = msk & ((~msk) + 1);
     auto previous = ready[idx].fetch_and(~msk, std::memory_order_acquire);
-    if (msk & previous) { // If non zero, we may try to acquire
+    if (msk & previous) { // If non zero, we may try to acquire.
       previous = acquired[idx].fetch_or(msk, std::memory_order_relaxed);
       if (previous & msk) { // Make sure nobody acquired it yet.
         continue;

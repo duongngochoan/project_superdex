@@ -1,4 +1,4 @@
-﻿/*
+/*
 Copyright (c) 2015 Stephen Brawner
 Copyright (c) Meta Platforms, Inc. and affiliates.
 
@@ -24,31 +24,35 @@ THE SOFTWARE.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Drawing;
 using System.IO;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading;
-using System.Windows.Forms;
-
-using Microsoft.Win32;
-using Newtonsoft.Json;
-using Newtonsoft.Json.Converters;
-
-using Meshing;
+using System.Linq;
+using System.Windows.Forms.Integration;
+using System.Windows;
+using System.Windows.Controls;
 
 using CADRobotExporter.Export;
-using CADRobotExporter.Model;
 using CADRobotExporter.RobotDescription;
 using CADRobotExporter.RobotExport;
 using CADRobotExporter.CAD;
 using CADRobotExporter.Utilities;
+using CADRobotExporter.UI.ViewModels;
+using CADRobotExporter.UI.Views;
 
 using SaveFileDialog = System.Windows.Forms.SaveFileDialog;
 
+// Legacy WinForms MessageBox
+using WindowState = System.Windows.WindowState;
+using MessageBox = System.Windows.Forms.MessageBox;
+using FolderBrowserDialog = System.Windows.Forms.FolderBrowserDialog;
+using MessageBoxButtons = System.Windows.Forms.MessageBoxButtons;
+using MessageBoxIcon = System.Windows.Forms.MessageBoxIcon;
+using MessageBoxOptions = System.Windows.Forms.MessageBoxOptions;
+using MessageBoxDefaultButton = System.Windows.Forms.MessageBoxDefaultButton;
+
+
 namespace CADRobotExporter.UI
 {
-    public partial class AssemblyExportForm : Form
+    public partial class AssemblyExportForm : System.Windows.Window
     {
         public static bool FormIsOpen = false;
         public static AssemblyExportForm Instance { get; private set; }
@@ -58,145 +62,153 @@ namespace CADRobotExporter.UI
         public ExportHelper Exporter;
         public bool AutoUpdatingForm;
 
-        private LinkNode previouslySelectedNode;
-        private readonly Control[] jointBoxes;
-        private readonly Control[] linkBoxes;
+        private LinkTreeItem previouslySelectedNode;
         private readonly LinkNode BaseNode;
 
-        private ExporterConfiguration cachedExporterConfig;
+        // The robot-wide meshing options, used by every link that is not marked as overriding
+        private Export.MeshingOptions globalVisualMeshing = new Export.MeshingOptions();
+        private Export.MeshingOptions globalCollisionMeshing = new Export.MeshingOptions();
+
+        // The link whose override the meshing columns are showing, or null when they are showing the
+        // robot-wide options.
+        private Link meshingEditorLink;
 
         private int _currentTabIndex;
         private bool _navigating;
         private bool _isClosing;
-        private bool _isUpdatingTree;
+        private bool _syncingMeshFormats;
+        private bool _syncingMeshingOverride;
+
+        private readonly MeshFormatSelection visualMeshFormats = new MeshFormatSelection();
+        private readonly MeshFormatSelection collisionMeshFormats = new MeshFormatSelection();
+
+        private readonly KinematicsSummaryView kinematicsSummaryView;
+        private readonly TendonsSummaryView tendonsSummaryView;
+        private readonly JointPropertiesView jointPropertiesView;
+        private readonly InertialPropertiesView inertialPropertiesView;
+        private readonly VisualPropertiesView visualPropertiesView;
+        private readonly MeshExportView meshExportView;
 
         // Solidworks
         private CADBridge CadBridge { get; set; }
 
         public AssemblyExportForm(LinkNode node, ExportHelper exporter)
         {
-            Application.ThreadException +=
-                new ThreadExceptionEventHandler(ExceptionHandler);
+            // Tab, Enter and mnemonics are swallowed without this.
+            ElementHost.EnableModelessKeyboardInterop(this);
+            Dispatcher.UnhandledException += DispatcherUnhandledException;
             AppDomain.CurrentDomain.UnhandledException +=
                 new UnhandledExceptionEventHandler(UnhandledException);
             InitializeComponent();
 
             AutoUpdatingForm = false;
 
-            BaseNode = node;
+            kinematicsSummaryView = new KinematicsSummaryView();
+            kinematicsSummaryView.UseDegreesChanged += (s, ev) => PopulateSummaryGrid();
+            kinematicsSummaryView.RowActivated += OnKinematicsRowActivated;
+
+            jointPropertiesView = new JointPropertiesView();
+            jointPropertiesView.SetJointTypes(new[] { "revolute", "continuous", "prismatic", "fixed" });
+            jointPropertiesView.UseDegreesChanged += UseDegreesCheckboxChanged;
+            jointPropertiesView.LimitsChanged += UpdateJointLimits;
+
+            inertialPropertiesView = new InertialPropertiesView();
+            inertialPropertiesView.RecalculateRequested += RecalculateInertialProperties;
+
+            visualPropertiesView = new VisualPropertiesView();
+
+            meshExportView = new MeshExportView();
+            meshExportView.SetFolderStructures(Enum.GetNames(typeof(FolderStructure)));
+            meshExportView.MeshingOverrideChanged += MeshingOverrideCheckboxChanged;
+            meshExportView.CollisionMeshingChanged += CollisionCheckboxChanged;
+            meshExportView.ResetToDefaultsRequested += ResetMeshingToDefaults;
+            meshExportView.ExportLinkMeshRequested += ButtonExportLinkMeshClick;
+            meshExportView.HelpMeChooseRequested += LinkLabelHelpMeChoose_LinkClicked;
+            meshExportView.MesherSettingChanged += MesherSettingChanged;
+            meshExportView.VisualFormatToggled += MeshExportCheckChanged;
+            meshExportView.CollisionFormatToggled += MeshExportCollisionCheckChanged;
+
+            tendonsSummaryView = new TendonsSummaryView();
+            tendonsSummaryView.ShowSelectedTendonChanged += (s, ev) => ApplyTendonVisualization();
+            tendonsSummaryView.ShowAllTendonsChanged += (s, ev) => ApplyShowAllTendons();
+            tendonsSummaryView.TendonRowSelected += OnTendonRowSelected;
+
+            StackPanel linkPanel = new StackPanel { Margin = new Thickness(8) };
+            linkPanel.Children.Add(inertialPropertiesView);
+            GroupBox meshExportGroup = new GroupBox
+            {
+                Header = "Visual and Collision Mesh Export Properties",
+                Padding = new Thickness(6),
+                Margin = new Thickness(0, 8, 0, 0),
+            };
+            StackPanel meshExportBody = new StackPanel();
+            meshExportView.Margin = new Thickness(0, 8, 0, 0);
+            meshExportBody.Children.Add(visualPropertiesView);
+            meshExportBody.Children.Add(meshExportView);
+            meshExportGroup.Content = meshExportBody;
+            linkPanel.Children.Add(meshExportGroup);
+
+            PopulateTabs(
+                new ScrollViewer
+                {
+                    Content = jointPropertiesView,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                },
+                new ScrollViewer
+                {
+                    Content = linkPanel,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                },
+                kinematicsSummaryView,
+                tendonsSummaryView);
+
+            BaseNode = CreateLinkNodeFromLink(node.Link);
             Exporter = exporter;
             CadBridge = Exporter.CadBridge;
 
-            jointBoxes = new Control[] {
-                textBoxJointName, textBoxRefAxis, comboBoxJointType,
-                textBoxAxisX, textBoxAxisY, textBoxAxisZ,
-                textBoxJointX, textBoxJointY, textBoxJointZ,
-                textBoxJointPitch, textBoxJointRoll, textBoxJointYaw,
-                textBoxLimitEffort, textBoxLimitVelocity,
-                textBoxDamping, textBoxFriction,
-            };
-            linkBoxes = new Control[] {
-                textBoxInertialOriginX, textBoxInertialOriginY, textBoxInertialOriginZ,
-                textBoxInertialOriginRoll, textBoxInertialOriginPitch, textBoxInertialOriginYaw,
-                textBoxVisualOriginX, textBoxVisualOriginY, textBoxVisualOriginZ,
-                textBoxVisualOriginRoll, textBoxVisualOriginPitch, textBoxVisualOriginYaw,
-                textBoxIxx, textBoxIxy, textBoxIxz, textBoxIyy, textBoxIyz, textBoxIzz,
-                textBoxMass,
-                domainUpDownRed, domainUpDownGreen, domainUpDownBlue, domainUpDownAlpha,
-            };
+            LoadExporterConfigurationToForm(CadBridge.GetExporterConfiguration());
 
-            List<TextBox> numericTextBoxes = new List<TextBox>() {
-                textBoxAxisX, textBoxAxisY, textBoxAxisZ,
-                textBoxJointX, textBoxJointY, textBoxJointZ,
-                textBoxJointPitch, textBoxJointRoll, textBoxJointYaw,
-                textBoxLimitEffort, textBoxLimitVelocity,
-                textBoxDamping, textBoxFriction,
-                textBoxInertialOriginX, textBoxInertialOriginY, textBoxInertialOriginZ,
-                textBoxInertialOriginRoll, textBoxInertialOriginPitch, textBoxInertialOriginYaw,
-                textBoxVisualOriginX, textBoxVisualOriginY, textBoxVisualOriginZ,
-                textBoxVisualOriginRoll, textBoxVisualOriginPitch, textBoxVisualOriginYaw,
-                textBoxIxx, textBoxIxy, textBoxIxz, textBoxIyy, textBoxIyz, textBoxIzz,
-                textBoxMass,
-            };
-
-            foreach (TextBox textBox in numericTextBoxes)
-            {
-                textBox.KeyPress += NumericalTextBoxKeyPress;
-            }
-
-            comboBoxFolderStructure.Items.AddRange(Enum.GetNames(typeof(FolderStructure)));
-
-            cachedExporterConfig = CadBridge.GetExporterConfiguration();
-            LoadExporterConfigurationToForm(cachedExporterConfig);
-
-            treeViewJointTree.AfterSelect += new TreeViewEventHandler(TreeViewJointtreeAfterSelect);
-            treeViewLinkProperties.AfterSelect += new TreeViewEventHandler(TreeViewLinkPropertiesAfterSelect);
-            buttonPrevious.Click += new EventHandler(ButtonPreviousClick);
-            buttonNext.Click += new EventHandler(ButtonNextClick);
-            buttonClose.Click += new EventHandler(ButtonCancelClick);
-            buttonLinksFinish.Click += new EventHandler(ButtonLinksFinishClick);
-            buttonLinksExportUrdfOnly.Click += new EventHandler(ButtonLinksExportUrdfOnlyClick);
-            tabControl.Selected += TabControlSelected;
-            FormClosing += OnCloseForm;
-            FormClosed += OnFormClosed;
-            checkBoxObjOpenCascadeVisual.CheckedChanged += new EventHandler(MeshExportCheckChanged);
-            checkBoxStepVisual.CheckedChanged += new EventHandler(MeshExportCheckChanged);
-            checkBoxStlCADVisual.CheckedChanged += new EventHandler(MeshExportCheckChanged);
-            checkBoxStlOpenCascadeVisual.CheckedChanged += new EventHandler(MeshExportCheckChanged);
-            checkBoxGlbOpenCascadeVisual.CheckedChanged += new EventHandler(MeshExportCheckChanged);
-            checkBoxGlbCADVisual.CheckedChanged += new EventHandler(MeshExportCheckChanged);
-            checkBoxObjCADVisual.CheckedChanged += new EventHandler(MeshExportCheckChanged);
-            checkBoxObjOpenCascadeCollision.CheckedChanged += new EventHandler(MeshExportCollisionCheckChanged);
-            checkBoxStepCollision.CheckedChanged += new EventHandler(MeshExportCollisionCheckChanged);
-            checkBoxStlCADCollision.CheckedChanged += new EventHandler(MeshExportCollisionCheckChanged);
-            checkBoxStlOpenCascadeCollision.CheckedChanged += new EventHandler(MeshExportCollisionCheckChanged);
-            checkBoxGlbOpenCascadeCollision.CheckedChanged += new EventHandler(MeshExportCollisionCheckChanged);
-            checkBoxGlbCADCollision.CheckedChanged += new EventHandler(MeshExportCollisionCheckChanged);
-            checkBoxObjCADCollision.CheckedChanged += new EventHandler(MeshExportCollisionCheckChanged);
-            buttonExportLinkMesh.Click += new EventHandler(ButtonExportLinkMeshClick);
-            buttonRecalculateInertial.Click += new EventHandler(RecalculateInertialProperties);
-            numericUpDownLimitUpper.ValueChanged += new EventHandler(UpdateJointLimits);
-            numericUpDownLimitLower.ValueChanged += new EventHandler(UpdateJointLimits);
-            checkBoxShowJointVisualization.CheckedChanged += new EventHandler(ShowJointVizCheckChanged);
-            checkBoxShowLinkVisualization.CheckedChanged += new EventHandler(ShowLinkVizCheckChanged);
-            checkBoxShowTendonVisualization.CheckedChanged += new EventHandler(ShowTendonVizCheckChanged);
-            checkBoxShowAllTendons.CheckedChanged += new EventHandler(ShowAllTendonsCheckChanged);
-            trackBarJointGizmoSize.ValueChanged += new EventHandler(UpdateJointGizmoSize);
-            checkBoxShowJointHighlights.CheckedChanged += new EventHandler(ShowJointHighlightsCheckChanged);
-            checkBoxLinkHighlights.CheckedChanged += new EventHandler(ShowLinkHighlightsCheckChanged);
-            trackBarLinkGizmoSize.ValueChanged += new EventHandler(UpdateLinkGizmoSize);
-            checkBoxCollisionMeshing.CheckedChanged += new EventHandler(CollisionCheckboxChanged);
-            comboBoxBackend.SelectedIndexChanged += new EventHandler(MesherSettingChanged);
-            comboBoxBackendCollision.SelectedIndexChanged += new EventHandler(MesherSettingChanged);
-            numericUpDownTargetEdgeLength.ValueChanged += new EventHandler(MesherSettingChanged);
-            numericUpDownTargetEdgeLengthCollision.ValueChanged += new EventHandler(MesherSettingChanged);
-            buttonResetMeshingToDefaults.Click += new EventHandler(ResetMeshingToDefaults);
-            checkBoxPerLinkMeshing.CheckedChanged += new EventHandler(PerLinkMeshingCheckboxChanged);
-            checkBoxUseDegrees.CheckedChanged += new EventHandler(UseDegreesCheckboxChanged);
-            checkBoxSummaryDegrees.CheckedChanged += (s, ev) => PopulateSummaryGrid();
-            dataGridViewKinematicsSummary.CellDoubleClick += DataGridViewSummaryCellDoubleClick;
-            dataGridViewTendonsSummary.CellClick += DataGridViewTendonsSummaryCellClick;
-
-            linkLabelHelpMeChoose.LinkClicked += LinkLabelHelpMeChoose_LinkClicked;
+            treeViewJointTree.SelectedItemChanged += TreeViewJointtreeAfterSelect;
+            treeViewLinkProperties.SelectedItemChanged += TreeViewLinkPropertiesAfterSelect;
+            buttonPrevious.Click += ButtonPreviousClick;
+            buttonNext.Click += ButtonNextClick;
+            buttonClose.Click += ButtonCancelClick;
+            buttonLinksFinish.Click += ButtonLinksFinishClick;
+            buttonLinksExportUrdfOnly.Click += ButtonLinksExportUrdfOnlyClick;
+            tabControl.SelectionChanged += TabControlSelected;
+            Closing += OnCloseForm;
+            Closed += OnFormClosed;
+            Loaded += AssemblyExportFormLoad;
+            checkBoxShowJointVisualization.Checked += ShowJointVizCheckChanged;
+            checkBoxShowJointVisualization.Unchecked += ShowJointVizCheckChanged;
+            checkBoxShowLinkVisualization.Checked += ShowLinkVizCheckChanged;
+            checkBoxShowLinkVisualization.Unchecked += ShowLinkVizCheckChanged;
+            trackBarJointGizmoSize.ValueChanged += UpdateJointGizmoSize;
+            checkBoxShowJointHighlights.Checked += ShowJointHighlightsCheckChanged;
+            checkBoxShowJointHighlights.Unchecked += ShowJointHighlightsCheckChanged;
+            checkBoxLinkHighlights.Checked += ShowLinkHighlightsCheckChanged;
+            checkBoxLinkHighlights.Unchecked += ShowLinkHighlightsCheckChanged;
+            trackBarLinkGizmoSize.ValueChanged += UpdateLinkGizmoSize;
 
             SetCADSpecificCheckboxProperties();
 
             PopulatePresetComboBox();
-            comboBoxExporterConfigurationPreset.SelectedIndexChanged += ComboBoxExporterConfigurationPreset_SelectedIndexChanged;
+            visualPropertiesView.PresetSelectionChanged += ComboBoxExporterConfigurationPreset_SelectedIndexChanged;
 
             _currentTabIndex = 0;
             _navigating = false;
-            _isUpdatingTree = false;
 
             FormIsOpen = true;
             Instance = this;
 
             UseDegreesCheckboxChanged(null, null);
 
-            this.Text = "SuperDex CAD Exporter " + Versioning.VersionString.Get() + " - Export";
+            this.Title = "SuperDex CAD Exporter " + Versioning.VersionString.Get() + " - Export";
         }
 
-        private void LinkLabelHelpMeChoose_LinkClicked(object sender, LinkLabelLinkClickedEventArgs e)
+        private void LinkLabelHelpMeChoose_LinkClicked(object sender, EventArgs e)
         {
             Process.Start(new ProcessStartInfo
             {
@@ -207,212 +219,194 @@ namespace CADRobotExporter.UI
 
         private void SetCADSpecificCheckboxProperties()
         {
-            const string tag = "<cad>";
             string cad = "";
+            string objSuffix = null;
+            bool cadObjAndGlbSupported = true;
 #if NX
             cad = "NX";
+            objSuffix = " \u26A0\uFE0F";
 #endif
 #if SOLIDWORKS
             cad = "Solidworks";
-            checkBoxObjCADVisual.Enabled = false;
-            checkBoxGlbCADVisual.Enabled = false;
-            checkBoxObjCADCollision.Enabled = false;
-            checkBoxGlbCADCollision.Enabled = false;
-            labelObjCAD.Enabled = false;
-            labelGlbCAD.Enabled = false;
+            cadObjAndGlbSupported = false;
 #endif
-            labelStlCAD.Text = labelStlCAD.Text.Replace(tag, cad);
-            labelObjCAD.Text = labelObjCAD.Text.Replace(tag, cad);
-            labelStep.Text = labelStep.Text.Replace(tag, cad);
-            labelGlbCAD.Text = labelGlbCAD.Text.Replace(tag, cad);
+            meshExportView.ApplyHostProfile(cad, cadObjAndGlbSupported, objSuffix);
 
 #if NX
-            labelObjCAD.Text = labelObjCAD.Text + " ⚠️";
-            toolTips.SetToolTip(checkBoxObjCADVisual,
+            meshExportView.SetRowToolTip(
+                MeshFormat.objCAD,
                 "NX OBJ export does not produce smooth normals for visual models. " +
-                "Use GLB or SuperDex options. MuJoCo also does not support multi-body OBJs, the meshes may need post-processing.");
-            toolTips.SetToolTip(checkBoxObjCADCollision,
+                "Use GLB or SuperDex options. MuJoCo also does not support multi-body OBJs, the meshes may need post-processing.",
                 "NX OBJ export does not produce smooth normals. " +
                 "Use GLB or SuperDex options.");
-
-            //labelJointVisualization.Text = "Hint: Enable \"Show Through Curves\" if joint limit visualization is occluded.";
 #endif
         }
 
-        private void SantizeCADSpecificCheckboxes()
+        private void SanitizeCADSpecificCheckboxes()
         {
 #if SOLIDWORKS
-            checkBoxObjCADVisual.Checked = false;
-            checkBoxGlbCADVisual.Checked = false;
-            checkBoxObjCADCollision.Checked = false;
-            checkBoxGlbCADCollision.Checked = false;
+            meshExportView.UncheckRow(MeshFormat.objCAD);
+            meshExportView.UncheckRow(MeshFormat.glbCAD);
 #endif
+            meshExportView.ApplyEnableState();
         }
 
-        private void PerLinkMeshingCheckboxChanged(object sender, EventArgs e)
+        private static bool CanOverrideMeshing(Link link)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            bool isChecked = checkBox.Checked;
+            return link != null && !link.isFixedFrame && !link.isSite;
+        }
 
-            if (isChecked)
+        // Commits the meshing columns to whichever tier they are currently showing.
+        private void CommitMeshingColumns()
+        {
+            if (meshingEditorLink != null)
             {
-                cachedExporterConfig = SaveFormToExporterConfiguration();
-
-                LinkNode currentNode = (LinkNode)treeViewLinkProperties.SelectedNode;
-                if (currentNode != null)
-                {
-                    LoadMeshingOptionsFromLink(currentNode.Link);
-                }
+                meshExportView.Visual.ReadInto(meshingEditorLink.visualMeshingOptions);
+                meshExportView.Collision.ReadInto(meshingEditorLink.collisionMeshingOptions);
             }
             else
             {
-                if (previouslySelectedNode != null)
-                {
-                    SaveMeshingOptionsToLink(previouslySelectedNode.Link);
-                }
-
-                LoadMeshingOptionsToForm(cachedExporterConfig);
+                meshExportView.Visual.ReadInto(globalVisualMeshing);
+                meshExportView.Collision.ReadInto(globalCollisionMeshing);
             }
         }
 
+        // Points the meshing columns at <paramref name="link"/>'s override if it has one, and at the
+        // robot-wide options otherwise.
+        private void ShowMeshingColumnsFor(Link link)
+        {
+            bool canOverride = CanOverrideMeshing(link);
+            bool overridden = canOverride && link.meshingOverride;
+
+            meshingEditorLink = overridden ? link : null;
+
+            // The check box raises its change event on a programmatic set too, and this runs on every
+            // link selection, so without the guard simply navigating the tree would re-run the seed
+            // and discard paths.
+            _syncingMeshingOverride = true;
+            try
+            {
+                meshExportView.MeshingOverrideEnabled = canOverride;
+                meshExportView.MeshingOverride = overridden;
+            }
+            finally
+            {
+                _syncingMeshingOverride = false;
+            }
+
+            WriteMeshingColumns(
+                overridden ? link.visualMeshingOptions : globalVisualMeshing,
+                overridden ? link.collisionMeshingOptions : globalCollisionMeshing);
+
+            RefreshMeshingOverrideBold();
+        }
+
+        // Bolds only the values an override on screen actually changes from the robot-wide ones.
+        private void RefreshMeshingOverrideBold()
+        {
+            bool overridden = meshingEditorLink != null;
+            meshExportView.BoldValuesDifferentFrom(
+                overridden ? globalVisualMeshing : null,
+                overridden ? globalCollisionMeshing : null);
+        }
+
+        private void ShowMeshingColumnsForSelectedLink()
+        {
+            LinkTreeItem node = treeViewLinkProperties.SelectedItem as LinkTreeItem;
+            ShowMeshingColumnsFor(node?.Link);
+        }
+
+        private void MeshingOverrideCheckboxChanged(object sender, EventArgs e)
+        {
+            if (_syncingMeshingOverride)
+            {
+                return;
+            }
+
+            LinkTreeItem node = treeViewLinkProperties.SelectedItem as LinkTreeItem;
+            if (node == null)
+            {
+                return;
+            }
+
+            CommitMeshingColumns();
+
+            Link link = node.Link;
+            if (meshExportView.MeshingOverride)
+            {
+                link.visualMeshingOptions = globalVisualMeshing.Clone();
+                link.collisionMeshingOptions = globalCollisionMeshing.Clone();
+                link.meshingOverride = true;
+            }
+            else
+            {
+                link.meshingOverride = false;
+            }
+
+            ShowMeshingColumnsFor(link);
+            node.RefreshMeshingOverride();
+        }
+
+        /// <summary>
+        /// Re-renders the selected joint in the newly chosen angle unit. Pending edits are committed
+        /// first using the previous unit so nothing typed is lost, then read back in the new one.
+        /// </summary>
         private void UseDegreesCheckboxChanged(object sender, EventArgs e)
         {
             AutoUpdatingForm = true;
 
-            string jointType = comboBoxJointType.Text;
-            bool isRevolute = jointType == "revolute" || jointType == "continuous";
-
-            // Convert currently displayed values when checkbox changes
-            if (checkBoxUseDegrees.Checked)
+            LinkTreeItem node = treeViewJointTree.SelectedItem as LinkTreeItem;
+            if (node != null && node.Link.Joint != null)
             {
-                // Converting from radians to degrees
-                ConvertTextBoxValue(textBoxJointRoll, RadiansToDegrees);
-                ConvertTextBoxValue(textBoxJointPitch, RadiansToDegrees);
-                ConvertTextBoxValue(textBoxJointYaw, RadiansToDegrees);
-                if (isRevolute)
-                {
-                    ConvertTextBoxValue(textBoxLimitVelocity, RadiansToDegrees);
-                    ConvertNumericUpDownValue(numericUpDownLimitLower, RadiansToDegrees);
-                    ConvertNumericUpDownValue(numericUpDownLimitUpper, RadiansToDegrees);
-                }
+                bool previouslyDegrees = !jointPropertiesView.UseDegrees;
+                jointPropertiesView.Read().SaveTo(node.Link.Joint, previouslyDegrees);
 
-                // Update increment for degrees (5 degrees)
-                numericUpDownLimitLower.Increment = 5M;
-                numericUpDownLimitUpper.Increment = 5M;
+                JointPropertiesViewModel properties = new JointPropertiesViewModel();
+                properties.LoadFrom(node.Link.Joint, jointPropertiesView.UseDegrees);
+                jointPropertiesView.Show(properties);
             }
-            else
-            {
-                // Converting from degrees to radians
-                ConvertTextBoxValue(textBoxJointRoll, DegreesToRadians);
-                ConvertTextBoxValue(textBoxJointPitch, DegreesToRadians);
-                ConvertTextBoxValue(textBoxJointYaw, DegreesToRadians);
-                if (isRevolute)
-                {
-                    ConvertTextBoxValue(textBoxLimitVelocity, DegreesToRadians);
-                    ConvertNumericUpDownValue(numericUpDownLimitLower, DegreesToRadians);
-                    ConvertNumericUpDownValue(numericUpDownLimitUpper, DegreesToRadians);
-                }
-
-                // Update increment for radians (~5 degrees in radians)
-                numericUpDownLimitLower.Increment = 0.0872665M;
-                numericUpDownLimitUpper.Increment = 0.0872665M;
-            }
-
-            // Update labels to reflect current unit
-            UpdateJointLabelsForUnit();
 
             AutoUpdatingForm = false;
         }
 
-        private static double RadiansToDegrees(double radians) => radians * (180.0 / Math.PI);
-        private static double DegreesToRadians(double degrees) => degrees * (Math.PI / 180.0);
-
-        private void ConvertNumericUpDownValue(NumericUpDown control, Func<double, double> converter)
-        {
-            try
-            {
-                double currentValue = (double)control.Value;
-                double newValue = converter(currentValue);
-                // Clamp to control's min/max
-                decimal clampedValue = Math.Max(control.Minimum, Math.Min(control.Maximum, Convert.ToDecimal(newValue)));
-                control.Value = clampedValue;
-            }
-            catch { }
-        }
-
-        private void ConvertTextBoxValue(TextBox control, Func<double, double> converter)
-        {
-            if (double.TryParse(control.Text, out double currentValue))
-            {
-                double newValue = converter(currentValue);
-                control.Text = newValue.ToString("R");
-            }
-        }
-
-        private void UpdateJointLabelsForUnit()
-        {
-            string angleUnit = checkBoxUseDegrees.Checked ? "deg" : "rad";
-            string jointType = comboBoxJointType.Text;
-
-            if (jointType == "revolute" || jointType == "continuous")
-            {
-                labelLowerLimit.Text = $"Lower ({angleUnit})";
-                labelLimitUpper.Text = $"Upper ({angleUnit})";
-                labelVelocity.Text = $"Velocity ({angleUnit}/s)";
-            }
-
-            groupBoxJointOrigin.Text = $"Origin* (m, {angleUnit})";
-        }
+        private static double RadiansToDegrees(double radians) => JointAngles.RadiansToDegrees(radians);
+        private static double DegreesToRadians(double degrees) => JointAngles.DegreesToRadians(degrees);
 
         private void ResetMeshingToDefaults(object sender, EventArgs e)
         {
-            LoadMeshingOptionsToForm(new ExporterConfiguration());
+            ExporterConfiguration defaults = new ExporterConfiguration();
+            WriteMeshingColumns(defaults.visualMeshingOptions, defaults.collisionMeshingOptions);
+            CommitMeshingColumns();
         }
 
         private void CollisionCheckboxChanged(object sender, EventArgs e)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            bool isChecked = checkBox.Checked;
-
-            numericUpDownLinearDeflectionCollision.Enabled = isChecked;
-            numericUpDownAngularDeflectionCollision.Enabled = isChecked;
-            numericUpDownScaleCollision.Enabled = isChecked;
-
-            UpdateMeshingControlEnabledState();
+            meshExportView.ApplyEnableState();
         }
 
-        private void ShowJointVizCheckChanged(object sender, EventArgs e)
+        private void ShowJointVizCheckChanged(object sender, RoutedEventArgs e)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            bool isChecked = checkBox.Checked;
-
-            CadBridge.IsShowingJointGizmo = isChecked;
+            CadBridge.IsShowingJointGizmo = checkBoxShowJointVisualization.IsChecked == true;
             CadBridge.TriggerGraphicsRedraw();
         }
 
-        private void ShowLinkVizCheckChanged(object sender, EventArgs e)
+        private void ShowLinkVizCheckChanged(object sender, RoutedEventArgs e)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            bool isChecked = checkBox.Checked;
-
-            CadBridge.IsShowingInertialGizmo = isChecked;
+            CadBridge.IsShowingInertialGizmo = checkBoxShowLinkVisualization.IsChecked == true;
             CadBridge.TriggerGraphicsRedraw();
         }
 
-        private void ShowTendonVizCheckChanged(object sender, EventArgs e)
+        private void ApplyTendonVisualization()
         {
-            CheckBox checkBox = (CheckBox)sender;
-            bool isChecked = checkBox.Checked;
-
-            CadBridge.IsShowingTendonVisualization = isChecked;
+            CadBridge.IsShowingTendonVisualization = tendonsSummaryView.ShowSelectedTendon;
             CadBridge.TriggerGraphicsRedraw();
         }
 
-        private void ShowAllTendonsCheckChanged(object sender, EventArgs e)
+        private void ApplyShowAllTendons()
         {
-            CheckBox checkBox = (CheckBox)sender;
-            CadBridge.IsShowingAllTendons = checkBox.Checked;
-            if (checkBox.Checked)
+            bool showAll = tendonsSummaryView.ShowAllTendons;
+            CadBridge.IsShowingAllTendons = showAll;
+            if (showAll)
             {
                 CadBridge.AllTendons = Exporter.Robot.Tendons;
                 if (CadBridge.TendonLinkCsysMap == null)
@@ -422,56 +416,56 @@ namespace CADRobotExporter.UI
                     CadBridge.TendonLinkCsysMap = map;
                 }
             }
-            CadBridge.ShowHideVisualizations(checkBox.Checked || checkBoxShowTendonVisualization.Checked);
+            CadBridge.ShowHideVisualizations(showAll || tendonsSummaryView.ShowSelectedTendon);
             CadBridge.TriggerGraphicsRedraw();
         }
 
-        private void UpdateJointGizmoSize(object sender, EventArgs e)
+        private void UpdateJointGizmoSize(object sender, System.Windows.RoutedPropertyChangedEventArgs<double> e)
         {
-            TrackBar trackBar = (TrackBar)sender;
-            double normalized = (double)trackBar.Value / trackBar.Maximum;
-            CadBridge.JointGizmoScale = Math.Pow(8.0, (normalized - 0.5) / 0.5);
+            CadBridge.JointGizmoScale = GizmoScaleFor(trackBarJointGizmoSize);
             CadBridge.TriggerGraphicsRedraw();
         }
 
-        private void UpdateLinkGizmoSize(object sender, EventArgs e)
+        private void UpdateLinkGizmoSize(object sender, System.Windows.RoutedPropertyChangedEventArgs<double> e)
         {
-            TrackBar trackBar = (TrackBar)sender;
-            double normalized = (double)trackBar.Value / trackBar.Maximum;
-            CadBridge.LinkGizmoScale = Math.Pow(8.0, (normalized - 0.5) / 0.5);
+            CadBridge.LinkGizmoScale = GizmoScaleFor(trackBarLinkGizmoSize);
             CadBridge.TriggerGraphicsRedraw();
         }
 
-        private void ShowJointHighlightsCheckChanged(object sender, EventArgs e)
+        private static double GizmoScaleFor(Slider slider)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            if (!checkBox.Checked)
+            double normalized = slider.Value / slider.Maximum;
+            return Math.Pow(8.0, (normalized - 0.5) / 0.5);
+        }
+
+        private void ShowJointHighlightsCheckChanged(object sender, RoutedEventArgs e)
+        {
+            if (checkBoxShowJointHighlights.IsChecked != true)
             {
                 CadBridge.UnselectAll();
             }
             else
             {
-                LinkNode node = (LinkNode)treeViewJointTree.SelectedNode;
+                LinkTreeItem node = treeViewJointTree.SelectedItem as LinkTreeItem;
                 if (node != null)
                 {
-                    CadBridge.SelectJointComponents(node);
+                    CadBridge.SelectJointComponents(node.Link);
                 }
             }
         }
 
-        private void ShowLinkHighlightsCheckChanged(object sender, EventArgs e)
+        private void ShowLinkHighlightsCheckChanged(object sender, RoutedEventArgs e)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            if (!checkBox.Checked)
+            if (checkBoxLinkHighlights.IsChecked != true)
             {
                 CadBridge.UnselectAll();
             }
             else
             {
-                LinkNode node = (LinkNode)treeViewLinkProperties.SelectedNode;
+                LinkTreeItem node = treeViewLinkProperties.SelectedItem as LinkTreeItem;
                 if (node != null)
                 {
-                    CadBridge.SelectLinkComponents(node);
+                    CadBridge.SelectLinkComponents(node.Link);
                 }
             }
         }
@@ -483,12 +477,13 @@ namespace CADRobotExporter.UI
                 return;
             }
 
-            LinkNode node = (LinkNode)treeViewJointTree.SelectedNode;
+            LinkTreeItem node = treeViewJointTree.SelectedItem as LinkTreeItem;
             if (node != null && node.Link.Joint != null)
             {
-                bool useDegrees = checkBoxUseDegrees.Checked;
-                double upper = Convert.ToDouble(numericUpDownLimitUpper.Value);
-                double lower = Convert.ToDouble(numericUpDownLimitLower.Value);
+                JointPropertiesViewModel current = jointPropertiesView.Read();
+                bool useDegrees = jointPropertiesView.UseDegrees;
+                double upper = Convert.ToDouble(current.LimitUpper);
+                double lower = Convert.ToDouble(current.LimitLower);
 
                 if (useDegrees && node.Link.Joint.Type == "revolute")
                 {
@@ -505,7 +500,7 @@ namespace CADRobotExporter.UI
 
         private void RecalculateInertialProperties(object sender, EventArgs e)
         {
-            LinkNode node = (LinkNode)treeViewLinkProperties.SelectedNode;
+            LinkTreeItem node = treeViewLinkProperties.SelectedItem as LinkTreeItem;
             if (node != null && node.Link != null)
             {
                 Exporter.ComputeInertialProperties(node.Link);
@@ -513,161 +508,61 @@ namespace CADRobotExporter.UI
             }
         }
 
-        private void MeshExportCheckChanged(object sender, EventArgs e)
+        private void MeshExportCheckChanged(object sender, MeshFormatToggledEventArgs e)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            bool isChecked = checkBox.Checked;
+            ApplyMeshFormatChange(visualMeshFormats, isCollision: false, toggled: e);
+        }
 
-            if (!isChecked)
+        private void MeshExportCollisionCheckChanged(object sender, MeshFormatToggledEventArgs e)
+        {
+            ApplyMeshFormatChange(collisionMeshFormats, isCollision: true, toggled: e);
+        }
+
+        private void ApplyMeshFormatChange(
+            MeshFormatSelection selection, bool isCollision, MeshFormatToggledEventArgs toggled)
+        {
+            // Writing the boxes back below re-raises the toggle events; ignore those echoes so the
+            // rules are applied exactly once per user action.
+            if (_syncingMeshFormats)
             {
-                if (checkBoxGlbOpenCascadeVisual.Checked || checkBoxGlbCADVisual.Checked)
-                {
-                    textBoxMeshFileExtension.Text = "glb";
-                    return;
-                }
-                if (checkBoxObjOpenCascadeVisual.Checked || checkBoxObjCADVisual.Checked)
-                {
-                    textBoxMeshFileExtension.Text = "obj";
-                    return;
-                }
-                if (checkBoxStlCADVisual.Checked || checkBoxStlOpenCascadeVisual.Checked)
-                {
-                    textBoxMeshFileExtension.Text = "stl";
-                    return;
-                }
-                if (checkBoxStepVisual.Checked)
-                {
-                    textBoxMeshFileExtension.Text = "stp";
-                    return;
-                }
                 return;
             }
 
-            if (checkBox == checkBoxStepVisual)
-            {
-                textBoxMeshFileExtension.Text = "stp";
-            }
-            if (checkBox == checkBoxObjOpenCascadeVisual || checkBox == checkBoxObjCADVisual)
-            {
-                textBoxMeshFileExtension.Text = "obj";
+            selection.Reset(
+                isCollision ? meshExportView.CheckedCollisionFormats : meshExportView.CheckedVisualFormats,
+                isCollision ? meshExportView.CollisionExtension : meshExportView.VisualExtension);
+            selection.Toggle(toggled.Format, toggled.IsChecked);
 
-                if (checkBox == checkBoxObjOpenCascadeVisual && checkBoxObjCADVisual.Checked)
-                {
-                    checkBoxObjCADVisual.Checked = false;
-                }
-                if (checkBox == checkBoxObjCADVisual && checkBoxObjOpenCascadeVisual.Checked)
-                {
-                    checkBoxObjOpenCascadeVisual.Checked = false;
-                }
-            }
-            if (checkBox == checkBoxStlCADVisual || checkBox == checkBoxStlOpenCascadeVisual)
+            _syncingMeshFormats = true;
+            try
             {
-                textBoxMeshFileExtension.Text = "stl";
-
-                if (checkBox == checkBoxStlOpenCascadeVisual && checkBoxStlCADVisual.Checked)
+                if (isCollision)
                 {
-                    checkBoxStlCADVisual.Checked = false;
+                    meshExportView.ShowCollisionFormats(selection.SelectedFormats());
+                    meshExportView.CollisionExtension = selection.FileExtension;
                 }
-                if (checkBox == checkBoxStlCADVisual && checkBoxStlOpenCascadeVisual.Checked)
+                else
                 {
-                    checkBoxStlOpenCascadeVisual.Checked = false;
+                    meshExportView.ShowVisualFormats(selection.SelectedFormats());
+                    meshExportView.VisualExtension = selection.FileExtension;
                 }
             }
-            if (checkBox == checkBoxGlbOpenCascadeVisual || checkBox == checkBoxGlbCADVisual)
+            finally
             {
-                textBoxMeshFileExtension.Text = "glb";
-
-                if (checkBox == checkBoxGlbOpenCascadeVisual && checkBoxGlbCADVisual.Checked)
-                {
-                    checkBoxGlbCADVisual.Checked = false;
-                }
-                if (checkBox == checkBoxGlbCADVisual && checkBoxGlbOpenCascadeVisual.Checked)
-                {
-                    checkBoxGlbOpenCascadeVisual.Checked = false;
-                }
+                _syncingMeshFormats = false;
             }
+
+            // Outside the guard: the writes above re-raise the toggle events
+            meshExportView.ApplyEnableState();
         }
-
-        private void MeshExportCollisionCheckChanged(object sender, EventArgs e)
+        private void TabControlSelected(object sender, SelectionChangedEventArgs e)
         {
-            CheckBox checkBox = (CheckBox)sender;
-            bool isChecked = checkBox.Checked;
-
-            if (!isChecked)
-            {
-                if (checkBoxGlbOpenCascadeCollision.Checked || checkBoxGlbCADCollision.Checked)
-                {
-                    textBoxMeshFileExtensionCollision.Text = "glb";
-                    return;
-                }
-                if (checkBoxObjOpenCascadeCollision.Checked || checkBoxObjCADCollision.Checked)
-                {
-                    textBoxMeshFileExtensionCollision.Text = "obj";
-                    return;
-                }
-                if (checkBoxStlCADCollision.Checked || checkBoxStlOpenCascadeCollision.Checked)
-                {
-                    textBoxMeshFileExtensionCollision.Text = "stl";
-                    return;
-                }
-                if (checkBoxStepCollision.Checked)
-                {
-                    textBoxMeshFileExtensionCollision.Text = "stp";
-                    return;
-                }
+            // Only a change of the tab itself is a navigation.
+            if (!ReferenceEquals(e.OriginalSource, tabControl))
                 return;
-            }
-
-            if (checkBox == checkBoxStepCollision)
-            {
-                textBoxMeshFileExtensionCollision.Text = "stp";
-            }
-            if (checkBox == checkBoxObjOpenCascadeCollision || checkBox == checkBoxObjCADCollision)
-            {
-                textBoxMeshFileExtensionCollision.Text = "obj";
-
-                if (checkBox == checkBoxObjOpenCascadeCollision && checkBoxObjCADCollision.Checked)
-                {
-                    checkBoxObjCADCollision.Checked = false;
-                }
-                if (checkBox == checkBoxObjCADCollision && checkBoxObjOpenCascadeCollision.Checked)
-                {
-                    checkBoxObjOpenCascadeCollision.Checked = false;
-                }
-            }
-            if (checkBox == checkBoxStlCADCollision || checkBox == checkBoxStlOpenCascadeCollision)
-            {
-                textBoxMeshFileExtensionCollision.Text = "stl";
-
-                if (checkBox == checkBoxStlOpenCascadeCollision && checkBoxStlCADCollision.Checked)
-                {
-                    checkBoxStlCADCollision.Checked = false;
-                }
-                if (checkBox == checkBoxStlCADCollision && checkBoxStlOpenCascadeCollision.Checked)
-                {
-                    checkBoxStlOpenCascadeCollision.Checked = false;
-                }
-            }
-            if (checkBox == checkBoxGlbOpenCascadeCollision || checkBox == checkBoxGlbCADCollision)
-            {
-                textBoxMeshFileExtensionCollision.Text = "glb";
-
-                if (checkBox == checkBoxGlbOpenCascadeCollision && checkBoxGlbCADCollision.Checked)
-                {
-                    checkBoxGlbCADCollision.Checked = false;
-                }
-                if (checkBox == checkBoxGlbCADCollision && checkBoxGlbOpenCascadeCollision.Checked)
-                {
-                    checkBoxGlbOpenCascadeCollision.Checked = false;
-                }
-            }
-        }
-
-        private void TabControlSelected(object sender, TabControlEventArgs e)
-        {
             if (_navigating)
                 return;
-            NavigateToTab(e.TabPageIndex);
+            NavigateToTab(tabControl.SelectedIndex);
         }
 
         private void NavigateToTab(int targetTab)
@@ -682,10 +577,10 @@ namespace CADRobotExporter.UI
             OnEnterTab(_currentTabIndex);
 
             _navigating = true;
-            tabControl.SelectTab(_currentTabIndex);
+            tabControl.SelectedIndex = _currentTabIndex;
             _navigating = false;
 
-            Focus();
+            Activate();
             CadBridge.TriggerGraphicsRedraw();
         }
 
@@ -733,7 +628,7 @@ namespace CADRobotExporter.UI
             {
                 string message = "The following joints are missing required fields, please " +
                     "address them before continuing\r\n\r\n" + errors;
-                MessageBox.Show(message, "Robot Configuration Exporter - Joint Errors");
+                MessageBox.Show(message, "SuperDex CAD Exporter - Joint Errors");
                 return false;
             }
 
@@ -741,37 +636,34 @@ namespace CADRobotExporter.UI
             CadBridge.ShowHideVisualizations(false);
             CadBridge.TriggerGraphicsRedraw();
 
-            _isUpdatingTree = true;
-            while (treeViewJointTree.Nodes.Count > 0)
-            {
-                LinkNode node = (LinkNode)treeViewJointTree.Nodes[0];
-                treeViewJointTree.Nodes.Remove(node);
-                BaseNode.Nodes.Add(node);
-            }
-            _isUpdatingTree = false;
-
             return true;
         }
 
         private void OnEnterJointTab()
         {
-            treeViewLinkProperties.Nodes.Clear();
+            treeViewLinkProperties.ItemsSource = null;
             FillJointTree();
-            buttonPrevious.Enabled = false;
-            buttonNext.Enabled = true;
-            buttonLinksExportUrdfOnly.Enabled = false;
-            buttonLinksFinish.Enabled = false;
+            buttonPrevious.IsEnabled = false;
+            buttonNext.IsEnabled = true;
+            buttonLinksExportUrdfOnly.IsEnabled = false;
+            buttonLinksFinish.IsEnabled = false;
 
-            CadBridge.ShowHideVisualizations(checkBoxShowJointVisualization.Checked);
+            CadBridge.ShowHideVisualizations(checkBoxShowJointVisualization.IsChecked == true);
         }
 
         private void OnExitLinkTab()
         {
-            LinkNode node = (LinkNode)treeViewLinkProperties.SelectedNode;
+            LinkTreeItem node = treeViewLinkProperties.SelectedItem as LinkTreeItem;
             if (node != null)
             {
                 SaveLinkDataFromPropertyBoxes(node.Link);
             }
+
+            // Commit any pending meshing edit, then put the columns back on the robot-wide options so
+            // they still agree with meshingEditorLink.
+            CommitMeshingColumns();
+            ShowMeshingColumnsFor(null);
+
             previouslySelectedNode = null;
 
             CadBridge.IsShowingInertialGizmo = false;
@@ -783,26 +675,26 @@ namespace CADRobotExporter.UI
         private void OnEnterLinkTab()
         {
             FillLinkTree();
-            buttonPrevious.Enabled = true;
-            buttonNext.Enabled = true;
-            buttonLinksExportUrdfOnly.Enabled = true;
-            buttonLinksFinish.Enabled = true;
+            buttonPrevious.IsEnabled = true;
+            buttonNext.IsEnabled = true;
+            buttonLinksExportUrdfOnly.IsEnabled = true;
+            buttonLinksFinish.IsEnabled = true;
 
-            CadBridge.IsShowingInertialGizmo = checkBoxShowLinkVisualization.Checked;
+            CadBridge.IsShowingInertialGizmo = checkBoxShowLinkVisualization.IsChecked == true;
             CadBridge.ShowHideVisualizations(true);
         }
 
         private void OnEnterSummaryTab()
         {
-            buttonPrevious.Enabled = true;
-            buttonNext.Enabled = true;
+            buttonPrevious.IsEnabled = true;
+            buttonNext.IsEnabled = true;
             PopulateSummaryGrid();
         }
 
         private void OnEnterTendonsSummaryTab()
         {
-            buttonPrevious.Enabled = true;
-            buttonNext.Enabled = false;
+            buttonPrevious.IsEnabled = true;
+            buttonNext.IsEnabled = false;
 
             // Build link CSYS map for tendon visualization
             var map = new Dictionary<string, string>();
@@ -830,219 +722,43 @@ namespace CADRobotExporter.UI
 
         private void PopulateSummaryGrid()
         {
-            dataGridViewKinematicsSummary.ReadOnly = true;
-            dataGridViewKinematicsSummary.AllowUserToAddRows = false;
-            dataGridViewKinematicsSummary.AllowUserToDeleteRows = false;
-
-            dataGridViewKinematicsSummary.Columns.Clear();
-            dataGridViewKinematicsSummary.Rows.Clear();
-
-            dataGridViewKinematicsSummary.Columns.Add("Index", "Idx");
-            dataGridViewKinematicsSummary.Columns.Add("LinkName", "Link Name");
-            dataGridViewKinematicsSummary.Columns.Add("JointName", "Joint Name");
-            dataGridViewKinematicsSummary.Columns.Add("JointType", "Joint Type");
-            dataGridViewKinematicsSummary.Columns.Add("Axis", "Axis");
-            string limitUnit = checkBoxSummaryDegrees.Checked ? "deg" : "rad";
-            dataGridViewKinematicsSummary.Columns.Add("LowerLimit", $"Lower ({limitUnit})");
-            dataGridViewKinematicsSummary.Columns.Add("UpperLimit", $"Upper ({limitUnit})");
-            dataGridViewKinematicsSummary.Columns.Add("EffortLimit", "Effort (N-m, N)");
-            dataGridViewKinematicsSummary.Columns.Add("VelocityLimit", $"Velocity ({limitUnit}/s, m/s)");
-            dataGridViewKinematicsSummary.Columns.Add("Friction", "Friction");
-            dataGridViewKinematicsSummary.Columns.Add("Damping", "Damping");
-            dataGridViewKinematicsSummary.Columns.Add("Mass", "Mass (kg)");
-            dataGridViewKinematicsSummary.Columns.Add("Inertia", "Inertia (diag)");
-            dataGridViewKinematicsSummary.Columns.Add("InertialBodies", "# Ine");
-            dataGridViewKinematicsSummary.Columns.Add("CollisionBodies", "# Col");
-            dataGridViewKinematicsSummary.Columns.Add("VisualBodies", "# Vis");
-
-            int index = 0;
-            AddLinkToSummaryGrid(BaseNode.Link, true, 0, ref index);
-
-            for (int i = 0; i < dataGridViewKinematicsSummary.Columns.Count; i++)
-            {
-                dataGridViewKinematicsSummary.Columns[i].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-            }
+            kinematicsSummaryView.ShowRows(
+                KinematicsSummary.Build(BaseNode.Link, kinematicsSummaryView.UseDegrees, GetLinkBodyCounts),
+                kinematicsSummaryView.UseDegrees);
         }
 
-        private void AddLinkToSummaryGrid(Link link, bool isBase, int depth, ref int index)
+        private static LinkBodyCounts GetLinkBodyCounts(Link link)
         {
-            string indent = new string(' ', depth * 2);
-            string linkName = indent + link.Name;
-
-            string jointName = "";
-            string jointType = "";
-            string axis = "";
-            string lowerLimit = "";
-            string upperLimit = "";
-            string effortLimit = "";
-            string velocityLimit = "";
-            string friction = "";
-            string damping = "";
-
-            if (!isBase && link.Joint != null && !string.IsNullOrWhiteSpace(link.Joint.Name))
-            {
-                jointName = link.Joint.Name;
-                jointType = link.Joint.Type ?? "";
-
-                if (link.isSite)
-                {
-                    jointType = "(site)";
-                }
-
-                bool showDegrees = checkBoxSummaryDegrees.Checked && jointType == "revolute";
-
-                if (link.Joint.Limit.IsLowerSet())
-                {
-                    double lower = link.Joint.Limit.Lower;
-                    lowerLimit = (showDegrees ? RadiansToDegrees(lower) : lower).ToString("G4");
-                }
-                if (link.Joint.Limit.IsUpperSet())
-                {
-                    double upper = link.Joint.Limit.Upper;
-                    upperLimit = (showDegrees ? RadiansToDegrees(upper) : upper).ToString("G4");
-                }
-                if (link.Joint.Limit.IsEffortSet())
-                {
-                    double effort = link.Joint.Limit.Effort;
-                    effortLimit = effort.ToString("G4");
-                }
-                if (link.Joint.Limit.IsVelocitySet())
-                {
-                    double velocity = link.Joint.Limit.Velocity;
-                    if (jointType == "revolute")
-                    {
-                        velocityLimit = (showDegrees ? RadiansToDegrees(velocity) : velocity).ToString("G4");
-                    }
-                }
-                if (link.Joint.Dynamics.IsFrictionSet())
-                {
-                    friction = link.Joint.Dynamics.Friction.ToString("G4");
-                }
-                if (link.Joint.Dynamics.IsDampingSet())
-                {
-                    damping = link.Joint.Dynamics.Damping.ToString("G4");
-                }
-
-                if (jointType != "fixed" && !string.IsNullOrWhiteSpace(jointType))
-                {
-                    double[] xyz = link.Joint.Axis.GetXYZ();
-                    axis = $"{xyz[0]:G3}, {xyz[1]:G3}, {xyz[2]:G3}";
-                }
-            }
-
-            string mass = link.Inertial.Mass.Value.ToString("G4");
-            string inertia = $"{link.Inertial.Inertia.Ixx:G4}, {link.Inertial.Inertia.Iyy:G4}, {link.Inertial.Inertia.Izz:G4}";
-
-            int inertialCount = 0;
-            int collisionCount = 0;
-            int visualCount = 0;
-
+            LinkBodyCounts counts = new LinkBodyCounts();
 #if SOLIDWORKS
-            if (link.SWInertialComponents != null) inertialCount = link.SWInertialComponents.Count;
-            if (link.SWCollisionComponents != null) collisionCount = link.SWCollisionComponents.Count;
-            if (link.SWVisualComponents != null) visualCount = link.SWVisualComponents.Count;
+            if (link.SWInertialComponents != null) counts.Inertial = link.SWInertialComponents.Count;
+            if (link.SWCollisionComponents != null) counts.Collision = link.SWCollisionComponents.Count;
+            if (link.SWVisualComponents != null) counts.Visual = link.SWVisualComponents.Count;
 #endif
 #if NX
-            if (link.NXInertialBodiesHandles != null) inertialCount = link.NXInertialBodiesHandles.Count;
-            if (link.NXCollisionBodiesHandles != null) collisionCount = link.NXCollisionBodiesHandles.Count;
-            if (link.NXVisualBodiesHandles != null) visualCount = link.NXVisualBodiesHandles.Count;
+            if (link.NXInertialBodiesHandles != null) counts.Inertial = link.NXInertialBodiesHandles.Count;
+            if (link.NXCollisionBodiesHandles != null) counts.Collision = link.NXCollisionBodiesHandles.Count;
+            if (link.NXVisualBodiesHandles != null) counts.Visual = link.NXVisualBodiesHandles.Count;
 #endif
-
-            dataGridViewKinematicsSummary.Rows.Add(
-                index,
-                linkName, jointName, jointType,
-                axis,
-                lowerLimit, upperLimit,
-                effortLimit, velocityLimit,
-                friction, damping,
-                mass, inertia,
-                inertialCount.ToString(), collisionCount.ToString(), visualCount.ToString());
-
-            foreach (Link child in link.Children)
-            {
-                index += 1;
-                AddLinkToSummaryGrid(child, false, depth + 1, ref index);
-            }
+            return counts;
         }
 
         private void PopulateTendonsSummaryGrid()
         {
-            dataGridViewTendonsSummary.ReadOnly = true;
-            dataGridViewTendonsSummary.AllowUserToAddRows = false;
-            dataGridViewTendonsSummary.AllowUserToDeleteRows = false;
-            dataGridViewTendonsSummary.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
-
-            dataGridViewTendonsSummary.Columns.Clear();
-            dataGridViewTendonsSummary.Rows.Clear();
-
-            dataGridViewTendonsSummary.Columns.Add("Index", "Idx");
-            dataGridViewTendonsSummary.Columns.Add("TendonName", "Tendon");
-            dataGridViewTendonsSummary.Columns.Add("Elem", "Elem");
-            dataGridViewTendonsSummary.Columns.Add("Link", "Link");
-            dataGridViewTendonsSummary.Columns.Add("Type", "Type");
-            dataGridViewTendonsSummary.Columns.Add("X", "X");
-            dataGridViewTendonsSummary.Columns.Add("Y", "Y");
-            dataGridViewTendonsSummary.Columns.Add("Z", "Z");
-            dataGridViewTendonsSummary.Columns.Add("Coefficient", "Coefficient");
-
-            if (Exporter.Robot?.Tendons == null)
-                return;
-
-            int index = 0;
-            foreach (var tendon in Exporter.Robot.Tendons)
-            {
-                for (int i = 0; i < tendon.RoutingElements.Count; i++)
-                {
-                    var elem = tendon.RoutingElements[i];
-                    string tendonName = (i == 0) ? tendon.Name : "";
-                    string coef = elem.Coefficient != 0 ? elem.Coefficient.ToString("G4") : "";
-                    bool isLinearJoint = elem.Type == RoutingElement.TypeLinearJoint;
-
-                    dataGridViewTendonsSummary.Rows.Add(
-                        index,
-                        tendonName,
-                        i,
-                        elem.Link,
-                        elem.Type,
-                        isLinearJoint ? "-" : elem.X.ToString("G5"),
-                        isLinearJoint ? "-" : elem.Y.ToString("G5"),
-                        isLinearJoint ? "-" : elem.Z.ToString("G5"),
-                        coef);
-
-                    index++;
-                }
-            }
-
-            for (int i = 0; i < dataGridViewTendonsSummary.Columns.Count; i++)
-            {
-                dataGridViewTendonsSummary.Columns[i].AutoSizeMode = DataGridViewAutoSizeColumnMode.AllCells;
-            }
+            tendonsSummaryView.ShowRows(TendonSummary.Build(Exporter.Robot?.Tendons));
         }
 
-        private void DataGridViewTendonsSummaryCellClick(object sender, DataGridViewCellEventArgs e)
+        private void OnTendonRowSelected(object sender, TendonRowSelectedEventArgs e)
         {
-            if (e.RowIndex < 0)
-                return;
-
-            // Find the tendon name for this row (walk backwards to find the group header)
-            string tendonName = null;
-            for (int row = e.RowIndex; row >= 0; row--)
+            if (_isClosing || string.IsNullOrEmpty(e.TendonName) || Exporter.Robot?.Tendons == null)
             {
-                var val = dataGridViewTendonsSummary.Rows[row].Cells["TendonName"].Value?.ToString();
-                if (!string.IsNullOrEmpty(val))
-                {
-                    tendonName = val;
-                    break;
-                }
-            }
-
-            if (string.IsNullOrEmpty(tendonName) || Exporter.Robot?.Tendons == null)
                 return;
+            }
 
             Tendon tendon = null;
             foreach (var t in Exporter.Robot.Tendons)
             {
-                if (t.Name == tendonName)
+                if (t.Name == e.TendonName)
                 {
                     tendon = t;
                     break;
@@ -1050,18 +766,13 @@ namespace CADRobotExporter.UI
             }
 
             if (tendon == null)
-                return;
-
-            int elemIndex = -1;
-            var elemVal = dataGridViewTendonsSummary.Rows[e.RowIndex].Cells["Elem"].Value;
-            if (elemVal != null && int.TryParse(elemVal.ToString(), out int parsed))
             {
-                elemIndex = parsed;
+                return;
             }
 
             CadBridge.CurrentTendonShown = tendon;
-            CadBridge.TendonHighlightElementIndex = elemIndex;
-            CadBridge.IsShowingTendonVisualization = checkBoxShowTendonVisualization.Checked;
+            CadBridge.TendonHighlightElementIndex = e.ElementIndex;
+            CadBridge.IsShowingTendonVisualization = tendonsSummaryView.ShowSelectedTendon;
             CadBridge.TriggerGraphicsRedraw();
         }
 
@@ -1080,77 +791,72 @@ namespace CADRobotExporter.UI
             }
         }
 
-        private void DataGridViewSummaryCellDoubleClick(object sender, DataGridViewCellEventArgs e)
+        private void OnKinematicsRowActivated(object sender, KinematicsRowActivatedEventArgs e)
         {
-            if (e.RowIndex < 0)
+            // The double-click is still mid-flight: the DataGrid finishes the gesture by setting
+            // the current cell and restoring focus to it on the dispatcher. That focus lands inside
+            // the summary tab and drags the tab selection back, so the jump has to run after it.
+            // Background priority is below the Input and Loaded work the grid queues.
+            Dispatcher.BeginInvoke(
+                new Action(() => JumpToKinematicsTarget(e)),
+                System.Windows.Threading.DispatcherPriority.Background);
+        }
+
+        private void JumpToKinematicsTarget(KinematicsRowActivatedEventArgs e)
+        {
+            if (_isClosing)
             {
                 return;
             }
 
-            string linkName = dataGridViewKinematicsSummary.Rows[e.RowIndex].Cells["LinkName"].Value?.ToString()?.Trim();
-            if (string.IsNullOrEmpty(linkName))
+            if (e.IsJointColumn)
             {
-                return;
-            }
-
-            string columnName = dataGridViewKinematicsSummary.Columns[e.ColumnIndex].Name;
-
-            bool isJointColumn = columnName == "JointName" || columnName == "JointType"
-                || columnName == "Axis" || columnName == "LowerLimit" || columnName == "UpperLimit"
-                || columnName == "EffortLimit" || columnName == "VelocityLimit"
-                || columnName == "Friction" || columnName == "Damping";
-
-            if (isJointColumn)
-            {
-                // Base link has no joint - skip
-                string jointName = dataGridViewKinematicsSummary.Rows[e.RowIndex].Cells["JointName"].Value?.ToString();
-                if (string.IsNullOrWhiteSpace(jointName))
-                {
-                    return;
-                }
-
                 NavigateToTab(0);
-                LinkNode node = FindNodeByLinkName(treeViewJointTree.Nodes, linkName);
-                if (node != null)
-                {
-                    treeViewJointTree.SelectedNode = node;
-                }
+                SelectByLinkName(treeViewJointTree, e.LinkName);
             }
             else
             {
                 NavigateToTab(1);
-                LinkNode node = FindNodeByLinkName(treeViewLinkProperties.Nodes, linkName);
-                if (node != null)
-                {
-                    treeViewLinkProperties.SelectedNode = node;
-                }
+                SelectByLinkName(treeViewLinkProperties, e.LinkName);
             }
         }
 
-        private static LinkNode FindNodeByLinkName(TreeNodeCollection nodes, string linkName)
+        /// <summary>
+        /// Selection is driven through the view model rather than the control, because
+        /// TreeView.SelectedItem is read only.
+        /// </summary>
+        private static void SelectByLinkName(TreeView tree, string linkName)
         {
-            foreach (TreeNode treeNode in nodes)
+            if (tree.ItemsSource == null)
             {
-                LinkNode node = (LinkNode)treeNode;
-                if (node.Link.Name == linkName)
-                {
-                    return node;
-                }
-                LinkNode found = FindNodeByLinkName(node.Nodes, linkName);
-                if (found != null)
-                {
-                    return found;
-                }
+                return;
             }
-            return null;
+
+            foreach (LinkTreeItem root in tree.ItemsSource.OfType<LinkTreeItem>())
+            {
+                LinkTreeItem found = root.FindByLinkName(linkName);
+                if (found == null)
+                {
+                    continue;
+                }
+
+                found.ExpandAncestors();
+                found.IsSelected = true;
+                return;
+            }
         }
 
-        private void ExceptionHandler(object sender, ThreadExceptionEventArgs e)
+        private void DispatcherUnhandledException(
+            object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
         {
             logger.Error("Exception encountered in Assembly export form", e.Exception);
             MessageBox.Show("There was a problem with the export form: \n\"" +
                 e.Exception.Message + "\"\nContact your maintainer with the log file found at " +
                 Logger.GetLogFolder());
+
+            // The host runs this add-in in-process with no WPF Application of its own.
+            // An exception allowed to keep unwinding from here takes the CAD application down.
+            e.Handled = true;
         }
 
         private void UnhandledException(object sender, UnhandledExceptionEventArgs e)
@@ -1162,107 +868,143 @@ namespace CADRobotExporter.UI
                 Logger.GetLogFolder());
         }
 
-        //Joint form configuration controls
-        private void AssemblyExportFormLoad(object sender, EventArgs e)
+        private void AssemblyExportFormLoad(object sender, RoutedEventArgs e)
         {
-            // Exporter.UpdateReferenceGeometries();
             FillJointTree();
-            CadBridge.ShowHideVisualizations(checkBoxShowJointVisualization.Checked);
+            CadBridge.ShowHideVisualizations(checkBoxShowJointVisualization.IsChecked == true);
         }
 
         private string CheckJointsForErrors()
         {
-            StringBuilder builder = new StringBuilder();
-            foreach (LinkNode child in treeViewJointTree.Nodes)
-            {
-                CheckJointsForErrors(child, builder);
-            }
-            return builder.ToString();
-        }
-
-        private StringBuilder CheckJointsForErrors(LinkNode node, StringBuilder builder)
-        {
-            if (!node.Link.Joint.AreRequiredFieldsSatisfied())
-            {
-                builder.Append(node.Link.Joint.Name).Append("\r\n");
-            }
-
-            foreach (LinkNode child in node.Nodes)
-            {
-                CheckJointsForErrors(child, builder);
-            }
-            return builder;
+            return RobotValidation.JointsMissingRequiredFields(BaseNode.Link);
         }
 
         private void ButtonCancelClick(object sender, EventArgs e)
         {
-            if (!_isClosing)
+            if (TryTearDown())
             {
-                switch (_currentTabIndex)
+                Close();
+            }
+        }
+
+        /// <summary>
+        /// Runs the save prompt and tears down everything this form put into the CAD document.
+        /// </summary>
+        /// <returns>
+        /// False if the user asked to cancel out of the save prompt, meaning the form should stay
+        /// open. True once teardown has run, or if it had already run.
+        /// </returns>
+        private bool TryTearDown()
+        {
+            if (_isClosing)
+            {
+                return true;
+            }
+
+            if (CadBridge == null)
+            {
+                _isClosing = true;
+                return true;
+            }
+
+            if (CadBridge.IsDocumentValid)
+            {
+                try
                 {
-                    case 0:
-                        ButtonJointCancelClick(sender, e);
-                        break;
-                    case 1:
-                    case 2:
-                    case 3:
-                        ButtonLinksCancelClick(sender, e);
-                        break;
+                    if (SaveOnClose() == CAD.ConfigSaveResult.Cancelled)
+                    {
+                        return false;
+                    }
                 }
+                catch (Exception ex)
+                {
+                    logger.Error("Exception caught while saving the configuration on close", ex);
+                }
+            }
+            else
+            {
+                logger.Warning("Document is no longer open; closing without saving the configuration");
+            }
+
+            try
+            {
                 CadBridge.IsShowingJointGizmo = false;
                 CadBridge.IsShowingTendonVisualization = false;
                 CadBridge.IsShowingInertialGizmo = false;
                 CadBridge.ShowHideVisualizations(false);
                 Exporter.CleanUpTemporaryFeatures();
                 CadBridge.UnselectAll();
-                _isClosing = true;
             }
-            Close();
+            catch (Exception ex)
+            {
+                // Best effort. Letting this escape would leave the form unclosable and, in an
+                // in-process add-in, can take the host down.
+                logger.Error("Exception caught while clearing visualizations on close", ex);
+            }
+
+            _isClosing = true;
+            return true;
         }
 
-        private void OnCloseForm(object sender, FormClosingEventArgs e)
+        /// <summary>
+        /// Saves the edits from the tab the user is currently on, prompting whether to keep them.
+        /// </summary>
+        private CAD.ConfigSaveResult SaveOnClose()
         {
-            if (!_isClosing)
+            switch (_currentTabIndex)
             {
-                ButtonCancelClick(sender, e);
+                case 0:
+                    return SaveJointTabOnClose();
+                default:
+                    return SaveLinkTabOnClose();
             }
+        }
 
+        private void OnCloseForm(object sender, System.ComponentModel.CancelEventArgs e)
+        {
+            if (!TryTearDown())
+            {
+                e.Cancel = true;
+            }
+        }
+
+        private void OnFormClosed(object sender, EventArgs e)
+        {
+            // Cleared here rather than while closing, because a close can still be cancelled from
+            // the save prompt. If these leaked, CheckExportFormOpen would report a form open for
+            // the rest of the session and try to activate a dead window.
             FormIsOpen = false;
             Instance = null;
-        }
 
-        private void OnFormClosed(object sender, FormClosedEventArgs e)
-        {
+            // Both were subscribed in the constructor. The AppDomain handler is a static root, so
+            // leaving it attached keeps every form instance alive for the life of the host and
+            // lets a stale form handle a later exception.
+            Dispatcher.UnhandledException -= DispatcherUnhandledException;
+            AppDomain.CurrentDomain.UnhandledException -= UnhandledException;
+
             // When this owned modeless form is destroyed, Windows transfers activation
             // away from the host and it ends up behind another window. Re-assert the
             // host CAD window as foreground so it stays focused.
             CadBridge?.RestoreHostForeground();
         }
 
-        private void ButtonJointCancelClick(object sender, EventArgs e)
+        private CAD.ConfigSaveResult SaveJointTabOnClose()
         {
             if (previouslySelectedNode != null)
             {
                 SaveJointDataFromPropertyBoxes(previouslySelectedNode.Link.Joint);
             }
-            _isUpdatingTree = true;
-            while (treeViewJointTree.Nodes.Count > 0)
-            {
-                LinkNode node = (LinkNode)treeViewJointTree.Nodes[0];
-                treeViewJointTree.Nodes.Remove(node);
-                BaseNode.Nodes.Add(node);
-            }
-            _isUpdatingTree = false;
-            SaveConfigurationFromTree(BaseNode, true);
+            return SaveConfigurationFromTree(BaseNode, true, allowCancel: true);
         }
 
-        private void ButtonLinksCancelClick(object sender, EventArgs e)
+        private CAD.ConfigSaveResult SaveLinkTabOnClose()
         {
             if (previouslySelectedNode != null)
             {
                 SaveLinkDataFromPropertyBoxes(previouslySelectedNode.Link);
+                previouslySelectedNode.RefreshDisplayName();
             }
-            SaveConfigurationFromTree(BaseNode, true);
+            return SaveConfigurationFromTree(BaseNode, true, allowCancel: true);
         }
 
         private void ButtonLinksFinishClick(object sender, EventArgs e)
@@ -1277,7 +1019,7 @@ namespace CADRobotExporter.UI
 
         private void ButtonExportLinkMeshClick(object sender, EventArgs e)
         {
-            LinkNode selectedNode = (LinkNode)treeViewLinkProperties.SelectedNode;
+            LinkTreeItem selectedNode = treeViewLinkProperties.SelectedItem as LinkTreeItem;
             if (selectedNode == null)
             {
                 MessageBox.Show("Please select a link in the tree first.", "Export Link Mesh",
@@ -1290,7 +1032,7 @@ namespace CADRobotExporter.UI
             List<MeshFormat> visualFormats = BuildVisualFormatList();
             List<MeshFormat> collisionFormats = BuildCollisionFormatList();
 
-            if (visualFormats.Count == 0 && (!checkBoxCollisionMeshing.Checked || collisionFormats.Count == 0))
+            if (visualFormats.Count == 0 && (!meshExportView.CollisionMeshing || collisionFormats.Count == 0))
             {
                 MessageBox.Show("At least one mesh export format must be selected.", "Export Link Mesh",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button1, MessageBoxOptions.DefaultDesktopOnly);
@@ -1301,24 +1043,24 @@ namespace CADRobotExporter.UI
             {
                 folderDialog.Description = "Select output folder for link meshes";
                 folderDialog.SelectedPath = CadBridge.GetLatestExportLocation();
-                if (folderDialog.ShowDialog() != DialogResult.OK)
+                if (folderDialog.ShowDialog() != System.Windows.Forms.DialogResult.OK)
                     return;
 
-                ExporterMeshingOptions meshingOptions = BuildMeshingOptionsFromForm();
+                ExporterMeshingOptions meshingOptions = BuildMeshingOptionsFromForm().ResolveFor(link);
                 ExporterConfiguration config = SaveFormToExporterConfiguration();
                 RobotPackage package = new RobotPackage("", "", config.folderStructure);
 
                 Func<string, bool> confirmOverwrite = (filePath) =>
                 {
                     string fileName = Path.GetFileName(filePath);
-                    DialogResult result = MessageBox.Show(
+                    System.Windows.Forms.DialogResult result = MessageBox.Show(
                         $"File \"{fileName}\" already exists. Replace?",
                         "Export Link Mesh",
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Question,
                         MessageBoxDefaultButton.Button1,
                         MessageBoxOptions.DefaultDesktopOnly);
-                    return result == DialogResult.Yes;
+                    return result == System.Windows.Forms.DialogResult.Yes;
                 };
 
                 this.Hide();
@@ -1330,7 +1072,7 @@ namespace CADRobotExporter.UI
                         package,
                         folderDialog.SelectedPath,
                         visualFormats,
-                        checkBoxCollisionMeshing.Checked ? collisionFormats : new List<MeshFormat>(),
+                        meshExportView.CollisionMeshing ? collisionFormats : new List<MeshFormat>(),
                         meshingOptions,
                         confirmOverwrite);
 
@@ -1346,199 +1088,79 @@ namespace CADRobotExporter.UI
 
         private List<MeshFormat> BuildVisualFormatList()
         {
-            List<MeshFormat> formats = new List<MeshFormat>();
-            if (checkBoxStepVisual.Checked) formats.Add(MeshFormat.stepSolidworks);
-            if (checkBoxStlCADVisual.Checked) formats.Add(MeshFormat.stlSolidworks);
-            if (checkBoxGlbCADVisual.Checked) formats.Add(MeshFormat.glbCAD);
-            if (checkBoxObjCADVisual.Checked) formats.Add(MeshFormat.objCAD);
-            if (checkBoxObjOpenCascadeVisual.Checked) formats.Add(MeshFormat.objOpenCascade);
-            if (checkBoxStlOpenCascadeVisual.Checked) formats.Add(MeshFormat.stlOpenCascade);
-            if (checkBoxGlbOpenCascadeVisual.Checked) formats.Add(MeshFormat.glbOpenCascade);
-            return formats;
+            return meshExportView.CheckedVisualFormats;
         }
 
         private List<MeshFormat> BuildCollisionFormatList()
         {
-            List<MeshFormat> formats = new List<MeshFormat>();
-            if (checkBoxStepCollision.Checked) formats.Add(MeshFormat.stepSolidworks);
-            if (checkBoxStlCADCollision.Checked) formats.Add(MeshFormat.stlSolidworks);
-            if (checkBoxGlbCADCollision.Checked) formats.Add(MeshFormat.glbCAD);
-            if (checkBoxObjCADCollision.Checked) formats.Add(MeshFormat.objCAD);
-            if (checkBoxObjOpenCascadeCollision.Checked) formats.Add(MeshFormat.objOpenCascade);
-            if (checkBoxStlOpenCascadeCollision.Checked) formats.Add(MeshFormat.stlOpenCascade);
-            if (checkBoxGlbOpenCascadeCollision.Checked) formats.Add(MeshFormat.glbOpenCascade);
-            return formats;
+            return meshExportView.CheckedCollisionFormats;
         }
 
         private ExporterMeshingOptions BuildMeshingOptionsFromForm()
         {
+            CommitMeshingColumns();
+
             ExporterMeshingOptions meshingOptions = new ExporterMeshingOptions();
-            meshingOptions.visualMeshingOptions = new Export.MeshingOptions();
-            meshingOptions.collisionMeshingOptions = new Export.MeshingOptions();
-            meshingOptions.visualMeshingOptions.linearDeflection = (float)numericUpDownLinearDeflection.Value;
-            meshingOptions.visualMeshingOptions.angularDeflection = (float)numericUpDownAngularDeflection.Value;
-            meshingOptions.visualMeshingOptions.scale = (float)numericUpDownScale.Value;
-            ReadMesherSettings(meshingOptions.visualMeshingOptions, exportingCollision: false);
-            meshingOptions.collisionMeshingOptions.linearDeflection = (float)numericUpDownLinearDeflectionCollision.Value;
-            meshingOptions.collisionMeshingOptions.angularDeflection = (float)numericUpDownAngularDeflectionCollision.Value;
-            meshingOptions.collisionMeshingOptions.scale = (float)numericUpDownScaleCollision.Value;
-            ReadMesherSettings(meshingOptions.collisionMeshingOptions, exportingCollision: true);
-            meshingOptions.meshTagExtension = textBoxMeshFileExtension.Text;
-            meshingOptions.collisionMeshTagExtension = textBoxMeshFileExtensionCollision.Text;
-            meshingOptions.exportCollision = checkBoxCollisionMeshing.Checked;
-            meshingOptions.perLinkMeshing = checkBoxPerLinkMeshing.Checked;
+            // The robot-wide options
+            meshingOptions.visualMeshingOptions = globalVisualMeshing.Clone();
+            meshingOptions.collisionMeshingOptions = globalCollisionMeshing.Clone();
+            meshingOptions.meshTagExtension = meshExportView.VisualExtension;
+            meshingOptions.collisionMeshTagExtension = meshExportView.CollisionExtension;
+            meshingOptions.exportCollision = meshExportView.CollisionMeshing;
             return meshingOptions;
         }
 
-        // The four mesher settings are read and written in five places (export, config load/save,
-        // per-link load/save), so the control-to-field mapping lives here once rather than being
-        // repeated -- and repeated twice over, for the visual and collision columns.
-        private void ReadMesherSettings(Export.MeshingOptions target, bool exportingCollision)
+        private void WriteMeshingColumns(Export.MeshingOptions visual, Export.MeshingOptions collision)
         {
-            target.backend = BackendFromIndex(
-                (exportingCollision ? comboBoxBackendCollision : comboBoxBackend).SelectedIndex);
-            target.edgeSampling = EdgeSamplingFromIndex(
-                (exportingCollision ? comboBoxEdgeSamplingCollision : comboBoxEdgeSampling).SelectedIndex);
-            target.targetEdgeLength = (double)(exportingCollision
-                ? numericUpDownTargetEdgeLengthCollision
-                : numericUpDownTargetEdgeLength).Value;
-            target.targetEdgeLengthFraction = (double)(exportingCollision
-                ? numericUpDownEdgeLengthFractionCollision
-                : numericUpDownEdgeLengthFraction).Value;
-        }
-
-        private void WriteMesherSettings(Export.MeshingOptions source, bool exportingCollision)
-        {
-            (exportingCollision ? comboBoxBackendCollision : comboBoxBackend).SelectedIndex =
-                IndexFromBackend(source.backend);
-            (exportingCollision ? comboBoxEdgeSamplingCollision : comboBoxEdgeSampling).SelectedIndex =
-                IndexFromEdgeSampling(source.edgeSampling);
-            SetClamped(
-                exportingCollision
-                    ? numericUpDownTargetEdgeLengthCollision
-                    : numericUpDownTargetEdgeLength,
-                source.targetEdgeLength);
-            SetClamped(
-                exportingCollision
-                    ? numericUpDownEdgeLengthFractionCollision
-                    : numericUpDownEdgeLengthFraction,
-                source.targetEdgeLengthFraction);
-        }
-
-        // These values arrive from persisted JSON, which nothing validates against the control's
-        // range -- and NumericUpDown throws rather than clamping when assigned out of range, which
-        // inside a CAD host means taking the session down over a stale configuration.
-        private static void SetClamped(NumericUpDown control, double value)
-        {
-            decimal clamped = (decimal)value;
-            if (clamped < control.Minimum)
-            {
-                clamped = control.Minimum;
-            }
-            else if (clamped > control.Maximum)
-            {
-                clamped = control.Maximum;
-            }
-            control.Value = clamped;
-        }
-
-        // Mapped explicitly rather than cast, so the combo item order stays a presentation choice
-        // and cannot silently change which backend a saved configuration means.
-        private const int BackendIndexIsotropic = 0;
-        private const int BackendIndexDelabella = 1;
-        private const int EdgeSamplingIndexAdaptive = 0;
-        private const int EdgeSamplingIndexUniform = 1;
-
-        private static MeshingBackend BackendFromIndex(int index) =>
-            index == BackendIndexDelabella ? MeshingBackend.Delabella : MeshingBackend.Isotropic;
-
-        private static int IndexFromBackend(MeshingBackend backend) =>
-            backend == MeshingBackend.Delabella ? BackendIndexDelabella : BackendIndexIsotropic;
-
-        private static EdgeSampling EdgeSamplingFromIndex(int index) =>
-            index == EdgeSamplingIndexUniform ? EdgeSampling.Uniform : EdgeSampling.Adaptive;
-
-        private static int IndexFromEdgeSampling(EdgeSampling sampling) =>
-            sampling == EdgeSampling.Uniform ? EdgeSamplingIndexUniform : EdgeSamplingIndexAdaptive;
-
-        /// <summary>
-        /// Applies the three interacting enable rules across both columns: the collision column
-        /// follows its enable checkbox, the isotropic-only settings follow that column's backend,
-        /// and the edge-length fraction is only meaningful while the absolute length is zero.
-        /// </summary>
-        private void UpdateMeshingControlEnabledState()
-        {
-            UpdateMeshingColumnEnabledState(exportingCollision: false, columnEnabled: true);
-            UpdateMeshingColumnEnabledState(
-                exportingCollision: true, columnEnabled: checkBoxCollisionMeshing.Checked);
-        }
-
-        private void UpdateMeshingColumnEnabledState(bool exportingCollision, bool columnEnabled)
-        {
-            ComboBox backend = exportingCollision ? comboBoxBackendCollision : comboBoxBackend;
-            ComboBox edgeSampling =
-                exportingCollision ? comboBoxEdgeSamplingCollision : comboBoxEdgeSampling;
-            NumericUpDown targetEdgeLength = exportingCollision
-                ? numericUpDownTargetEdgeLengthCollision
-                : numericUpDownTargetEdgeLength;
-            NumericUpDown edgeLengthFraction = exportingCollision
-                ? numericUpDownEdgeLengthFractionCollision
-                : numericUpDownEdgeLengthFraction;
-
-            bool isotropic = BackendFromIndex(backend.SelectedIndex) == MeshingBackend.Isotropic;
-
-            backend.Enabled = columnEnabled;
-            edgeSampling.Enabled = columnEnabled && isotropic;
-            targetEdgeLength.Enabled = columnEnabled && isotropic;
-            edgeLengthFraction.Enabled = columnEnabled && isotropic && targetEdgeLength.Value == 0M;
+            meshExportView.Visual.Write(visual);
+            meshExportView.Collision.Write(collision);
+            meshExportView.ApplyEnableState();
         }
 
         private void MesherSettingChanged(object sender, EventArgs e)
         {
-            UpdateMeshingControlEnabledState();
+            meshExportView.ApplyEnableState();
+            RefreshMeshingOverrideBold();
+        }
+
+        /// <summary>
+        /// True when the same mesh format is requested from both the SuperDex and the CAD host
+        /// exporter, which would have the two writes race for the same output file.
+        /// </summary>
+        private bool HasDuplicateExportMethod(bool collision)
+        {
+            Func<MeshFormat, bool> isChecked = collision
+                ? (Func<MeshFormat, bool>)meshExportView.IsCollisionFormatChecked
+                : meshExportView.IsVisualFormatChecked;
+
+            return (isChecked(MeshFormat.stlOpenCascade) && isChecked(MeshFormat.stlSolidworks))
+                || (isChecked(MeshFormat.glbOpenCascade) && isChecked(MeshFormat.glbCAD))
+                || (isChecked(MeshFormat.objOpenCascade) && isChecked(MeshFormat.objCAD));
         }
 
         private void FinishExport(bool exportLinkMesh)
         {
-            if (exportLinkMesh
-                && !checkBoxStlCADVisual.Checked
-                && !checkBoxStlOpenCascadeVisual.Checked
-                && !checkBoxStepVisual.Checked
-                && !checkBoxObjOpenCascadeVisual.Checked
-                && !checkBoxGlbOpenCascadeVisual.Checked
-                && !checkBoxGlbCADVisual.Checked
-                && !checkBoxObjCADVisual.Checked)
+            if (exportLinkMesh && meshExportView.CheckedVisualFormats.Count == 0)
             {
                 MessageBox.Show("At least one Visual Link Export Format must be chosen!");
                 return;
             }
 
-            if (exportLinkMesh && checkBoxCollisionMeshing.Checked
-                && !checkBoxStlCADCollision.Checked
-                && !checkBoxStlOpenCascadeCollision.Checked
-                && !checkBoxStepCollision.Checked
-                && !checkBoxObjOpenCascadeCollision.Checked
-                && !checkBoxGlbOpenCascadeCollision.Checked
-                && !checkBoxGlbCADCollision.Checked
-                && !checkBoxObjCADCollision.Checked)
+            if (exportLinkMesh && meshExportView.CollisionMeshing
+                && meshExportView.CheckedCollisionFormats.Count == 0)
             {
                 MessageBox.Show("At least one Collision Link Export Format must be chosen when collision meshing is enabled!");
                 return;
             }
 
-            if (exportLinkMesh &&
-                ((checkBoxStlOpenCascadeVisual.Checked && checkBoxStlCADVisual.Checked)
-                || (checkBoxGlbOpenCascadeVisual.Checked && checkBoxGlbCADVisual.Checked)
-                || (checkBoxObjOpenCascadeVisual.Checked && checkBoxObjCADVisual.Checked)))
+            if (exportLinkMesh && HasDuplicateExportMethod(collision: false))
             {
                 MessageBox.Show("Only one method of export per format is supported at a time (visual)!");
                 return;
             }
 
-            if (exportLinkMesh && checkBoxCollisionMeshing.Checked &&
-                ((checkBoxStlOpenCascadeCollision.Checked && checkBoxStlCADCollision.Checked)
-                || (checkBoxGlbOpenCascadeCollision.Checked && checkBoxGlbCADCollision.Checked)
-                || (checkBoxObjOpenCascadeCollision.Checked && checkBoxObjCADCollision.Checked)))
+            if (exportLinkMesh && meshExportView.CollisionMeshing
+                && HasDuplicateExportMethod(collision: true))
             {
                 MessageBox.Show("Only one method of export per format is supported at a time (collision)!");
                 return;
@@ -1550,13 +1172,13 @@ namespace CADRobotExporter.UI
             SaveConfigurationFromTree(BaseNode, false);
 
             // Saving selected node
-            LinkNode node = (LinkNode)treeViewLinkProperties.SelectedNode;
+            LinkTreeItem node = treeViewLinkProperties.SelectedItem as LinkTreeItem;
             if (node != null)
             {
                 SaveLinkDataFromPropertyBoxes(node.Link);
             }
 
-            Exporter.Robot = CreateRobotFromTreeView(treeViewLinkProperties);
+            Exporter.Robot = CreateRobotFromTreeView();
             Exporter.PackageName = Exporter.Robot.Name;
 
             // The UI should prevent these sorts of errors, but just in case
@@ -1567,7 +1189,7 @@ namespace CADRobotExporter.UI
 
                 string message = "The following links contained errors in either their link or joint " +
                     "properties. Please address before continuing\r\n\r\n" + errors;
-                MessageBox.Show(message, "Robot Configuration Exporter - Link Errors");
+                MessageBox.Show(message, "SuperDex CAD Exporter - Link Errors");
                 return;
             }
 
@@ -1578,28 +1200,10 @@ namespace CADRobotExporter.UI
 
                 string message = "The following links have possibly missing inertial properties. You may need to recalculate them." +
                 "\r\n\r\nDo you want to proceed anyways?\r\n\r\n" + linksWithInvalidInertials;
-                DialogResult result =
+                System.Windows.Forms.DialogResult result =
                     MessageBox.Show(message, "Links with invalid inertials detected", MessageBoxButtons.YesNo);
 
-                if (result == DialogResult.No)
-                {
-                    logger.Information("Export canceled for user to review warnings");
-                    return;
-                }
-            }
-
-            string warnings = CheckLinksForWarnings(Exporter.Robot.BaseLink);
-
-            if (!string.IsNullOrWhiteSpace(warnings))
-            {
-                logger.Information("Link warnings encountered:\r\n" + warnings);
-
-                string message = "The following links contained issues that may cause problems. " +
-                "Do you wish to proceed?\r\n\r\n" + warnings;
-                DialogResult result =
-                    MessageBox.Show(message, "Robot Configuration Exporter - Link Warnings", MessageBoxButtons.YesNo);
-
-                if (result == DialogResult.No)
+                if (result == System.Windows.Forms.DialogResult.No)
                 {
                     logger.Information("Export canceled for user to review warnings");
                     return;
@@ -1610,7 +1214,7 @@ namespace CADRobotExporter.UI
 
             bool retrievedLastSavePath = true;
 
-            string initialDir = GetMruDirectory();
+            string initialDir = ShellMruDirectory.Get();
             if (string.IsNullOrEmpty(initialDir))
             {
                 initialDir = CadBridge.GetLatestExportLocation();
@@ -1639,7 +1243,7 @@ namespace CADRobotExporter.UI
                 FileName = fileName
             };
 
-            bool saveResult = DialogResult.OK == saveFileDialog1.ShowDialog();
+            bool saveResult = System.Windows.Forms.DialogResult.OK == saveFileDialog1.ShowDialog();
             saveFileDialog1.Dispose();
             if (saveResult)
             {
@@ -1656,7 +1260,7 @@ namespace CADRobotExporter.UI
                 List<MeshFormat> exportFormats = BuildVisualFormatList();
                 List<MeshFormat> collisionExportFormats = BuildCollisionFormatList();
 
-                this.WindowState = FormWindowState.Minimized;
+                this.WindowState = WindowState.Minimized;
 
                 ExporterConfiguration config = SaveFormToExporterConfiguration();
                 Exporter.ExportRobot(exportLinkMesh, exportFormats, collisionExportFormats, meshingOptions, config);
@@ -1665,90 +1269,60 @@ namespace CADRobotExporter.UI
                 string mjcfPath = Exporter.MJCFFileName;
                 string superdexBotPath = Exporter.SuperDexBotFileName;
 
-                using (var dialog = new ExportCompleteDialog(urdfPath, mjcfPath, superdexBotPath))
+                ExportCompleteDialog dialog = new ExportCompleteDialog(urdfPath, mjcfPath, superdexBotPath);
+                dialog.Owner = this;
+                if (dialog.ShowDialog() == true)
                 {
-                    if (dialog.ShowDialog(this) == DialogResult.Yes)
-                    {
-                        Process.Start("explorer.exe", $"/select,\"{targetFolder}\"");
-                        this.WindowState = FormWindowState.Minimized;
-                    }
-                    else
-                    {
-                        this.WindowState = FormWindowState.Normal;
-                        Focus();
-                    }
+                    Process.Start("explorer.exe", $"/select,\"{targetFolder}\"");
+                    this.WindowState = WindowState.Minimized;
+                }
+                else
+                {
+                    this.WindowState = WindowState.Normal;
+                    Focus();
                 }
             }
         }
 
-        private string CheckLinksForErrors(Link baseLink)
+        private static string CheckLinksForErrors(Link baseLink)
         {
-            StringBuilder builder = new StringBuilder();
-            CheckLinkForErrors(baseLink, builder);
-            return builder.ToString();
+            return RobotValidation.LinksMissingRequiredFields(baseLink);
         }
 
-        private StringBuilder CheckLinkForErrors(Link link, StringBuilder builder)
+        private static string CheckLinksForValidInertials(Link baseLink)
         {
-            if (!link.AreRequiredFieldsSatisfied())
-            {
-                builder.Append(link.Name).Append("\r\n");
-            }
-            foreach (Link child in link.Children)
-            {
-                CheckLinkForErrors(child, builder);
-            }
-            return builder;
+            return RobotValidation.LinksWithInvalidInertials(baseLink);
         }
 
-        private string CheckLinksForValidInertials(Link baseLink)
+        private void TreeViewLinkPropertiesAfterSelect(
+            object sender,
+            RoutedPropertyChangedEventArgs<object> e)
         {
-            StringBuilder builder = new StringBuilder();
-            CheckLinkForValidInertials(baseLink, builder);
-            return builder.ToString();
-        }
-
-        private StringBuilder CheckLinkForValidInertials(Link link, StringBuilder builder)
-        {
-            if (!link.HasValidInertialProperties())
-            {
-                builder.Append(link.Name).Append("\r\n");
-            }
-            foreach (Link child in link.Children)
-            {
-                CheckLinkForValidInertials(child, builder);
-            }
-            return builder;
-        }
-
-        private void TreeViewLinkPropertiesAfterSelect(object sender, TreeViewEventArgs e)
-        {
-            if (_isUpdatingTree)
+            LinkTreeItem node = e.NewValue as LinkTreeItem;
+            if (node == null)
             {
                 return;
             }
 
-            Font fontRegular = new Font(treeViewJointTree.Font, FontStyle.Regular);
-            Font fontBold = new Font(treeViewJointTree.Font, FontStyle.Bold);
             if (previouslySelectedNode != null)
             {
                 SaveLinkDataFromPropertyBoxes(previouslySelectedNode.Link);
-                previouslySelectedNode.NodeFont = fontRegular;
             }
-            LinkNode node = (LinkNode)e.Node;
-            node.NodeFont = fontBold;
-            node.Text = node.Text;
 
-            if (checkBoxLinkHighlights.Checked)
+            // Committed against the link the columns were actually showing, which is tracked
+            // separately from previouslySelectedNode because the joint tree shares that field.
+            CommitMeshingColumns();
+
+            if (checkBoxLinkHighlights.IsChecked == true)
             {
-                CadBridge.SelectLinkComponents(node);
+                CadBridge.SelectLinkComponents(node.Link);
             }
 
             FillLinkPropertyBoxes(node.Link);
             treeViewLinkProperties.Focus();
             previouslySelectedNode = node;
 
-            CadBridge.CurrentLinkNodeShown = node;
+            CadBridge.CurrentLinkNodeShown = node.Link;
             CadBridge.TriggerGraphicsRedraw();
         }
 
@@ -1759,86 +1333,33 @@ namespace CADRobotExporter.UI
         /// </summary>
         /// <param name="sender"></param>
         /// <param name="e"></param>
-        private void NumericalTextBoxKeyPress(object sender, KeyPressEventArgs e)
+        private void TreeViewJointtreeAfterSelect(
+            object sender,
+            RoutedPropertyChangedEventArgs<object> e)
         {
-            // In most cases, if we can't parse what they are trying to type, then it's not
-            // valid input.
-            TextBox textBox = (TextBox)sender;
-            string potentialText = textBox.Text + e.KeyChar;
-            bool parseSuccess =
-                double.TryParse(potentialText,
-                    ElementAttribute.NumberStyle,
-                    ElementAttribute.NumberFormat,
-                    out _);
-
-            // If the key pressed is not a digit, +/- sign or the decimal separator than ignore it (e.Handled = true)
-            e.Handled = (!parseSuccess &&
-                         !char.IsControl(e.KeyChar) &&
-                         !char.IsDigit(e.KeyChar) &&
-                         potentialText != "-" &&
-                         potentialText != "+");
-        }
-
-        private void TreeViewJointtreeAfterSelect(object sender, TreeViewEventArgs e)
-        {
-            if (_isUpdatingTree)
+            LinkTreeItem node = e.NewValue as LinkTreeItem;
+            if (node == null)
             {
                 return;
             }
 
-            Font fontRegular = new Font(treeViewJointTree.Font, FontStyle.Regular);
-            Font fontBold = new Font(treeViewJointTree.Font, FontStyle.Bold);
             if (previouslySelectedNode != null && !previouslySelectedNode.IsBaseNode)
             {
                 SaveJointDataFromPropertyBoxes(previouslySelectedNode.Link.Joint);
             }
-            if (previouslySelectedNode != null)
-            {
-                previouslySelectedNode.NodeFont = fontRegular;
-            }
-            LinkNode node = (LinkNode)e.Node;
 
-            if (checkBoxShowJointHighlights.Checked)
+            if (checkBoxShowJointHighlights.IsChecked == true)
             {
-                CadBridge.SelectJointComponents(node);
+                CadBridge.SelectJointComponents(node.Link);
             }
 
-            node.NodeFont = fontBold;
-            node.Text = node.Text;
             FillJointPropertyBoxes(node.Link.Joint);
             previouslySelectedNode = node;
 
             CadBridge.IsShowingJointGizmo = true;
-            CadBridge.CurrentNodeShown = node;
+            CadBridge.CurrentNodeShown = node.Link;
 
             CadBridge.TriggerGraphicsRedraw();
-        }
-
-        public void LoadMeshingOptionsFromLink(Link link)
-        {
-            numericUpDownLinearDeflection.Value = (decimal)link.visualMeshingOptions.linearDeflection;
-            numericUpDownAngularDeflection.Value = (decimal)link.visualMeshingOptions.angularDeflection;
-            numericUpDownScale.Value = (decimal)link.visualMeshingOptions.scale;
-            WriteMesherSettings(link.visualMeshingOptions, exportingCollision: false);
-
-            numericUpDownLinearDeflectionCollision.Value = (decimal)link.collisionMeshingOptions.linearDeflection;
-            numericUpDownAngularDeflectionCollision.Value = (decimal)link.collisionMeshingOptions.angularDeflection;
-            numericUpDownScaleCollision.Value = (decimal)link.collisionMeshingOptions.scale;
-            WriteMesherSettings(link.collisionMeshingOptions, exportingCollision: true);
-
-            UpdateMeshingControlEnabledState();
-        }
-        public void SaveMeshingOptionsToLink(Link link)
-        {
-            link.visualMeshingOptions.linearDeflection = (double)numericUpDownLinearDeflection.Value;
-            link.visualMeshingOptions.angularDeflection = (double)numericUpDownAngularDeflection.Value;
-            link.visualMeshingOptions.scale = (double)numericUpDownScale.Value;
-            ReadMesherSettings(link.visualMeshingOptions, exportingCollision: false);
-
-            link.collisionMeshingOptions.linearDeflection = (double)numericUpDownLinearDeflectionCollision.Value;
-            link.collisionMeshingOptions.angularDeflection = (double)numericUpDownAngularDeflectionCollision.Value;
-            link.collisionMeshingOptions.scale = (double)numericUpDownScaleCollision.Value;
-            ReadMesherSettings(link.collisionMeshingOptions, exportingCollision: true);
         }
 
         public void LoadMeshingOptionsToForm(ExporterConfiguration config)
@@ -1848,17 +1369,14 @@ namespace CADRobotExporter.UI
                 config = new ExporterConfiguration(); // Use defaults
             }
 
-            numericUpDownLinearDeflection.Value = (decimal)config.visualMeshingOptions.linearDeflection;
-            numericUpDownAngularDeflection.Value = (decimal)config.visualMeshingOptions.angularDeflection;
-            numericUpDownScale.Value = (decimal)config.visualMeshingOptions.scale;
-            WriteMesherSettings(config.visualMeshingOptions, exportingCollision: false);
+            // Commit first: with an override on screen the columns hold that link's values, and
+            // replacing the globals underneath them would drop the edit rather than save it.
+            CommitMeshingColumns();
 
-            numericUpDownLinearDeflectionCollision.Value = (decimal)config.collisionMeshingOptions.linearDeflection;
-            numericUpDownAngularDeflectionCollision.Value = (decimal)config.collisionMeshingOptions.angularDeflection;
-            numericUpDownScaleCollision.Value = (decimal)config.collisionMeshingOptions.scale;
-            WriteMesherSettings(config.collisionMeshingOptions, exportingCollision: true);
+            globalVisualMeshing = config.visualMeshingOptions.Clone();
+            globalCollisionMeshing = config.collisionMeshingOptions.Clone();
 
-            UpdateMeshingControlEnabledState();
+            ShowMeshingColumnsForSelectedLink();
         }
 
         public void LoadExporterConfigurationToForm(ExporterConfiguration config)
@@ -1870,115 +1388,89 @@ namespace CADRobotExporter.UI
 
             LoadMeshingOptionsToForm(config);
 
-            checkBoxGlbOpenCascadeVisual.Checked = config.meshFormats.Contains(MeshFormat.glbOpenCascade);
-            checkBoxObjOpenCascadeVisual.Checked = config.meshFormats.Contains(MeshFormat.objOpenCascade);
-            checkBoxStlOpenCascadeVisual.Checked = config.meshFormats.Contains(MeshFormat.stlOpenCascade);
-            checkBoxStlCADVisual.Checked = config.meshFormats.Contains(MeshFormat.stlSolidworks);
-            checkBoxStepVisual.Checked = config.meshFormats.Contains(MeshFormat.stepSolidworks);
-            checkBoxGlbCADVisual.Checked = config.meshFormats.Contains(MeshFormat.glbCAD);
-            checkBoxObjCADVisual.Checked = config.meshFormats.Contains(MeshFormat.objCAD);
+            meshExportView.ShowVisualFormats(config.meshFormats);
 
-            if (config.hasCollisionMeshFormats)
-            {
-                checkBoxGlbOpenCascadeCollision.Checked = config.collisionMeshFormats.Contains(MeshFormat.glbOpenCascade);
-                checkBoxObjOpenCascadeCollision.Checked = config.collisionMeshFormats.Contains(MeshFormat.objOpenCascade);
-                checkBoxStlOpenCascadeCollision.Checked = config.collisionMeshFormats.Contains(MeshFormat.stlOpenCascade);
-                checkBoxStlCADCollision.Checked = config.collisionMeshFormats.Contains(MeshFormat.stlSolidworks);
-                checkBoxStepCollision.Checked = config.collisionMeshFormats.Contains(MeshFormat.stepSolidworks);
-                checkBoxGlbCADCollision.Checked = config.collisionMeshFormats.Contains(MeshFormat.glbCAD);
-                checkBoxObjCADCollision.Checked = config.collisionMeshFormats.Contains(MeshFormat.objCAD);
-            }
-            else
-            {
-                checkBoxGlbOpenCascadeCollision.Checked = config.meshFormats.Contains(MeshFormat.glbOpenCascade);
-                checkBoxObjOpenCascadeCollision.Checked = config.meshFormats.Contains(MeshFormat.objOpenCascade);
-                checkBoxStlOpenCascadeCollision.Checked = config.meshFormats.Contains(MeshFormat.stlOpenCascade);
-                checkBoxStlCADCollision.Checked = config.meshFormats.Contains(MeshFormat.stlSolidworks);
-                checkBoxStepCollision.Checked = config.meshFormats.Contains(MeshFormat.stepSolidworks);
-                checkBoxGlbCADCollision.Checked = config.meshFormats.Contains(MeshFormat.glbCAD);
-                checkBoxObjCADCollision.Checked = config.meshFormats.Contains(MeshFormat.objCAD);
-            }
+            // A configuration saved before collision formats existed reuses the visual ones.
+            meshExportView.ShowCollisionFormats(
+                config.hasCollisionMeshFormats ? config.collisionMeshFormats : config.meshFormats);
 
-            SantizeCADSpecificCheckboxes();
+            SanitizeCADSpecificCheckboxes();
 
-            textBoxMeshFileExtension.Text = config.meshTagExtension;
-            textBoxMeshFileExtensionCollision.Text = config.collisionMeshTagExtension;
-            checkBoxCollisionMeshing.Checked = config.enableCollisionMeshing;
-            CollisionCheckboxChanged(checkBoxCollisionMeshing, null);
-            checkBoxPerLinkMeshing.Checked = config.perLinkMeshing;
+            meshExportView.VisualExtension = config.meshTagExtension;
+            meshExportView.CollisionExtension = config.collisionMeshTagExtension;
+            meshExportView.CollisionMeshing = config.enableCollisionMeshing;
+            meshExportView.ApplyEnableState();
 
             string documentTitle = CadBridge.GetDocumentTitle();
 
             textBoxRobotName.Text = string.IsNullOrEmpty(config.robotName) ? Path.GetFileNameWithoutExtension(documentTitle) : config.robotName;
 
-            comboBoxFolderStructure.SelectedIndex = (int)config.folderStructure;
+            meshExportView.FolderStructure = config.folderStructure.ToString();
         }
 
         public ExporterConfiguration SaveFormToExporterConfiguration()
         {
+            CommitMeshingColumns();
+
             ExporterConfiguration config = new ExporterConfiguration();
 
-            config.visualMeshingOptions.linearDeflection = (double)numericUpDownLinearDeflection.Value;
-            config.visualMeshingOptions.angularDeflection = (double)numericUpDownAngularDeflection.Value;
-            config.visualMeshingOptions.scale = (double)numericUpDownScale.Value;
-            ReadMesherSettings(config.visualMeshingOptions, exportingCollision: false);
-
-            config.collisionMeshingOptions.linearDeflection = (double)numericUpDownLinearDeflectionCollision.Value;
-            config.collisionMeshingOptions.angularDeflection = (double)numericUpDownAngularDeflectionCollision.Value;
-            config.collisionMeshingOptions.scale = (double)numericUpDownScaleCollision.Value;
-            ReadMesherSettings(config.collisionMeshingOptions, exportingCollision: true);
+            config.visualMeshingOptions = globalVisualMeshing.Clone();
+            config.collisionMeshingOptions = globalCollisionMeshing.Clone();
 
             config.meshFormats = new List<MeshFormat>();
 
-            if (checkBoxGlbOpenCascadeVisual.Checked)
+            if (meshExportView.IsVisualFormatChecked(MeshFormat.glbOpenCascade))
                 config.meshFormats.Add(MeshFormat.glbOpenCascade);
-            if (checkBoxObjOpenCascadeVisual.Checked)
+            if (meshExportView.IsVisualFormatChecked(MeshFormat.objOpenCascade))
                 config.meshFormats.Add(MeshFormat.objOpenCascade);
-            if (checkBoxStlOpenCascadeVisual.Checked)
+            if (meshExportView.IsVisualFormatChecked(MeshFormat.stlOpenCascade))
                 config.meshFormats.Add(MeshFormat.stlOpenCascade);
-            if (checkBoxStlCADVisual.Checked)
+            if (meshExportView.IsVisualFormatChecked(MeshFormat.stlSolidworks))
                 config.meshFormats.Add(MeshFormat.stlSolidworks);
-            if (checkBoxStepVisual.Checked)
+            if (meshExportView.IsVisualFormatChecked(MeshFormat.stepSolidworks))
                 config.meshFormats.Add(MeshFormat.stepSolidworks);
-            if (checkBoxGlbCADVisual.Checked)
+            if (meshExportView.IsVisualFormatChecked(MeshFormat.glbCAD))
                 config.meshFormats.Add(MeshFormat.glbCAD);
-            if (checkBoxObjCADVisual.Checked)
+            if (meshExportView.IsVisualFormatChecked(MeshFormat.objCAD))
                 config.meshFormats.Add(MeshFormat.objCAD);
 
-            config.meshTagExtension = textBoxMeshFileExtension.Text;
-            config.collisionMeshTagExtension = textBoxMeshFileExtensionCollision.Text;
-            config.enableCollisionMeshing = checkBoxCollisionMeshing.Checked;
-            config.perLinkMeshing = checkBoxPerLinkMeshing.Checked;
+            config.meshTagExtension = meshExportView.VisualExtension;
+            config.collisionMeshTagExtension = meshExportView.CollisionExtension;
+            config.enableCollisionMeshing = meshExportView.CollisionMeshing;
 
             config.collisionMeshFormats = new List<MeshFormat>();
 
-            if (checkBoxGlbOpenCascadeCollision.Checked)
+            if (meshExportView.IsCollisionFormatChecked(MeshFormat.glbOpenCascade))
                 config.collisionMeshFormats.Add(MeshFormat.glbOpenCascade);
-            if (checkBoxObjOpenCascadeCollision.Checked)
+            if (meshExportView.IsCollisionFormatChecked(MeshFormat.objOpenCascade))
                 config.collisionMeshFormats.Add(MeshFormat.objOpenCascade);
-            if (checkBoxStlOpenCascadeCollision.Checked)
+            if (meshExportView.IsCollisionFormatChecked(MeshFormat.stlOpenCascade))
                 config.collisionMeshFormats.Add(MeshFormat.stlOpenCascade);
-            if (checkBoxStlCADCollision.Checked)
+            if (meshExportView.IsCollisionFormatChecked(MeshFormat.stlSolidworks))
                 config.collisionMeshFormats.Add(MeshFormat.stlSolidworks);
-            if (checkBoxStepCollision.Checked)
+            if (meshExportView.IsCollisionFormatChecked(MeshFormat.stepSolidworks))
                 config.collisionMeshFormats.Add(MeshFormat.stepSolidworks);
-            if (checkBoxGlbCADCollision.Checked)
+            if (meshExportView.IsCollisionFormatChecked(MeshFormat.glbCAD))
                 config.collisionMeshFormats.Add(MeshFormat.glbCAD);
-            if (checkBoxObjCADCollision.Checked)
+            if (meshExportView.IsCollisionFormatChecked(MeshFormat.objCAD))
                 config.collisionMeshFormats.Add(MeshFormat.objCAD);
 
             config.hasCollisionMeshFormats = true;
 
             config.robotName = textBoxRobotName.Text;
 
-            config.folderStructure = (FolderStructure)comboBoxFolderStructure.SelectedIndex;
+            FolderStructure parsedFolderStructure;
+            config.folderStructure =
+                Enum.TryParse(meshExportView.FolderStructure, out parsedFolderStructure)
+                    ? parsedFolderStructure
+                    : default(FolderStructure);
 
             return config;
         }
 
         private void ComboBoxExporterConfigurationPreset_SelectedIndexChanged(object sender, EventArgs e)
         {
-            var selected = comboBoxExporterConfigurationPreset.SelectedItem;
+            var selected = visualPropertiesView.SelectedPreset;
             // Ignore separator
             if (selected is string str)
             {
@@ -1986,7 +1478,7 @@ namespace CADRobotExporter.UI
                 {
                     SaveCurrentAsPreset();
                     // Reset selection to previous or default
-                    comboBoxExporterConfigurationPreset.SelectedIndex = 0;
+                    visualPropertiesView.SelectedPresetIndex = 0;
                 }
                 return;
             }
@@ -2003,447 +1495,46 @@ namespace CADRobotExporter.UI
             // Get current config from form
             ExporterConfiguration config = SaveFormToExporterConfiguration();
 
-            using (var dialog = new InputDialog("Save Preset", "Enter preset name:"))
+            InputDialog dialog = new InputDialog("Save Preset", "Enter preset name:");
+            dialog.Owner = this;
+            if (dialog.ShowDialog() != true || string.IsNullOrWhiteSpace(dialog.InputText))
             {
-                if (dialog.ShowDialog(this) != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.InputText))
-                    return;
-                string presetName = dialog.InputText.Trim();
-                string invalidChars = new string(Path.GetInvalidFileNameChars());
-
-                foreach (char c in invalidChars)
-                    presetName = presetName.Replace(c.ToString(), "");
-                string filePath = Path.Combine(GetPresetsDirectory(), $"{presetName}.json");
-                string json = JsonConvert.SerializeObject(config, GetJsonSettings());
-                File.WriteAllText(filePath, json);
-                // Refresh the comboBox
-                PopulatePresetComboBox();
-                MessageBox.Show($"Preset '{presetName}' saved.\n\nYou can share your presets from  {GetPresetsDirectory()}", "Success",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
             }
-        }
 
-        private static readonly List<ExporterConfigurationPreset> PredefinedPresets = new List<ExporterConfigurationPreset>
-        {
-            new ExporterConfigurationPreset
-            {
-                Name = "Default",
-                Configuration = new ExporterConfiguration(),
-                IsUserPreset = false
-            },
-            new ExporterConfigurationPreset
-            {
-#if NX
-                Name = "MuJoCo/ROS (obj) - Native, widest compat",
-#elif SOLIDWORKS
-                Name = "MuJoCo/ROS (stl) - Native, widest compat",
-#endif
-                Configuration = new ExporterConfiguration
-                {
-                    visualMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 0.5,
-                        angularDeflection = 0.5,
-                        scale = 1.0
-                    },
-                    collisionMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 1.0,
-                        angularDeflection = 0.75,
-                        scale = 1.0
-                    },
-                    enableCollisionMeshing = true,
-#if NX
-                    meshFormats = new List<MeshFormat> { MeshFormat.objCAD },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.objCAD },
-#elif SOLIDWORKS
-                    meshFormats = new List<MeshFormat> { MeshFormat.stlSolidworks },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.stlSolidworks },
-#endif
-#if NX
-                    meshTagExtension = "obj",
-                    collisionMeshTagExtension = "obj",
-#elif SOLIDWORKS
-                    meshTagExtension = "stl",
-                    collisionMeshTagExtension = "stl",
-#endif
-                    hasCollisionMeshFormats = true,
-                    folderStructure = FolderStructure.ROS,
-                },
-                IsUserPreset = false
-            },
-            new ExporterConfigurationPreset
-            {
-#if NX
-                Name = "MuJoCo/ROS (stl) - Native, widest compat",
-#elif SOLIDWORKS
-                Name = "MuJoCo (obj) - SuperDex, widest compat",
-#endif
-                Configuration = new ExporterConfiguration
-                {
-                    visualMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 0.5,
-                        angularDeflection = 0.5,
-                        scale = 1.0
-                    },
-                    collisionMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 1.0,
-                        angularDeflection = 0.75,
-                        scale = 1.0
-                    },
-                    enableCollisionMeshing = true,
-#if NX
-                    meshFormats = new List<MeshFormat> { MeshFormat.stlSolidworks },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.stlSolidworks },
-#elif SOLIDWORKS
-                    meshFormats = new List<MeshFormat> { MeshFormat.objOpenCascade },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.objOpenCascade },
-#endif
-#if NX
-                    meshTagExtension = "stl",
-                    collisionMeshTagExtension = "stl",
-#elif SOLIDWORKS
-                    meshTagExtension = "obj",
-                    collisionMeshTagExtension = "obj",
-#endif
-                    hasCollisionMeshFormats = true,
-                    folderStructure = FolderStructure.ROS,
-                },
-                IsUserPreset = false
-            },
-            new ExporterConfigurationPreset
-            {
-#if NX
-                Name = "SuperDex (glb) - Quick preview",
-#elif SOLIDWORKS
-                Name = "SuperDex (glb, stl) - Quick preview",
-#endif
-                Configuration = new ExporterConfiguration
-                {
-                    visualMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 0.1,
-                        angularDeflection = 0.5,
-                        scale = 1.0
-                    },
-                    collisionMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 0.5,
-                        angularDeflection = 0.75,
-                        scale = 1.0
-                    },
-                    enableCollisionMeshing = true,
-#if NX
-                    meshFormats = new List<MeshFormat> { MeshFormat.glbCAD },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.glbCAD },
-#elif SOLIDWORKS
-                    meshFormats = new List<MeshFormat> { MeshFormat.glbOpenCascade },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.stlSolidworks },
-#endif
-                    meshTagExtension = "glb",
-#if NX
-                    collisionMeshTagExtension = "glb",
-#elif SOLIDWORKS
-                    collisionMeshTagExtension = "stl",
-#endif
-                    hasCollisionMeshFormats = true,
-                    folderStructure = FolderStructure.SuperDex,
-                },
-                IsUserPreset = false
-            },
-            new ExporterConfigurationPreset
-            {
-#if NX
-                Name = "SuperDex (glb, stp) - Studio import",
-#elif SOLIDWORKS
-                Name = "SuperDex (glb, stl, stp) - Studio import",
-#endif
-                Configuration = new ExporterConfiguration
-                {
-                    visualMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 0.1,
-                        angularDeflection = 0.5,
-                        scale = 1.0
-                    },
-                    collisionMeshingOptions = new Export.MeshingOptions
-                    {
-                        linearDeflection = 0.5,
-                        angularDeflection = 0.75,
-                        scale = 1.0
-                    },
-                    enableCollisionMeshing = true,
-#if NX
-                    meshFormats = new List<MeshFormat> { MeshFormat.glbCAD },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.glbCAD, MeshFormat.stepSolidworks },
-#elif SOLIDWORKS
-                    meshFormats = new List<MeshFormat> { MeshFormat.glbOpenCascade },
-                    collisionMeshFormats = new List<MeshFormat> { MeshFormat.stlSolidworks, MeshFormat.stepSolidworks },
-#endif
-                    meshTagExtension = "glb",
-                    collisionMeshTagExtension = "mochi.h5",
-                    hasCollisionMeshFormats = true,
-                    folderStructure = FolderStructure.SuperDex,
-                },
-                IsUserPreset = false
-            },
-        };
+            string presetName = PresetStore.SaveUserPreset(dialog.InputText.Trim(), config);
+
+            // Refresh the comboBox
+            PopulatePresetComboBox();
+            MessageBox.Show($"Preset '{presetName}' saved.\n\nYou can share your presets from  {PresetStore.GetPresetsDirectory()}", "Success",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
 
         private const string SavePresetOption = "(Save Preset...)";
 
-        private static string GetPresetsDirectory()
-        {
-            string path = Path.Combine(
-                System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile),
-#if NX
-                "NxRobotExporter",
-#elif SOLIDWORKS
-                "sw2urdf",
-#endif
-                "presets");
-
-            if (!Directory.Exists(path))
-                Directory.CreateDirectory(path);
-
-            return path;
-        }
-
-        private static JsonSerializerSettings GetJsonSettings()
-        {
-            return new JsonSerializerSettings
-            {
-                ObjectCreationHandling = ObjectCreationHandling.Replace,
-                Converters = new List<JsonConverter> { new StringEnumConverter() },
-                Formatting = Formatting.Indented
-            };
-        }
-
-        private static List<ExporterConfigurationPreset> LoadUserPresets()
-        {
-            var presets = new List<ExporterConfigurationPreset>();
-            string presetsDir = GetPresetsDirectory();
-            foreach (string file in Directory.GetFiles(presetsDir, "*.json"))
-            {
-                try
-                {
-                    string json = File.ReadAllText(file);
-                    var config = JsonConvert.DeserializeObject<ExporterConfiguration>(json, GetJsonSettings());
-                    presets.Add(new ExporterConfigurationPreset
-                    {
-                        Name = Path.GetFileNameWithoutExtension(file),
-                        Configuration = config,
-                        IsUserPreset = true
-                    });
-                }
-                catch
-                {
-                    // Skip invalid files
-                }
-            }
-            return presets;
-        }
-
         private void PopulatePresetComboBox()
         {
-            comboBoxExporterConfigurationPreset.Items.Clear();
-            comboBoxExporterConfigurationPreset.Items.Add("");
+            visualPropertiesView.ClearPresets();
+            visualPropertiesView.AddPreset("");
             // Add predefined presets
-            foreach (var preset in PredefinedPresets)
+            foreach (var preset in ExporterConfigurationPresets.Predefined)
             {
-                comboBoxExporterConfigurationPreset.Items.Add(preset);
+                visualPropertiesView.AddPreset(preset);
             }
             // Add user presets
-            var userPresets = LoadUserPresets();
+            var userPresets = PresetStore.LoadUserPresets();
             if (userPresets.Count > 0)
             {
-                comboBoxExporterConfigurationPreset.Items.Add("─── User Presets ───"); // Separator
+                visualPropertiesView.AddPreset("─── User Presets ───"); // Separator
                 foreach (var preset in userPresets)
                 {
-                    comboBoxExporterConfigurationPreset.Items.Add(preset);
+                    visualPropertiesView.AddPreset(preset);
                 }
             }
             // Add save option at the end
-            comboBoxExporterConfigurationPreset.Items.Add(SavePresetOption);
+            visualPropertiesView.AddPreset(SavePresetOption);
             // Select default
-            comboBoxExporterConfigurationPreset.SelectedIndex = 0;
-        }
-
-        // This essentially pulls the "RestoreDirectory = true" directory
-        private const string LastVisitedMruPath =
-            @"Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\LastVisitedPidlMRU";
-
-        [DllImport("shell32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SHGetPathFromIDListW(
-            IntPtr pidl, [MarshalAs(UnmanagedType.LPTStr)] StringBuilder pszPath);
-
-        private static string GetMruDirectory()
-        {
-            try
-            {
-                using (RegistryKey rk = Registry.CurrentUser.OpenSubKey(LastVisitedMruPath))
-                {
-                    if (rk == null)
-                        return null;
-
-                    byte[] mruList = rk.GetValue("MRUListEx") as byte[];
-                    if (mruList == null || mruList.Length < 4)
-                        return null;
-
-                    // Walk the MRU list looking for ugraf.exe entries
-                    for (int i = 0; i < mruList.Length - 4; i += 4)
-                    {
-                        int index = BitConverter.ToInt32(mruList, i);
-                        if (index == -1)
-                            break;
-
-                        byte[] entry = rk.GetValue(index.ToString()) as byte[];
-                        if (entry == null || entry.Length < 4)
-                            continue;
-
-                        // Entry format: null-terminated Unicode exe name, followed by PIDL
-                        string exeName = Encoding.Unicode.GetString(entry, 0, entry.Length);
-                        int nullIdx = exeName.IndexOf('\0');
-                        if (nullIdx < 0)
-                            continue;
-
-                        string app = exeName.Substring(0, nullIdx);
-#if NX
-                        if (!app.Equals("ugraf.exe", StringComparison.OrdinalIgnoreCase))
-#elif SOLIDWORKS
-                        if (!app.Equals("SLDWORKS.exe", StringComparison.OrdinalIgnoreCase))
-#endif
-                        continue;
-
-                        // PIDL starts after the null-terminated exe name (double-null in Unicode)
-                        int pidlOffset = (nullIdx + 1) * 2;
-                        if (pidlOffset >= entry.Length)
-                            continue;
-
-                        byte[] pidlBytes = new byte[entry.Length - pidlOffset];
-                        Array.Copy(entry, pidlOffset, pidlBytes, 0, pidlBytes.Length);
-
-                        GCHandle handle = GCHandle.Alloc(pidlBytes, GCHandleType.Pinned);
-                        try
-                        {
-                            StringBuilder path = new StringBuilder(260);
-                            if (SHGetPathFromIDListW(handle.AddrOfPinnedObject(), path))
-                            {
-                                string dir = path.ToString();
-                                if (Directory.Exists(dir))
-                                    return dir;
-                            }
-                        }
-                        finally
-                        {
-                            handle.Free();
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            return null;
+            visualPropertiesView.SelectedPresetIndex = 0;
         }
     }
-
-    public class ExporterConfigurationPreset
-    {
-        public string Name { get; set; }
-        public ExporterConfiguration Configuration { get; set; }
-        public bool IsUserPreset { get; set; }
-        public override string ToString() => Name;
-    }
-
-    public enum MeshFormat
-    {
-        glbOpenCascade,
-        objOpenCascade,
-        stlOpenCascade,
-        stlSolidworks,
-        stepSolidworks,
-        objCAD,
-        glbCAD
-    }
-
-    public enum FolderStructure
-    {
-        Legacy,
-        ROS,
-        MuJoCo,
-        SuperDex,
-    }
-
-    [Serializable]
-    public class ExporterConfiguration
-    {
-        public Export.MeshingOptions visualMeshingOptions;
-        public Export.MeshingOptions collisionMeshingOptions;
-        public List<MeshFormat> meshFormats;
-        public List<MeshFormat> collisionMeshFormats;
-        public bool hasCollisionMeshFormats;
-        public string meshTagExtension;
-        public bool enableCollisionMeshing;
-        public bool perLinkMeshing;
-        public string collisionMeshTagExtension;
-        public string robotName;
-        public FolderStructure folderStructure;
-
-        public ExporterConfiguration()
-        {
-            visualMeshingOptions = new Export.MeshingOptions
-            {
-                linearDeflection = 0.1,
-                angularDeflection = 0.5,
-                scale = 1.0
-            };
-
-            collisionMeshingOptions = new Export.MeshingOptions
-            {
-                linearDeflection = 0.5,
-                angularDeflection = 0.75,
-                scale = 1.0
-            };
-
-            meshFormats = new List<MeshFormat>
-            {
-#if NX
-                MeshFormat.glbCAD,
-#elif SOLIDWORKS
-                MeshFormat.glbOpenCascade,
-#endif
-            };
-
-            collisionMeshFormats = new List<MeshFormat>
-            {
-#if NX
-                MeshFormat.objCAD,
-#elif SOLIDWORKS
-                MeshFormat.stlSolidworks,
-#endif
-            };
-
-            hasCollisionMeshFormats = true;
-
-#if NX
-            meshTagExtension = "glb";
-            collisionMeshTagExtension = "obj";
-#elif SOLIDWORKS
-            meshTagExtension = "glb";
-            collisionMeshTagExtension = "stl";
-#endif
-
-            enableCollisionMeshing = true;
-
-            perLinkMeshing = false;
-
-            robotName = "";
-
-            folderStructure = FolderStructure.SuperDex;
-        }
-    }
-
 }

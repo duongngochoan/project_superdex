@@ -1,4 +1,4 @@
-﻿/*
+/*
 Copyright (c) 2015 Stephen Brawner
 Copyright (c) Meta Platforms, Inc. and affiliates.
 
@@ -235,49 +235,176 @@ namespace CADRobotExporter.CAD
             }
         }
 
-        public static void RetrieveSWComponentPIDs(ModelDoc2 model, LinkNode node)
+        #region Solid body operations (part documents)
+
+        // Finds the selected bodies and returns them. Similar to GetSelectedComponents
+        public static void GetSelectedBodies(ModelDoc2 model, List<Body2> bodies, int Mark = -1)
         {
-            if (node.Link.SWVisualComponents != null)
+            SelectionMgr selectionManager = model.SelectionManager;
+            bodies.Clear();
+            for (int i = 0; i < selectionManager.GetSelectedObjectCount2(Mark); i++)
             {
-                node.Link.SWComponentPIDs = new List<byte[]>();
-                foreach (IComponent2 comp in node.Link.SWVisualComponents)
+                object obj = selectionManager.GetSelectedObject6(i + 1, Mark);
+                Body2 body = obj as Body2;
+                if (body != null)
                 {
-                    byte[] PID = model.Extension.GetPersistReference3(comp);
-                    node.Link.SWComponentPIDs.Add(PID);
+                    bodies.Add(body);
                 }
             }
-            if (node.Link.SWCollisionComponents != null)
+        }
+
+        // Selects bodies from a list.
+        public static void SelectBodies(
+            ModelDoc2 model, List<Body2> bodies, bool clearSelection = true, int mark = -1)
+        {
+            if (clearSelection)
             {
-                node.Link.SWCollisionComponentPIDs = new List<byte[]>();
-                foreach (IComponent2 comp in node.Link.SWCollisionComponents)
+                model.ClearSelection2(true);
+            }
+            SelectionMgr manager = model.SelectionManager;
+            SelectData data = manager.CreateSelectData();
+            data.Mark = mark;
+            foreach (Body2 body in bodies)
+            {
+                body.Select2(true, data);
+            }
+        }
+
+        // All solid bodies in a part document. Sheet, wire and other body types are excluded
+        // because only solids contribute mass or a watertight mesh.
+        public static List<Body2> GetAllSolidBodies(ModelDoc2 model, bool visibleOnly = false)
+        {
+            List<Body2> bodies = new List<Body2>();
+            PartDoc partDoc = model as PartDoc;
+            if (partDoc == null)
+            {
+                return bodies;
+            }
+
+            object[] varBodies = (object[])partDoc.GetBodies2((int)swBodyType_e.swSolidBody, visibleOnly);
+            if (varBodies == null)
+            {
+                return bodies;
+            }
+
+            foreach (object obj in varBodies)
+            {
+                Body2 body = obj as Body2;
+                if (body != null)
                 {
-                    byte[] PID = model.Extension.GetPersistReference3(comp);
-                    node.Link.SWCollisionComponentPIDs.Add(PID);
+                    bodies.Add(body);
                 }
             }
-            if (node.Link.SWInertialComponents != null)
+            return bodies;
+        }
+
+        public static List<string> GetSolidBodyNames(ModelDoc2 model, bool visibleOnly = false)
+        {
+            List<string> names = new List<string>();
+            foreach (Body2 body in GetAllSolidBodies(model, visibleOnly))
             {
-                node.Link.SWInertialComponentPIDs = new List<byte[]>();
-                foreach (IComponent2 comp in node.Link.SWInertialComponents)
+                names.Add(body.Name);
+            }
+            return names;
+        }
+
+        // Hides or shows bodies by name, re-resolving them from the document first.
+        // We use names here because somehow we lose references to Body2 after a SaveAs operation.
+        public static void SetBodyVisibilityByName(ModelDoc2 model, ICollection<string> names, bool hide)
+        {
+            if (names == null || names.Count == 0)
+            {
+                return;
+            }
+
+            foreach (Body2 body in GetAllSolidBodies(model))
+            {
+                if (names.Contains(body.Name))
+                {
+                    body.HideBody(hide);
+                }
+            }
+        }
+
+        public static byte[] GetBodyPersistId(ModelDoc2 model, Body2 body)
+        {
+            if (body != null)
+            {
+                return model.Extension.GetPersistReference3(body);
+            }
+            return null;
+        }
+
+        #endregion Solid body operations (part documents)
+
+        public static void RetrieveSWComponentPIDs(ModelDoc2 model, Link link)
+        {
+            if (link.SWVisualComponents != null)
+            {
+                link.SWComponentPIDs = new List<byte[]>();
+                foreach (IComponent2 comp in link.SWVisualComponents)
                 {
                     byte[] PID = model.Extension.GetPersistReference3(comp);
-                    node.Link.SWInertialComponentPIDs.Add(PID);
+                    link.SWComponentPIDs.Add(PID);
+                }
+            }
+            if (link.SWCollisionComponents != null)
+            {
+                link.SWCollisionComponentPIDs = new List<byte[]>();
+                foreach (IComponent2 comp in link.SWCollisionComponents)
+                {
+                    byte[] PID = model.Extension.GetPersistReference3(comp);
+                    link.SWCollisionComponentPIDs.Add(PID);
+                }
+            }
+            if (link.SWInertialComponents != null)
+            {
+                link.SWInertialComponentPIDs = new List<byte[]>();
+                foreach (IComponent2 comp in link.SWInertialComponents)
+                {
+                    byte[] PID = model.Extension.GetPersistReference3(comp);
+                    link.SWInertialComponentPIDs.Add(PID);
                 }
             }
 
-            if (node.Link.Joint.SWRefAxisFeature != null)
+            if (link.SWVisualBodies != null)
             {
-                byte[] axisPID = model.Extension.GetPersistReference3(node.Link.Joint.SWRefAxisFeature);
-                node.Link.Joint.AxisPID = axisPID;
+                link.SWVisualBodyPIDs = new List<byte[]>();
+                foreach (Body2 body in link.SWVisualBodies)
+                {
+                    link.SWVisualBodyPIDs.Add(GetBodyPersistId(model, body));
+                }
+            }
+            if (link.SWCollisionBodies != null)
+            {
+                link.SWCollisionBodyPIDs = new List<byte[]>();
+                foreach (Body2 body in link.SWCollisionBodies)
+                {
+                    link.SWCollisionBodyPIDs.Add(GetBodyPersistId(model, body));
+                }
+            }
+            if (link.SWInertialBodies != null)
+            {
+                link.SWInertialBodyPIDs = new List<byte[]>();
+                foreach (Body2 body in link.SWInertialBodies)
+                {
+                    link.SWInertialBodyPIDs.Add(GetBodyPersistId(model, body));
+                }
             }
 
-            if (node.Link.Joint.SWCoordinateSystemFeature != null)
+            if (link.Joint.SWRefAxisFeature != null)
             {
-                byte[] coordinateSystemPID = model.Extension.GetPersistReference3(node.Link.Joint.SWCoordinateSystemFeature);
-                node.Link.Joint.CoordinateSystemPID = coordinateSystemPID;
+                byte[] axisPID = model.Extension.GetPersistReference3(link.Joint.SWRefAxisFeature);
+                link.Joint.AxisPID = axisPID;
             }
 
-            foreach (LinkNode child in node.Nodes)
+            if (link.Joint.SWCoordinateSystemFeature != null)
+            {
+                byte[] coordinateSystemPID = model.Extension.GetPersistReference3(link.Joint.SWCoordinateSystemFeature);
+                link.Joint.CoordinateSystemPID = coordinateSystemPID;
+            }
+
+            foreach (Link child in link.Children)
             {
                 RetrieveSWComponentPIDs(model, child);
             }
@@ -323,50 +450,66 @@ namespace CADRobotExporter.CAD
 
         // Converts the PIDs to actual references to the components and proceeds recursively
         // through the child nodes
-        public static void LoadSWComponents(ModelDoc2 model, LinkNode node, List<string> problemLinks)
+        public static void LoadSWComponents(ModelDoc2 model, Link link, List<string> problemLinks)
         {
             logger.Information("Loading SolidWorks components for " +
-                node.Link.Name + " from " + model.GetPathName());
+                link.Name + " from " + model.GetPathName());
 
-            node.Link.SWVisualComponents = LoadSWComponents(model, node.Link.SWComponentPIDs);
-            node.Link.SWCollisionComponents = LoadSWComponents(model, node.Link.SWCollisionComponentPIDs);
-            node.Link.SWInertialComponents = LoadSWComponents(model, node.Link.SWInertialComponentPIDs);
-            LoadRefAxisAndCoordsys(model, node);
-            if (node.Link.SWVisualComponents.Count != node.Link.SWComponentPIDs.Count
-                || node.Link.SWCollisionComponents.Count != node.Link.SWCollisionComponentPIDs.Count
-                || node.Link.SWInertialComponents.Count != node.Link.SWInertialComponentPIDs.Count)
+            link.SWVisualComponents = LoadSWComponents(model, link.SWComponentPIDs);
+            link.SWCollisionComponents = LoadSWComponents(model, link.SWCollisionComponentPIDs);
+            link.SWInertialComponents = LoadSWComponents(model, link.SWInertialComponentPIDs);
+            link.SWVisualBodies = LoadSWBodies(model, link.SWVisualBodyPIDs);
+            link.SWCollisionBodies = LoadSWBodies(model, link.SWCollisionBodyPIDs);
+            link.SWInertialBodies = LoadSWBodies(model, link.SWInertialBodyPIDs);
+            LoadRefAxisAndCoordsys(model, link);
+            if (link.SWVisualComponents.Count != link.SWComponentPIDs.Count
+                || link.SWCollisionComponents.Count != link.SWCollisionComponentPIDs.Count
+                || link.SWInertialComponents.Count != link.SWInertialComponentPIDs.Count)
             {
-                problemLinks.Add(node.Link.Name);
-                logger.Error("Link " + node.Link.Name + " did not fully load all components");
+                problemLinks.Add(link.Name);
+                logger.Error("Link " + link.Name + " did not fully load all components");
             }
-            logger.Information("Loaded " + node.Link.SWVisualComponents.Count + " visual components for link " + node.Link.Name);
-            logger.Information("Loaded " + node.Link.SWCollisionComponents.Count + " collision components for link " + node.Link.Name);
-            logger.Information("Loaded " + node.Link.SWInertialComponents.Count + " inertial components for link " + node.Link.Name);
-
-            foreach (LinkNode Child in node.Nodes)
+            else if (link.SWVisualBodies.Count != CountOf(link.SWVisualBodyPIDs)
+                || link.SWCollisionBodies.Count != CountOf(link.SWCollisionBodyPIDs)
+                || link.SWInertialBodies.Count != CountOf(link.SWInertialBodyPIDs))
             {
-                LoadSWComponents(model, Child, problemLinks);
+                problemLinks.Add(link.Name);
+                logger.Error("Link " + link.Name + " did not fully load all bodies");
+            }
+            logger.Information("Loaded " + link.SWVisualComponents.Count + " visual components for link " + link.Name);
+            logger.Information("Loaded " + link.SWCollisionComponents.Count + " collision components for link " + link.Name);
+            logger.Information("Loaded " + link.SWInertialComponents.Count + " inertial components for link " + link.Name);
+            if (link.SWVisualBodies.Count > 0 || link.SWCollisionBodies.Count > 0 || link.SWInertialBodies.Count > 0)
+            {
+                logger.Information("Loaded " + link.SWVisualBodies.Count + " visual bodies, "
+                    + link.SWCollisionBodies.Count + " collision bodies, "
+                    + link.SWInertialBodies.Count + " inertial bodies for link " + link.Name);
+            }
+
+            foreach (Link child in link.Children)
+            {
+                LoadSWComponents(model, child, problemLinks);
             }
         }
 
-        public static bool LoadRefAxisAndCoordsys(ModelDoc2 model, LinkNode node)
+        public static bool LoadRefAxisAndCoordsys(ModelDoc2 model, Link link)
         {
             bool success = true;
 
-            string axisName = node.Link.Joint.AxisName;
-            if (node.Link.Joint.AxisPID != null && !Joint.IsAxisFromCsys(axisName))
+            string axisName = link.Joint.AxisName;
+            if (link.Joint.AxisPID != null && !Joint.IsAxisFromCsys(axisName))
             {
-                Feature refAxis = LoadSWFeature(model, node.Link.Joint.AxisPID);
+                Feature refAxis = LoadSWFeature(model, link.Joint.AxisPID);
                 if (refAxis == null)
                 {
-                    string byteAsString = PIDToString(node.Link.Joint.AxisPID);
+                    string byteAsString = PIDToString(link.Joint.AxisPID);
                     logger.Warning("RefAxis feature with PID " + byteAsString + " failed to load");
                     success = false;
                 }
                 else
                 {
-                    node.Link.Joint.SWRefAxisFeature = refAxis;
-                    node.Link.Joint.AxisName = refAxis.GetNameForSelection(out _);
+                    link.Joint.SWRefAxisFeature = refAxis;
+                    link.Joint.AxisName = refAxis.GetNameForSelection(out _);
                 }
             }
             else
@@ -380,7 +523,7 @@ namespace CADRobotExporter.CAD
                     if (selected)
                     {
                         Feature refAxis = model.SelectionManager.GetSelectedObject6(1, -1);
-                        node.Link.Joint.SWRefAxisFeature = refAxis;
+                        link.Joint.SWRefAxisFeature = refAxis;
                     }
                     else
                     {
@@ -391,24 +534,24 @@ namespace CADRobotExporter.CAD
                 }
             }
 
-            if (node.Link.Joint.CoordinateSystemPID != null)
+            if (link.Joint.CoordinateSystemPID != null)
             {
-                Feature coordSys = LoadSWFeature(model, node.Link.Joint.CoordinateSystemPID);
+                Feature coordSys = LoadSWFeature(model, link.Joint.CoordinateSystemPID);
                 if (coordSys == null)
                 {
-                    string byteAsString = PIDToString(node.Link.Joint.CoordinateSystemPID);
+                    string byteAsString = PIDToString(link.Joint.CoordinateSystemPID);
                     logger.Warning("CoordSys feature with PID " + byteAsString + " failed to load");
                     success = false;
                 }
                 else
                 {
-                    node.Link.Joint.SWCoordinateSystemFeature = coordSys;
-                    node.Link.Joint.CoordinateSystemName = coordSys.GetNameForSelection(out _);
+                    link.Joint.SWCoordinateSystemFeature = coordSys;
+                    link.Joint.CoordinateSystemName = coordSys.GetNameForSelection(out _);
                 }
             }
             else
             {
-                string coordSysName = node.Link.Joint.CoordinateSystemName;
+                string coordSysName = link.Joint.CoordinateSystemName;
                 if (!string.IsNullOrEmpty(coordSysName))
                 {
                     // This was probably saved with a previous vresion so we'll populate the field now
@@ -418,7 +561,7 @@ namespace CADRobotExporter.CAD
                     if (selected)
                     {
                         Feature coordSys = model.SelectionManager.GetSelectedObject6(1, -1);
-                        node.Link.Joint.SWCoordinateSystemFeature = coordSys;
+                        link.Joint.SWCoordinateSystemFeature = coordSys;
                     }
                     else
                     {
@@ -534,6 +677,75 @@ namespace CADRobotExporter.CAD
         public static string PIDToString(byte[] pid)
         {
             return Encoding.ASCII.GetString(pid);
+        }
+
+        private static int CountOf(List<byte[]> pids)
+        {
+            return pids == null ? 0 : pids.Count;
+        }
+
+        // Converts the PIDs to actual references to the bodies. Counterpart of LoadSWComponents.
+        public static List<Body2> LoadSWBodies(ModelDoc2 model, List<byte[]> PIDs)
+        {
+            List<Body2> bodies = new List<Body2>();
+            if (PIDs == null)
+            {
+                return bodies;
+            }
+
+            foreach (byte[] PID in PIDs)
+            {
+                Body2 body = LoadSWBody(model, PID);
+                if (body == null)
+                {
+                    logger.Warning("Body failed to load from its persistent reference");
+                }
+                else
+                {
+                    bodies.Add(body);
+                    logger.Information("Successfully loaded body " + body.Name);
+                }
+            }
+            return bodies;
+        }
+
+        // Converts a single PID to a Body2 object
+        public static Body2 LoadSWBody(ModelDoc2 model, byte[] PID)
+        {
+            if (PID == null)
+            {
+                throw new System.Exception("A body PID was null. Is the configuration corrupted?");
+            }
+
+            string byteAsString = PIDToString(PID);
+            object obj = model.Extension.GetObjectByPersistReference3(PID, out int Errors);
+            if (Errors == 0)
+            {
+                return obj as Body2;
+            }
+            switch ((swPersistReferencedObjectStates_e)Errors)
+            {
+                case swPersistReferencedObjectStates_e.swPersistReferencedObject_Deleted:
+                    logger.Error("The body associated with PID " + byteAsString + " was deleted");
+                    break;
+
+                case swPersistReferencedObjectStates_e.swPersistReferencedObject_Invalid:
+                    logger.Error("The body associated with PID " + byteAsString + " was found to be invalid");
+                    break;
+
+                case swPersistReferencedObjectStates_e.swPersistReferencedObject_Suppressed:
+                    logger.Error("The body associated with PID " + byteAsString + " is suppressed");
+                    break;
+
+                case swPersistReferencedObjectStates_e.swPersistReferencedObject_Ok:
+                    break;
+
+                default:
+                    logger.Error("The body associated with PID " + byteAsString +
+                        " was not loaded due to an unspecified error (" + Errors + ")");
+                    break;
+            }
+            return null;
         }
 
         public static Matrix GetRotationMatrix(MathTransform transform)

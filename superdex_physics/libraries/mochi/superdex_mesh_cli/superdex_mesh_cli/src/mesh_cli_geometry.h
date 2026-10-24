@@ -50,6 +50,8 @@ using mochi::mesh::MeshClosureParams;
 using mochi::mesh::MeshDecimateParams;
 using mochi::mesh::MeshEdgeSwapParams;
 using mochi::mesh::RemeshMethod;
+using mochi::mesh::StepFaceColorInfo;
+using mochi::mesh::StepFaceColorSizing;
 using mochi::mesh::StepMeshBodyParams;
 using mochi::mesh::StepTessellationParams;
 using mochi::mesh::StepVisualExportParams;
@@ -62,6 +64,12 @@ using mochi::mesh::VisualMeshFormat;
 RemeshSurface(MeshData const& surfaceMesh, SurfaceRemeshingParams const& params, CliError& error);
 [[nodiscard]] MeshData ReconstructSurfaceFromSdf(ScalarField3d const& sdfData, CliError& error);
 [[nodiscard]] MeshData TessellateStep(
+    std::string_view stepFilePath,
+    StepTessellationParams const& params,
+    CliError& error);
+/// As @ref TessellateStep, but one mesh per resolved face color (the colors of
+/// @ref ReadStepFaceColors), plus one for the uncolored faces if any. Uncolored first, then by rgb.
+[[nodiscard]] std::vector<ColorMeshData> TessellateStepByColor(
     std::string_view stepFilePath,
     StepTessellationParams const& params,
     CliError& error);
@@ -78,6 +86,12 @@ MeshStepBody(std::string_view stepFilePath, StepMeshBodyParams const& params, Cl
     std::span<VisualExportOutput const> outputs,
     StepVisualExportParams const& params,
     std::vector<VisualExportStatus>& outStatuses,
+    CliError& error);
+/// Lists the distinct resolved face colors of @p stepFilePath, largest total area first. Faces
+/// with no color are not reported.
+[[nodiscard]] bool ReadStepFaceColors(
+    std::string_view stepFilePath,
+    std::vector<StepFaceColorInfo>& outColors,
     CliError& error);
 [[nodiscard]] MeshData CleanupMesh(MeshData const& mesh, CliError& error);
 [[nodiscard]] MeshData

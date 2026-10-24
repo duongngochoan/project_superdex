@@ -32,6 +32,7 @@
 #include "mochi_rom_jacobian.h"
 #include "mochi_scene_recorder.h"
 #include "mochi_shell.h"
+#include "mochi_sleep.h"
 #include "mochi_snle.h"
 #include "mochi_soft.h"
 #include "mochi_soft_rom_systems.h"
@@ -79,10 +80,10 @@ void mochi::GetSolutions(
 
 void mochi::SetSolutions(
     entt::registry& reg,
-    Span<entt::entity const> entities,
+    CIslandDescendants const& descendants,
     ColumnVectorView<real const> solution) {
   MOCHI_PROFILE_SCOPE();
-  for (auto e : entities) {
+  for (auto e : descendants.actors) {
     if (reg.any_of<TagArticulatedLinkActor>(e)) {
       // Skip articulated links. The articulated actor will set the reduced solution.
       continue;
@@ -101,7 +102,8 @@ void mochi::SetSolutions(
   }
 
   // Update articulated rigid actors AFTER articulated::compound::EntitySetSolution
-  ecs::InvokeForEach(&articulated::rigid::EntitySetSolution, reg, entities);
+  ecs::InvokeForEach(
+      &articulated::rigid::EntitySetSolution, reg, descendants.articulatedLinkActors);
 }
 
 /**
@@ -111,8 +113,10 @@ void mochi::SetSolutions(
  * actors get their individual convergence status. All other actors (or all actors when using @ref
  * NonLinearSolverConvergenceMode::Global, or when the solver diverged) get the global island
  * convergence status.
+ *
+ * @return The worst status distributed, or @ref ConvergenceStatus::None if no actor received one.
  */
-static void DistributeConvergenceStatus(
+[[nodiscard]] static ConvergenceStatus DistributeConvergenceStatus(
     entt::registry& reg,
     Span<entt::entity const> actors,
     SnleProblem<real> const& problem,
@@ -125,6 +129,7 @@ static void DistributeConvergenceStatus(
   bool const usePerActor =
       !result.actorConvergence.empty() && (result.convergence != ConvergenceStatus::Diverged);
 
+  ConvergenceStatus worstStatus = ConvergenceStatus::None;
   for (auto e : actors) {
     auto* convergence = reg.try_get<CConvergenceStatus>(e);
     if (!convergence) {
@@ -160,7 +165,9 @@ static void DistributeConvergenceStatus(
 
     convergence->stageStatus = stageStatus;
     convergence->stepStatus = Max(convergence->stepStatus, stageStatus);
+    worstStatus = Max(worstStatus, stageStatus);
   }
+  return worstStatus;
 }
 
 void mochi::solver::PostNewSolutionLocalPipeline(
@@ -180,7 +187,8 @@ void mochi::solver::PostNewSolutionLocalPipeline(
 
   // articulated::rigid::EntityPostNewSolution must be called AFTER
   // articulated::compound::EntityPostNewSolution
-  ecs::InvokeForEach(articulated::rigid::EntityPostNewSolution, reg, descendants.rigidActors);
+  ecs::InvokeForEach(
+      articulated::rigid::EntityPostNewSolution, reg, descendants.articulatedLinkActors);
 
   rom::PostNewSolutionPipeline(reg, descendants.softActors, solution);
 
@@ -222,7 +230,8 @@ void mochi::solver::PostNewIncrementLocalPipeline(
 
   // articulated::rigid::EntityPostNewSolution must be called AFTER
   // articulated::compound::EntityPostNewIncrement
-  ecs::InvokeForEach(articulated::rigid::EntityPostNewSolution, reg, descendants.rigidActors);
+  ecs::InvokeForEach(
+      articulated::rigid::EntityPostNewSolution, reg, descendants.articulatedLinkActors);
 
   // Now that the actors have updated their state, copy it back to the solution vector to ensure
   // consistency.
@@ -241,12 +250,13 @@ static void UpdateDerivedStateSubpipeline(
   // - 'articulated::compound' must be called before 'skinned'.
   // - 'skinned' must be called before 'blended'.
   articulated::compound::UpdateDerivedStatePipeline(reg, descendants.compoundActors);
-  skinned::UpdateDerivedStatePipeline(reg, descendants.skinnedActors);
+  skinned::UpdateDerivedStatePipeline(reg, descendants.nestedSoftActors);
   blended::UpdateDerivedStatePipeline(reg, descendants.blendedActors);
 }
 
-MOCHI_API void solver::UpdateJacobiansSubpipeline(
-    TaskSemaphore& sem,
+void solver::UpdateJacobiansSubpipeline(
+    TaskSemaphore& actorJacobianSem,
+    TaskSemaphore& softSkinnedJacobianSem,
     entt::registry& reg,
     GradTarget gradTarget,
     CIslandDescendants const& descendants) {
@@ -260,45 +270,53 @@ MOCHI_API void solver::UpdateJacobiansSubpipeline(
   MOCHI_PROFILE_SCOPE();
 
   // Schedule a task if any of these actor types are in the island.
-  Schedule(sem, "UpdateJacobiansPipeline", [&reg, &descendants, gradTarget]() {
-    // Update Jacobians for articulated compounds, according to the gradient target.
-    auto updateArticulatedJacobiansFn =
-        articulated::compound::UpdateJacobiansStatePipeline<TimeStep::Current>;
-    if (gradTarget == GradTarget::Previous) {
-      updateArticulatedJacobiansFn =
-          articulated::compound::UpdateJacobiansStatePipeline<TimeStep::StageStart>;
-    } else if (gradTarget == GradTarget::CurrentInput) {
-      updateArticulatedJacobiansFn =
-          articulated::compound::UpdateJacobiansInputPipeline<TimeStep::Current>;
-    } else if (gradTarget == GradTarget::PreviousInput) {
-      updateArticulatedJacobiansFn =
-          articulated::compound::UpdateJacobiansInputPipeline<TimeStep::Previous>;
-    } else {
-      MOCHI_ASSERT_VERBOSE(gradTarget == GradTarget::Current, "Unexpected gradient target");
-    }
-    updateArticulatedJacobiansFn(reg, descendants.compoundActors);
-    {
-      MOCHI_PROFILE_SCOPE_N("InvokeForEach articulated::rigid::EntityUpdateJacobian");
-      // Update Jacobians for rigid actors in articulated compounds.
-      // This must be called after the update of Jacobians of articulated compounds.
-      ecs::InvokeForEach(&articulated::rigid::EntityUpdateJacobian, reg, descendants.rigidActors);
-    }
+  Schedule(
+      actorJacobianSem,
+      "UpdateJacobiansPipeline",
+      [&reg, &descendants, &softSkinnedJacobianSem, gradTarget]() {
+        // Update Jacobians for articulated compounds, according to the gradient target.
+        auto updateArticulatedJacobiansFn =
+            articulated::compound::UpdateJacobiansStatePipeline<TimeStep::Current>;
+        if (gradTarget == GradTarget::Previous) {
+          updateArticulatedJacobiansFn =
+              articulated::compound::UpdateJacobiansStatePipeline<TimeStep::StageStart>;
+        } else if (gradTarget == GradTarget::CurrentInput) {
+          updateArticulatedJacobiansFn =
+              articulated::compound::UpdateJacobiansInputPipeline<TimeStep::Current>;
+        } else if (gradTarget == GradTarget::PreviousInput) {
+          updateArticulatedJacobiansFn =
+              articulated::compound::UpdateJacobiansInputPipeline<TimeStep::Previous>;
+        } else {
+          MOCHI_ASSERT_VERBOSE(gradTarget == GradTarget::Current, "Unexpected gradient target");
+        }
+        updateArticulatedJacobiansFn(reg, descendants.compoundActors);
+        {
+          MOCHI_PROFILE_SCOPE_N("InvokeForEach articulated::rigid::EntityUpdateJacobian");
+          // Update Jacobians for rigid actors in articulated compounds.
+          // This must be called after the update of Jacobians of articulated compounds.
+          ecs::InvokeForEach(
+              &articulated::rigid::EntityUpdateJacobian, reg, descendants.articulatedLinkActors);
+        }
 
-    // The remaining terms are only needed for GradTarget::Current, as they're not supported with
-    // differentiability
-    if (gradTarget == GradTarget::Current) {
-      // Update Jacobians for soft skinned actors.
-      // This must be called after the update of Jacobians of articulated
-      skinned::UpdateJacobiansPipeline(reg, descendants.skinnedActors);
-      // Update Jacobians for blended actors.
-      // This must be called after the update of Jacobians of soft skinned
-      blended::UpdateJacobiansPipeline(reg, descendants.blendedActors);
-      // Update skinning Jacobians for rod visual mesh contact.
-      ecs::InvokeForEach(&rod::ResolveRodSkinningJacobian, reg, descendants.rodActors);
-      // @TODO: ROMs use Jacobians also for velocity computations, so we can't move their Jacobian
-      // computation here yet.
-    }
-  });
+        // The remaining terms are only needed for GradTarget::Current, as they're not supported
+        // with differentiability
+        if (gradTarget == GradTarget::Current) {
+          // Update Jacobians for nested soft actors, which needs the Jacobians of articulated
+          // compounds. They are only used by skinned::EntityAssembleBody, not by contact, so they
+          // are signaled separately to take them out of the critical path of
+          // ContactJacobiansPipeline.
+          if (!descendants.nestedSoftActors.empty()) {
+            Schedule(
+                softSkinnedJacobianSem, "skinned::UpdateJacobiansPipeline", [&reg, &descendants]() {
+                  skinned::UpdateJacobiansPipeline(reg, descendants.nestedSoftActors);
+                });
+          }
+          // Update skinning Jacobians for rod contact skins.
+          ecs::InvokeForEach(&rod::ResolveContactSkinningJacobian, reg, descendants.rodActors);
+          // @TODO: ROMs use Jacobians also for velocity computations, so we can't move their
+          // Jacobian computation here yet.
+        }
+      });
 }
 
 void solver::UpdateDerivedStateBeforeAssembly(
@@ -314,11 +332,14 @@ void solver::UpdateDerivedStateBeforeAssembly(
     UpdateDerivedStateSubpipeline(reg, descendants);
   }
 
-  // Jacobians are needed for first-order or input terms.
-  TaskSemaphore updateJacobianSem;
+  // Jacobians are needed for first-order or input terms. The Jacobians of soft skinned actors are a
+  // special case, waited for separately, because they are not needed by contact.
+  TaskSemaphore actorJacobianSem;
+  TaskSemaphore softSkinnedJacobianSem;
   if (IsAssemblyNeeded(StateDependency::FirstOrder, true /*inputDependency*/, gradTarget)) {
     // Start update of Jacobians. Can run in parallel with most of CollisionDetectionPipeline().
-    solver::UpdateJacobiansSubpipeline(updateJacobianSem, reg, gradTarget, descendants);
+    solver::UpdateJacobiansSubpipeline(
+        actorJacobianSem, softSkinnedJacobianSem, reg, gradTarget, descendants);
   }
 
   // Collision detection is needed only for first-order terms.
@@ -326,12 +347,13 @@ void solver::UpdateDerivedStateBeforeAssembly(
     // Perform collision detection.
     CollisionDetectionPipeline<TimeStep::Current>(reg, descendants);
 
-    // Set up contact Jacobians. Also calls updateJacobianSem.Wait().
-    ContactJacobiansPipeline(reg, gradTarget, descendants, updateJacobianSem);
-  } else {
-    // Wait for any tasks scheduled by UpdateJacobiansSubpipeline.
-    updateJacobianSem.Wait();
+    // Set up contact Jacobians. Also calls actorJacobianSem.Wait().
+    ContactJacobiansPipeline(reg, gradTarget, descendants, actorJacobianSem);
   }
+
+  // Wait for any Jacobians not waited for yet, before the assembly.
+  actorJacobianSem.Wait();
+  softSkinnedJacobianSem.Wait();
 }
 
 static void ApplyBoundaryConditionsToProblem(
@@ -574,11 +596,10 @@ AssembleRodActorPipeline(AssemblyParams const& params, entt::registry& reg, entt
     semComp->asyncContactUpToDate->Wait();
   }
 
-  // Centerline async contact (uses CFemSegmentDiscretization). Visual mesh async contact
-  // is assembled at the island level (AssembleIslandRodAsyncContact) to avoid merging
+  // Centerline async contact (uses CFemSegmentDiscretization). Contact-skin async contact
+  // is assembled through CSkinnedContactSnle to avoid merging
   // contact sparsity into the rod's incompatible pentadiagonal body matrix.
-  // Skip centerline contact for rods with visual mesh contact (use TagUseVisualMeshContact).
-  if (!reg.all_of<TagUseVisualMeshContact>(e)) {
+  if (!reg.all_of<TagUseDeformableContactSkin>(e)) {
     ecs::TryInvokeOnEntity(rod::AssembleAsyncContact, reg, e, std::cref(params));
   }
 }
@@ -608,7 +629,7 @@ void mochi::solver::AssembleIslandPipeline(
   auto const& descendants = reg.get<CIslandDescendants const>(island);
 
   // Used to wait for async tasks
-  TaskSemaphore masterSemaphore, softCompletionSem, artCompletionSem;
+  TaskSemaphore masterSemaphore, softCompletionSem;
 
   // Used to signal start of the rest of the assembly
   TaskSemaphore startOtherAssemblySemaphore;
@@ -685,9 +706,10 @@ void mochi::solver::AssembleIslandPipeline(
   startOtherAssemblySemaphore.Wait();
 
   // Assemble sync contact within the island. Contact is first-order; assemble only if needed.
+  TaskSemaphore contactSemaphore;
   if (IsAssemblyNeeded(StateDependency::FirstOrder, true /*inputDependency*/, params.gradTarget)) {
     ecs::TryScheduleInvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
-        masterSemaphore,
+        contactSemaphore,
         "AssembleIslandSyncContact",
         &AssembleIslandSyncContact,
         reg,
@@ -709,12 +731,15 @@ void mochi::solver::AssembleIslandPipeline(
         std::cref(params));
   }
 
-  // Start a task for each skinned actor contact (articulated, soft skinned, or rod).
-  std::array<Span<entt::entity const>, 3> skinnedActors = {
-      descendants.compoundActors, descendants.skinnedActors, descendants.rodActors};
+  // Start a task for each actor with async skinned contact.
+  std::array<Span<entt::entity const>, 4> skinnedActors = {
+      descendants.compoundActors,
+      descendants.softActors,
+      descendants.shellActors,
+      descendants.rodActors};
   for (auto actors : skinnedActors) {
     ecs::ScheduleInvokeForEach<ecs::policy::AllowFullRegistryAccess>(
-        masterSemaphore,
+        contactSemaphore,
         "AssembleAsyncSkinnedContact",
         AssembleAsyncSkinnedContact,
         reg,
@@ -729,36 +754,63 @@ void mochi::solver::AssembleIslandPipeline(
     ecs::InvokeForEach(rigid::EntityAssemble, reg, descendants.rigidActors, std::cref(params));
   }
 
-  // Wait for constraint assembly to finish (but don't wait for anything else). Then, schedule a
-  // task for each articulated compound. They will read the full DoF values assembled from their
-  // rigid bodies and constraints (already assembled by this point).
+  // Wait for constraint assembly to finish (but don't wait for anything else). Then, for each
+  // articulated compound, schedule its assembly, which reads the full DoF values assembled from its
+  // rigid bodies and constraints (already assembled by this point), the assembly of the posed
+  // energy terms of its nested soft actors, and the projection of its full residual, including its
+  // link-space residuals. Each projection waits only for the tasks of its own compound (and for
+  // contact). The tasks are scheduled in this order because they run immediately without worker
+  // threads.
   constraintSemaphore.Wait();
+  [[maybe_unused]] int numNestedSoftActors = 0;
   for (auto e : descendants.compoundActors) {
-    if (reg.all_of<TagArticulatedActor, CActorSnle>(e)) {
-      artCompletionSem.Add(1);
-      Schedule(
-          masterSemaphore, "articulated::compound::EntityAssemble", [&, e, artCompletionSem]() {
-            ecs::InvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
-                articulated::compound::EntityAssemble, reg, e, std::cref(params));
-            artCompletionSem.Done();
-          });
+    // Zero-DoF articulated actors have no SNLE and cannot have nested soft actors.
+    if (!reg.all_of<TagArticulatedActor, CActorSnle>(e)) {
+      continue;
     }
-  }
 
-  // Start a task for each soft skinned actor body. May need to wait for completion of soft and/or
-  // articulated assembly.
-  ecs::ScheduleInvokeForEach<ecs::policy::AllowFullRegistryAccess>(
-      masterSemaphore,
-      "skinned::EntityAssembleBody",
-      skinned::EntityAssembleBody,
-      reg,
-      descendants.skinnedActors,
-      std::cref(params),
-      softCompletionSem,
-      artCompletionSem);
+    // Signals that the reduced dresidual is final, which is all that the nested soft actors'
+    // EntityAssembleBody needs. The reduced residual is completed later by ProjectFullResidual.
+    TaskSemaphore const assembledSem;
+    Schedule(assembledSem, "articulated::compound::EntityAssemble", [&, e]() {
+      ecs::InvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
+          articulated::compound::EntityAssemble, reg, e, std::cref(params));
+    });
+
+    // The posed energy terms of a nested soft actor may need to wait for soft and/or articulated
+    // assembly to complete.
+    TaskSemaphore skinnedBodySem;
+    if (auto const* blendedComposition = reg.try_get<CBlendedComposition const>(e)) {
+      numNestedSoftActors += isize(blendedComposition->soft);
+      ecs::ScheduleInvokeForEach<ecs::policy::AllowFullRegistryAccess>(
+          skinnedBodySem,
+          "skinned::EntityAssembleBody",
+          skinned::EntityAssembleBody,
+          reg,
+          MakeConstSpan(blendedComposition->soft),
+          std::cref(params),
+          softCompletionSem,
+          assembledSem);
+    }
+
+    Schedule(
+        masterSemaphore,
+        "articulated::compound::ProjectFullResidual",
+        [&, e, assembledSem, skinnedBodySem]() {
+          assembledSem.Wait();
+          contactSemaphore.Wait();
+          skinnedBodySem.Wait();
+          ecs::TryInvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+              articulated::compound::ProjectFullResidual, reg, e, std::cref(params));
+        });
+  }
+  MOCHI_ASSERT_VERBOSE(
+      numNestedSoftActors == isize(descendants.nestedSoftActors),
+      "Every nested soft actor must be listed in the CBlendedComposition of its articulation.");
 
   // Wait for all of the above tasks
   masterSemaphore.Wait();
+  contactSemaphore.Wait();
 
   // Update convergence weights. Must run after per-actor assembly (dependencies updated) and
   // before GatherSnleDataFromActors (weights consumed).
@@ -801,9 +853,10 @@ void mochi::solver::PreFirstStageLocalPipeline(
   ecs::InvokeForEach(&rod::EntityPreFirstStage, reg, descendants.rodActors);
   ecs::InvokeForEach(&rigid::EntityPreFirstStage, reg, descendants.rigidActors);
   ecs::InvokeForEach(&articulated::compound::EntityPreFirstStage, reg, descendants.compoundActors);
-  ecs::InvokeForEach(&articulated::rigid::EntityPreFirstStage, reg, descendants.rigidActors);
+  ecs::InvokeForEach(
+      &articulated::rigid::EntityPreFirstStage, reg, descendants.articulatedLinkActors);
   ecs::InvokeForEach(&rom::EntityPreFirstStage, reg, descendants.softActors);
-  ecs::InvokeForEach(&skinned::EntityPreFirstStage, reg, descendants.skinnedActors);
+  ecs::InvokeForEach(&skinned::EntityPreFirstStage, reg, descendants.nestedSoftActors);
 }
 
 void mochi::solver::PreStageLocalPipeline(
@@ -821,11 +874,10 @@ void mochi::solver::PreStageLocalPipeline(
   ecs::InvokeForEach(&rod::EntityPreStage, reg, descendants.rodActors);
   rom::PreStagePipeline(reg, descendants.softActors);
   if (!descendants.compoundActors.empty()) {
-    // Use the full list of actors because this pipeline interleaves operations for articulated
-    // compounds and articulated rigid bodies.
-    articulated::compound::PreStagePipeline(reg, descendants.actors);
+    articulated::compound::PreStagePipeline(
+        reg, descendants.compoundActors, descendants.articulatedLinkActors);
   }
-  skinned::PreStagePipeline(reg, descendants.skinnedActors);
+  skinned::PreStagePipeline(reg, descendants.nestedSoftActors);
   blended::PreStagePipeline(reg, descendants.blendedActors);
 
   // Once actors have computed their states, copy them to the solution vector.
@@ -857,14 +909,13 @@ void mochi::solver::PostStageLocalPipeline(
   ecs::InvokeForEach(&rod::EntityPostStage, reg, descendants.rodActors);
   ecs::InvokeForEach(&rigid::EntityPostStage, reg, descendants.rigidActors);
   if (!descendants.compoundActors.empty()) {
-    // Use the full list of actors because this pipeline interleaves operations for articulated
-    // compounds and articulated rigid bodies.
-    articulated::compound::PostStagePipeline(reg, descendants.actors);
+    articulated::compound::PostStagePipeline(
+        reg, descendants.compoundActors, descendants.articulatedLinkActors);
   }
   rom::PostStagePipeline(reg, descendants.softActors);
 
   // Must be called after articulated::compound::PostStagePipeline.
-  ecs::InvokeForEach(&skinned::EntityPostStage, reg, descendants.skinnedActors);
+  ecs::InvokeForEach(&skinned::EntityPostStage, reg, descendants.nestedSoftActors);
 }
 
 /*
@@ -884,17 +935,16 @@ static void PostLastStageLocalPipeline(entt::registry& reg, CIslandDescendants c
   ecs::InvokeForEach(&rod::EntityPostLastStage, reg, descendants.rodActors);
   ecs::InvokeForEach(&rigid::EntityPostLastStage, reg, descendants.rigidActors);
   if (!descendants.compoundActors.empty()) {
-    // Use the full list of actors because this pipeline interleaves operations for articulated
-    // compounds and articulated rigid bodies.
-    articulated::compound::PostLastStagePipeline(reg, descendants.actors);
+    articulated::compound::PostLastStagePipeline(
+        reg, descendants.compoundActors, descendants.articulatedLinkActors);
   }
   ecs::InvokeForEach(&rom::EntityPostLastStage, reg, descendants.softActors);
-  skinned::PostLastStagePipeline(reg, descendants.skinnedActors);
+  skinned::PostLastStagePipeline(reg, descendants.nestedSoftActors);
   blended::PostLastStagePipeline(reg, descendants.blendedActors);
 
   // Update the rigid transform at the specified eval point.
   // Used for soft actors (both FOMs and ROMs).
-  ecs::InvokeForEach(&soft::UpdateRigidTransformEval, reg, descendants.actors);
+  ecs::InvokeForEach(&soft::UpdateRigidTransformEval, reg, descendants.softActors);
 
   // Perform a final collision detection pass with far SDF evaluation
   // States of objects haven't changed since last collision detection evaluation, so we
@@ -974,9 +1024,7 @@ TimeIntegratorParams mochi::solver::CreateIslandTimeIntegrationParams(
         MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(intSkinnedVels->prevSteps));
       }
       if (auto const* intJointVels = reg.try_get<CIntegrationArticulatedJointVels>(actor)) {
-        for (auto const& jointVel : intJointVels->value) {
-          MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(jointVel.prevSteps));
-        }
+        MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(intJointVels->prevSteps));
       }
       if (auto const* intRodPoses = reg.try_get<CIntegrationRodPoses>(actor)) {
         MOCHI_ASSERT_VERBOSE(numPrevStepsActor == isize(intRodPoses->prevSteps));
@@ -1045,7 +1093,7 @@ static SnleProblem<real> InitIslandProblem(
 
   // Apply boundary conditions (if any) to solution and actors
   if (ApplyBoundaryConditionsToSolution(reg, descendants.actors, problem.solution)) {
-    SetSolutions(reg, descendants.actors, problem.solution);
+    SetSolutions(reg, descendants, problem.solution);
     solver::PostNewSolutionLocalPipeline(reg, island, problem.solution);
   }
   return problem;
@@ -1097,9 +1145,7 @@ bool mochi::solver::StepIslandNewtonAsync(
   MOCHI_PROFILE_SCOPE();
   MOCHI_ASSERT(descendants.actors.size() > 0, "Empty islands should have been pruned");
 
-  auto const& islandDofInfo = reg.get<CIslandDofInfo>(island);
   auto& islandSolverStats = reg.get<CIslandSolverStats>(island);
-  int const numDofs = islandDofInfo.dofsSize;
 
   // Clear island solver stats.
   islandSolverStats.stages.clear();
@@ -1116,7 +1162,7 @@ bool mochi::solver::StepIslandNewtonAsync(
   // ------------------------------------------------------------------------
   auto const& simParams = reg.ctx<CSimulationParams const>();
   NewtonSolverParams newtonParams;
-  GetIslandNewtonParams(numDofs, simParams, newtonParams);
+  GetIslandNewtonParams(reg, island, newtonParams);
   auto& preconditioner = reg.get<CIslandPreconditioner>(island);
   NewtonSolver<real> snleSolver(newtonParams, preconditioner);
 
@@ -1126,6 +1172,7 @@ bool mochi::solver::StepIslandNewtonAsync(
 
   // Perform time integration.
   bool success = true;
+  real restValue = 1_r;
   auto const integrationParams =
       CreateIslandTimeIntegrationParams(reg, descendants, simParams.integrationMethod);
 
@@ -1144,20 +1191,24 @@ bool mochi::solver::StepIslandNewtonAsync(
     // problem being solved here, they only serve as a brigde between solver and actors.
     NewtonSolverStatus<real> result = snleSolver.Solve(problem);
     success &= (result.convergence == ConvergenceStatus::Converged);
+    restValue = Min(restValue, sleep::StageRestValue(result));
     islandSolverStats.stages.emplace_back(StageSolverStats::FromNewtonSolverStatus(result));
 
     // Distribute solution to actors. NOTE: This call might be redundant in some cases,
     // actors most probably already implement the CSnleProblemPostNewSolutionCallback,
     // which is called after each line-search iteration
-    SetSolutions(reg, descendants.actors, problem.solution);
+    SetSolutions(reg, descendants, problem.solution);
 
     // Distribute convergence status to actors. Must be called before PostStageLocalPipeline.
-    DistributeConvergenceStatus(reg, descendants.actors, problem, result);
+    islandSolverStats.stages.back().convergence =
+        DistributeConvergenceStatus(reg, descendants.actors, problem, result);
 
     PostStageLocalPipeline(reg, descendants);
   }
 
   PostLastStageLocalPipeline(reg, descendants);
+
+  sleep::RecordStep(reg, island, restValue);
 
   return success;
 }

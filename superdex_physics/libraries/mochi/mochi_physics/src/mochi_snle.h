@@ -51,8 +51,9 @@ struct BaseSnle : NoCopy {
 /**
  * @brief Class storing the objective, residual and dresidual of an actor.
  * @details It stores both full and reduced representations of the residual and dresidual. The
- * reduced representation is optional. Query UseReduced() to check whether the reduced or full
- * representation should be used in the nonlinear solver.
+ * reduced representation is optional. An actor that assembles its reduced dresidual directly may
+ * leave the full dresidual empty as long as it stays reduced. Query UseReduced() to check whether
+ * the reduced or full representation should be used in the nonlinear solver.
  */
 struct ActorSnle : BaseSnle {
   ActorSnle(
@@ -67,19 +68,15 @@ struct ActorSnle : BaseSnle {
   }
 
   ActorSnle(
-      AnyMatrix<real>&& fullDRes,
       AnyMatrix<real>&& reducedDRes,
-      std::optional<PreconditionerType> fullPreconditionerType = std::nullopt,
+      int fullSize,
       std::optional<PreconditionerType> reducedPreconditionerType = std::nullopt)
-      : fullResidual(GetNumRows(fullDRes)),
-        fullDResidual(std::move(fullDRes)),
-        fullPreconditionerType(fullPreconditionerType),
+      : fullResidual(fullSize),
         reducedResidual(GetNumRows(reducedDRes)),
         reducedDResidual(std::move(reducedDRes)),
         reducedPreconditionerType(reducedPreconditionerType),
         _useReduced(true) {
     fullResidual.SetZero();
-    mochi::SetZero(fullDResidual);
     reducedResidual.SetZero();
     mochi::SetZero(reducedDResidual);
   }
@@ -112,6 +109,19 @@ struct ActorSnle : BaseSnle {
 
   [[nodiscard]] bool UseReduced() const {
     return _useReduced;
+  }
+
+  [[nodiscard]] std::optional<PreconditionerType> GetActivePreconditionerType() const {
+    return _useReduced ? reducedPreconditionerType : fullPreconditionerType;
+  }
+
+  void SetActivePreconditionerType(PreconditionerType type) {
+    auto& preconditioner = _useReduced ? reducedPreconditioner : fullPreconditioner;
+    auto& preconditionerType = _useReduced ? reducedPreconditionerType : fullPreconditionerType;
+    preconditionerType = type;
+    if (preconditioner && preconditioner->GetType() != type) {
+      preconditioner.reset();
+    }
   }
 
   void EnableReduced(AnyMatrix<real>&& reducedDRes) {
@@ -155,7 +165,8 @@ struct CActorSnle : ActorSnle {
 };
 
 /**
-    Component storing the objective, residual, and dresidual of an unposed soft skinned actor.
+  Component storing the objective, residual, and dresidual of a nested soft actor's posed body
+  energy with respect to its skinned displacements, before the skinning Jacobians project them.
 */
 struct CSoftSkinnedUnposedSnle : ActorSnle {
   using ActorSnle::ActorSnle;
@@ -198,24 +209,26 @@ struct CIslandContactSnle : InteractionSnle {
 /**
   Component storing the objective, residual, and dresidual for async contact of a skinned
   articulation. TODO: This could be assembled into the actor matrix for articulated bodies (not for
-  soft skinned actors).
+  soft-skinned actors).
 */
 struct CSkinnedContactSnle : InteractionSnle {
   using InteractionSnle::InteractionSnle;
 };
 
 /**
-  Component storing the objective, residual, and dresidual of the unposed interaction terms between
-  the soft and articulated actors. For performance reasons, only the off-diagonal sub-dresiduals
-  (soft-articulated, articulated-soft) are stored in this component. The diagonal sub-dresiduals
-  (soft-soft, articulated-articulated) are stored in the actor dresidual of the underlying soft and
-  articulated actors.
+  Component storing the objective, residual, and dresidual of a nested soft actor's posed body
+  energy, after the skinning Jacobians project them. For performance reasons, only the off-diagonal
+  sub-dresiduals (soft-articulated, articulated-soft) are stored in this component. The diagonal
+  sub-dresiduals (soft-soft, articulated-articulated) are stored in the actor dresidual of the
+  underlying soft and articulated actors. The residual holds the soft entry only. The articulated
+  one is stored in link space in CArticulatedSkinnedBodyLinkResidual.
 */
 struct CSkinnedInteractionSnle : InteractionSnle {
   using InteractionSnle::InteractionSnle;
 
   // Actor index in residual and dresidual vectors. For the dresidual, the index refers to the
-  // off-diagonal submatrix whose rows (NOT columns) correspond to the actor.
+  // off-diagonal submatrix whose rows (NOT columns) correspond to the actor. kArticulatedIdx only
+  // applies to the dresidual.
   static constexpr int kSoftIdx = 0;
   static constexpr int kArticulatedIdx = 1;
 };

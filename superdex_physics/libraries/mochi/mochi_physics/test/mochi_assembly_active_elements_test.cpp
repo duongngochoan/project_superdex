@@ -20,14 +20,12 @@
 #include <mochi_core/element_operations/fem_traction.h>
 #include <mochi_core/elements/tetrahedral/finite_element.h>
 #include <mochi_core/elements/tetrahedral/finite_element_trace.h>
-#include <mochi_core/linear_algebra/utils/matrix_conversions.h>
 #include <mochi_core/materials/batched_materials.h>
 #include <mochi_core/materials/material_params.h>
 #include <mochi_core/rom/rom_hyper_reduction.h>
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/local_to_global_map.h>
 #include <mochi_core/utils/rand_utils.h>
-#include <mochi_core/utils/sparsity_utils.h>
 #include <mochi_core/utils/subset_map.h>
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/src/mochi_discretization_components.h>
@@ -94,16 +92,8 @@ auto CreateFemDiscretizations(TetrahedralMesh const& tetMesh) {
   femLowVolDisc.reserve(numElements);
   femHighVolDisc.reserve(numElements);
   for (int i = 0; i < numElements; ++i) {
-    femLowVolDisc.emplace_back(
-        i,
-        tetMesh.GetNodeCoordinates(),
-        tetMesh.GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature1);
-    femHighVolDisc.emplace_back(
-        i,
-        tetMesh.GetNodeCoordinates(),
-        tetMesh.GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature4);
+    femLowVolDisc.emplace_back(i, tetMesh.GetNodeCoordinates(), tetMesh.GetElementConnectivity());
+    femHighVolDisc.emplace_back(i, tetMesh.GetNodeCoordinates(), tetMesh.GetElementConnectivity());
   }
 
   return std::make_tuple(femLowVolDisc, femHighVolDisc);
@@ -115,10 +105,7 @@ std::vector<ElementTraceT> CreateElementTraces(
   std::vector<ElementTraceT> elementsTraces;
   elementsTraces.reserve(tetMesh.GetNumBoundaryFaces());
   for (auto const& bdface : tetMesh.GetBoundaryFaces()) {
-    elementsTraces.emplace_back(
-        femLowVolDisc[bdface.element],
-        static_cast<int>(bdface.faceNum),
-        tetrahedral::kTetrahedralTraceQuadrature3[bdface.faceNum]);
+    elementsTraces.emplace_back(femLowVolDisc[bdface.element], static_cast<int>(bdface.faceNum));
   }
   return elementsTraces;
 }
@@ -286,10 +273,8 @@ void TestImpl(
   ColumnVector<real> sol(numGlobalDofs);
   sol.SetRandom(111, -0.02_r, 0.02_r);
 
-  SparseMatrix<real> spDres = MakeSparseMatrix(l2gTetra);
-  auto dres = ToBlockSparseMatrix<kNumFields>(spDres);
+  auto dres = BlockSparseMatrix<real, kNumFields>(numGlobalDofs / kNumFields, nbs.GetNToN());
   MOCHI_ASSERT(dres.Rows() == sol.Rows());
-  dres.SetZero();
 
   // Physics parameters shared by the batched element operations below.
   Real3 const gravityVec = {0_r, -9.8_r, 0_r}; // any value will do
@@ -300,6 +285,7 @@ void TestImpl(
   // assembles through the trace element (also 4 parent nodes).
   using V = BatchReal<kBatchSize>;
   using Vd = BatchDouble<kBatchSize>;
+  fem::BatchElementVector<kBatchSize, VolumeElementLow> const stageStartDispl{};
   auto const lowElems = MakeConstSpan(femLowVolDisc);
   auto const highElems = MakeConstSpan(femHighVolDisc);
   auto const traceElems = MakeConstSpan(elementsTraces);
@@ -321,7 +307,14 @@ void TestImpl(
     bool out = false;
     if (doGravity) {
       out |= fem::GravityWork<kBatchSize>(
-          batchElemIndices, lowElems, batchDispl, outEnergy, outRes, gravityVec, kDensity);
+          batchElemIndices,
+          lowElems,
+          batchDispl,
+          stageStartDispl,
+          outEnergy,
+          outRes,
+          gravityVec,
+          kDensity);
     }
     if (doStress) {
       out |= fem::StressWork<kBatchSize>(

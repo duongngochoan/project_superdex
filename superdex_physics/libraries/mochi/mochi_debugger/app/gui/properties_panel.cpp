@@ -22,8 +22,11 @@
 
 #include <mochi_core/utils/color.h>
 #include <mochi_core/utils/defer.h>
+#include <mochi_debugger/lib/debug_client.h>
 
 #include <imguios/imguios.h>
+
+#include <limits>
 
 using namespace mochi;
 using namespace mochi::dbg;
@@ -34,11 +37,31 @@ static void AddMeshColorProperty(Color& color) {
 
 static void AddRenderingProperties(UiState& state) {
   constexpr float kSliderWidth = 160.0f;
-
   auto& rendering = state.rendering;
+  bool enableDebugDraw = state.client->IsDebugDrawEnabled();
+
   UiCheckbox("Show Origin", &rendering.showOriginTriAxis, "Show a tri-axis at the scene origin");
-  UiCheckbox("Show Debug Draw", &rendering.showDebugDraw, "Show debug draw lines and spheres");
+  if (UiCheckbox(
+          "Show Debug Draw",
+          &enableDebugDraw,
+          "Render the selected debug draw features using data from the simulation")) {
+    state.client->EnableDebugDraw(enableDebugDraw);
+  }
+  rendering.showDebugDraw = enableDebugDraw; // Kept in sync
+
   UiCheckbox("Show Meshes", &rendering.showMeshes, "Show actor surface meshes");
+
+  if (ImGui::TreeNode("Debug Draw")) {
+    MOCHI_DEFER(ImGui::TreePop());
+
+    auto const features = state.client->GetDebugDrawFeatures();
+    for (int i = 0; i < isize(features); ++i) {
+      bool featureEnabled = features[i].enabled;
+      if (UiCheckbox(features[i].name.c_str(), &featureEnabled, features[i].description.c_str())) {
+        state.client->EnableDebugDrawFeature(features[i].name, featureEnabled);
+      }
+    }
+  }
 
   if (ImGui::TreeNode("Meshes")) {
     MOCHI_DEFER(ImGui::TreePop());
@@ -47,8 +70,8 @@ static void AddRenderingProperties(UiState& state) {
             "Visual Mesh",
             &settings.sync.useVisualMesh,
             "Some actors have a high resolution visual mesh, which is skinned to the surface of "
-            "the simulation mesh. If disabled, the simulation mesh will be rendered instead. Use "
-            "in combination with \"Show Meshes\".")) {
+            "the simulation mesh. If disabled, the simulation mesh or contact skin will be "
+            "rendered instead. Use in combination with \"Show Meshes\".")) {
       state.client->SetSettings(settings);
     }
     UiCheckbox(
@@ -121,7 +144,76 @@ static void AddRenderingProperties(UiState& state) {
   }
 }
 
+static void AddIslandProperties(UiState& state) {
+  constexpr float kSliderWidth = 160.0f;
+  auto& islands = state.islands;
+  auto const current = state.client->GetSleepParams();
+  if (!current.has_value()) {
+    islands.editing = false; // Do not carry an edit across a disconnect or scene change
+  }
+  if (!islands.editing) {
+    islands.edit = current.value_or(experimental::SleepParams{});
+  }
+
+  ImGui::BeginDisabled(!current.has_value());
+  MOCHI_DEFER(ImGui::EndDisabled());
+
+  // Send the value once the user releases the last widget.
+  auto const sendOnRelease = [&](char const* tooltip) {
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("%s", tooltip);
+    }
+    if (ImGui::IsItemActivated()) {
+      islands.editing = true;
+    }
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+      state.client->SetSleepParams(islands.edit);
+    }
+    if (ImGui::IsItemDeactivated()) {
+      islands.editing = false;
+    }
+  };
+
+  if (UiCheckbox("Can Sleep", &islands.edit.canSleep, "Whether islands are allowed to sleep.")) {
+    state.client->SetSleepParams(islands.edit);
+  }
+
+  // The server rejects 0, and rejected values are not reverted on the client, so keep them valid.
+  constexpr float kMinSleepThreshold = 0.001f;
+  auto sleepThreshold = static_cast<float>(islands.edit.sleepThreshold);
+  ImGui::SetNextItemWidth(kSliderWidth);
+  if (ImGui::SliderFloat(
+          "Sleep Threshold",
+          &sleepThreshold,
+          kMinSleepThreshold,
+          1.0f,
+          "%.3f",
+          ImGuiSliderFlags_AlwaysClamp)) {
+    islands.edit.sleepThreshold = static_cast<double>(sleepThreshold);
+  }
+  sendOnRelease(
+      "How strictly a step is judged to be at rest. Higher values make islands sleep later and "
+      "less often. Lower values save more computation, but may put slowly moving actors to sleep "
+      "before they settle. Must be in (0, 1].");
+
+  ImGui::SetNextItemWidth(kSliderWidth);
+  ImGui::DragInt(
+      "Min Steps Before Sleep",
+      &islands.edit.minStepsBeforeSleep,
+      1.0f,
+      2,
+      std::numeric_limits<int>::max(),
+      "%d",
+      ImGuiSliderFlags_AlwaysClamp);
+  sendOnRelease("Number of consecutive rest steps required before an island goes to sleep.");
+}
+
 void dbg::BuildPropertiesPanel(UiState& state) {
+  if (ImGui::TreeNode("Islands")) {
+    MOCHI_DEFER(ImGui::TreePop());
+    AddIslandProperties(state);
+  }
+
   ImGui::SetNextItemOpen(true, ImGuiCond_FirstUseEver);
   if (ImGui::TreeNode("Rendering")) {
     MOCHI_DEFER(ImGui::TreePop());

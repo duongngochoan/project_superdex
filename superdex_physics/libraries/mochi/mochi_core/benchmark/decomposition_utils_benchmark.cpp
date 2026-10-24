@@ -70,6 +70,22 @@ BENCHMARK_CAPTURE(
     "RotationVariantSvd3x3_ArbitraryMatrix",
     GetArbitraryMatrix3x3());
 
+static void LeftPolarDecomposition3x3(benchmark::State& state, VMatrix3x3r const& A) {
+  VMatrix3x3r U, P;
+  std::function<void()> fn = [&]() { mochi::LeftPolarDecomposition3x3(A, U, P); };
+  for (auto _ : state) {
+    CallNoInline(fn);
+  }
+  state.counters["matrices/s"] =
+      benchmark::Counter(state.iterations(), benchmark::Counter::kIsRate);
+}
+
+BENCHMARK_CAPTURE(LeftPolarDecomposition3x3, "LeftPolarDecomposition3x3_Identity", VEye<3>());
+BENCHMARK_CAPTURE(
+    LeftPolarDecomposition3x3,
+    "LeftPolarDecomposition3x3_ArbitraryMatrix",
+    GetArbitraryMatrix3x3());
+
 static void BatchedAnalyticalEigendecompSym3x3(benchmark::State& state, VMatrix3x3r const& A) {
   NdArray<Matrix3x3r, kBS> mats;
   for (auto& m : mats) {

@@ -714,16 +714,16 @@ namespace CADRobotExporter.CAD
         {
             var names = new List<string>();
             if (Tree == null || Tree.Nodes.Count == 0) return names;
-            CollectLinkNamesFromTree((LinkNode)Tree.Nodes[0], names);
+            CollectLinkNamesFromTree(((LinkNode)Tree.Nodes[0]).Link, names);
             return names;
         }
 
-        private void CollectLinkNamesFromTree(LinkNode node, List<string> names)
+        private void CollectLinkNamesFromTree(Link link, List<string> names)
         {
-            if (node == null) return;
-            if (!string.IsNullOrEmpty(node.Link?.Name))
-                names.Add(node.Link.Name);
-            foreach (LinkNode child in node.Nodes)
+            if (link == null) return;
+            if (!string.IsNullOrEmpty(link.Name))
+                names.Add(link.Name);
+            foreach (Link child in link.Children)
                 CollectLinkNamesFromTree(child, names);
         }
 
@@ -894,7 +894,7 @@ namespace CADRobotExporter.CAD
                 if (comp == null) return null;
 
                 // Walk kinematic tree to find which link owns this component
-                return FindLinkForComponent(comp, (LinkNode)Tree.Nodes[0]);
+                return FindLinkForComponent(comp, ((LinkNode)Tree.Nodes[0]).Link);
             }
             catch
             {
@@ -902,26 +902,23 @@ namespace CADRobotExporter.CAD
             }
         }
 
-        private string FindLinkForComponent(Component2 targetComp, LinkNode node)
+        private string FindLinkForComponent(Component2 targetComp, Link link)
         {
-            if (node == null) return null;
+            if (link == null) return null;
 
             // Check if this link's components contain the target
-            if (node.Link != null)
-            {
-                var allComponents = new List<Component2>();
-                if (node.Link.SWVisualComponents != null) allComponents.AddRange(node.Link.SWVisualComponents);
-                if (node.Link.SWCollisionComponents != null) allComponents.AddRange(node.Link.SWCollisionComponents);
-                if (node.Link.SWInertialComponents != null) allComponents.AddRange(node.Link.SWInertialComponents);
+            var allComponents = new List<Component2>();
+            if (link.SWVisualComponents != null) allComponents.AddRange(link.SWVisualComponents);
+            if (link.SWCollisionComponents != null) allComponents.AddRange(link.SWCollisionComponents);
+            if (link.SWInertialComponents != null) allComponents.AddRange(link.SWInertialComponents);
 
-                foreach (var comp in allComponents)
-                {
-                    if (comp != null && comp.Name2 == targetComp.Name2)
-                        return node.Link.Name;
-                }
+            foreach (var comp in allComponents)
+            {
+                if (comp != null && comp.Name2 == targetComp.Name2)
+                    return link.Name;
             }
 
-            foreach (LinkNode child in node.Nodes)
+            foreach (Link child in link.Children)
             {
                 string result = FindLinkForComponent(targetComp, child);
                 if (result != null) return result;

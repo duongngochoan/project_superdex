@@ -276,4 +276,18 @@ struct TimeIntegratorState {
       "Please update the switch statement above if IntegrationMethod enumerator changes");
 }
 
+// True for the methods whose complete integration state is captured in the per-step history, so a
+// completed step can be reconstructed and reproduced from that history plus the current state.
+// These are the Backward Differentiation Formula methods (BackwardEuler=BDF1, BDF2, BDF3): they
+// evaluate forces only at the step endpoint and carry no intermediate stage state.
+// Runge-Kutta-style methods (DIRK, symplectic) evaluate at intermediate stage points not recorded
+// in the history, so they are not reproducible this way.
+[[nodiscard]] constexpr bool IsReproducibleFromHistory(IntegrationMethod method) {
+  static_assert(
+      static_cast<int>(IntegrationMethod::Count) == 8,
+      "Please revise the logic below if IntegrationMethod enumerator changes");
+  return method == IntegrationMethod::BackwardEuler || method == IntegrationMethod::BDF2 ||
+      method == IntegrationMethod::BDF3;
+}
+
 } // namespace mochi

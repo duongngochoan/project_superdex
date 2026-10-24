@@ -44,7 +44,7 @@ namespace Meshing
         public const uint FrameMagic = 0x53445832u;
 
         /// <summary>Wire protocol version. Requests carry it; responses do not.</summary>
-        public const uint ProtocolVersion = 3u;
+        public const uint ProtocolVersion = 4u;
 
         /// <summary>
         /// Wraps <paramref name="payload"/> in a request frame:

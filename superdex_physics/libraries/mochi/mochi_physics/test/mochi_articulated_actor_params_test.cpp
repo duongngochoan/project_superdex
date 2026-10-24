@@ -351,3 +351,44 @@ TEST_F(ArticulatedActorParamsTest, Validate_ArticulatedActorParams_InvalidMoment
   params.links[1].momentOfInertia = Real6{1_r, 0_r, 0_r, 1_r, 0_r, kInf};
   Validate(params, ExpectNotOK{});
 }
+
+TEST_F(ArticulatedActorParamsTest, Validate_ArticulatedActorParams_ShapelessLinkInertia) {
+  auto params = MakeValidParams();
+  auto& link = params.links[1];
+
+  // Full explicit inertia on a shapeless link is valid.
+  link.mass = 2_r;
+  link.centerOfMass = Real3{0_r, 0_r, 0.1_r};
+  link.momentOfInertia = Real6{0.01_r, 0_r, 0_r, 0.01_r, 0_r, 0.01_r};
+  Validate(params, ExpectOK{});
+
+  // A zero mass leaves the link massless, but a negative one is an error.
+  link.mass = 0_r;
+  Validate(params, ExpectOK{});
+  link.mass = -2_r;
+  Validate(params, ExpectNotOK{});
+  link.mass = 2_r;
+
+  // A non-finite value in that inertia is an error.
+  link.momentOfInertia = Real6{0.01_r, 0_r, 0_r, 0.01_r, 0_r, kInf};
+  Validate(params, ExpectNotOK{});
+
+  // Anything short of a full inertia is ignored with a warning, leaving the link massless: a shape
+  // can be removed from a link (e.g. for kinematics-only use) without invalidating it.
+  int numWarnings = 0;
+  auto const prevLogFn = GetLogCallback();
+  SetLogCallback([&numWarnings](LogChannel channel, char const*, char const*, int) {
+    numWarnings += channel == LogChannel::Warning ? 1 : 0;
+  });
+  MOCHI_DEFER(SetLogCallback(prevLogFn));
+  link.momentOfInertia = std::nullopt;
+  Validate(params, ExpectOK{});
+  EXPECT_EQ(numWarnings, 1);
+
+  // A density alone is ignored without a warning.
+  link.mass = std::nullopt;
+  link.centerOfMass = std::nullopt;
+  link.density = 1000_r;
+  Validate(params, ExpectOK{});
+  EXPECT_EQ(numWarnings, 1);
+}

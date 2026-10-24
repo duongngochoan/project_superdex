@@ -20,6 +20,8 @@
 #include <mochi_core/solvers/island_operators.h>
 
 #include <type_traits>
+#include <utility>
+#include <variant>
 
 namespace mochi {
 
@@ -65,15 +67,30 @@ template <
         StaticCast<AnyMatrix<ToScalar>>(interData.matrix),
         std::nullopt);
   }
+
+  // Identify a matrix by its values and, if it is sparse, its row pointers: a sparse matrix without
+  // non-zeros has empty values, which may be null.
+  auto const storageKey = [](auto const& anyMat) {
+    return std::visit(
+        [](auto const& mat) -> std::pair<void const*, void const*> {
+          if constexpr (IsSparseMatrix<decltype(mat)> || IsBlockSparseMatrix<decltype(mat)>) {
+            return {mat.Values().data(), mat.Pointers().data()};
+          } else {
+            static_assert(IsMatrix<decltype(mat)>);
+            return {mat.data(), nullptr};
+          }
+        },
+        anyMat);
+  };
+
   // Find matching symmetric pair
   for (size_t k = 0; k < inputInteraction.size(); ++k) {
     auto const& interData = inputInteraction[k];
     if (interData.symmetricPair.has_value()) {
-      auto const* ptr = GetValues(interData.symmetricPair.value()).data();
+      auto const pairKey = storageKey(interData.symmetricPair.value());
       size_t j = 0;
       for (; j < inputInteraction.size(); ++j) {
-        auto const& jData = inputInteraction[j];
-        if (GetValues(jData.matrix).data() == ptr) {
+        if (storageKey(inputInteraction[j].matrix) == pairKey) {
           break;
         }
       }

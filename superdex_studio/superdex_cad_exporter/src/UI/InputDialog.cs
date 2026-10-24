@@ -1,37 +1,73 @@
-﻿/*
+/*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  */
 
-using System.Windows.Forms;
+using System.Windows;
+using System.Windows.Controls;
 
 namespace CADRobotExporter.UI
 {
-    public class InputDialog : Form
+    public class InputDialog : Window
     {
-        private TextBox textBox;
-        private Button okButton;
-        private Button cancelButton;
-        public string InputText => textBox.Text;
+        private readonly TextBox textBox;
+
+        public string InputText
+        {
+            get { return textBox.Text; }
+        }
+
         public InputDialog(string title, string prompt)
         {
-            Text = title;
-            TopMost = true;
+            Theme.FluentTheme.Apply(this);
+
+            Title = title;
+            Topmost = true;
             Width = 300;
             Height = 150;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            StartPosition = FormStartPosition.CenterParent;
-            MaximizeBox = false;
-            MinimizeBox = false;
-            var label = new Label { Left = 10, Top = 10, Text = prompt, AutoSize = true };
-            textBox = new TextBox { Left = 10, Top = 35, Width = 260 };
-            okButton = new Button { Text = "OK", Left = 110, Top = 70, DialogResult = DialogResult.OK };
-            cancelButton = new Button { Text = "Cancel", Left = 195, Top = 70, DialogResult = DialogResult.Cancel };
-            AcceptButton = okButton;
-            CancelButton = cancelButton;
-            Controls.AddRange(new Control[] { label, textBox, okButton, cancelButton });
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterOwner;
+            ShowInTaskbar = false;
+
+            textBox = new TextBox { Margin = new Thickness(0, 8, 0, 0) };
+
+            Button okButton = new Button
+            {
+                Content = "OK",
+                IsDefault = true,
+                Width = 75,
+                Height = 23,
+            };
+            okButton.Click += (sender, e) => { DialogResult = true; };
+
+            Button cancelButton = new Button
+            {
+                Content = "Cancel",
+                IsCancel = true,
+                Width = 75,
+                Height = 23,
+                Margin = new Thickness(8, 0, 0, 0),
+            };
+
+            StackPanel buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 16, 0, 0),
+            };
+            buttons.Children.Add(okButton);
+            buttons.Children.Add(cancelButton);
+
+            StackPanel root = new StackPanel { Margin = new Thickness(10) };
+            root.Children.Add(new TextBlock { Text = prompt });
+            root.Children.Add(textBox);
+            root.Children.Add(buttons);
+
+            Content = root;
+
+            Loaded += (sender, e) => textBox.Focus();
         }
     }
 }

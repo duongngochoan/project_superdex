@@ -82,6 +82,7 @@ RoboticsContextCallbackHandle RoboticsContext::RegisterOnDestroy(std::function<v
   std::lock_guard lock(_slotsMutex);
   RoboticsHandle::ValueType const value = _nextHandle++;
   _onDestroyCallbacks.emplace(value, std::move(callback));
+  // NOLINTNEXTLINE(modernize-return-braced-init-list): explicit ctor, braced form is ill-formed
   return RoboticsContextCallbackHandle(value);
 }
 
@@ -213,6 +214,7 @@ ControllerHandle RoboticsContext::CreateControllerInternal(
   controller->SetName(name);
   controller->SetOwningBot(GetBotContainingActorLocked(robot));
   _controllerSlots[index] = ControllerSlot{controller};
+  // NOLINTNEXTLINE(modernize-return-braced-init-list): explicit ctor, braced form is ill-formed
   return ControllerHandle(index);
 }
 
@@ -710,6 +712,7 @@ SensorHandle RoboticsContext::CreateSensor(
   sensor->SetName(name);
   sensor->SetOwningBot(GetBotContainingActorLocked(linkActor));
   _sensorSlots[index] = SensorSlot{sensor};
+  // NOLINTNEXTLINE(modernize-return-braced-init-list): explicit ctor, braced form is ill-formed
   return SensorHandle(index);
 }
 
@@ -806,6 +809,7 @@ ActuatorHandle RoboticsContext::CreateActuator(
   actuator->SetName(name);
   actuator->SetOwningBot(GetBotContainingActorLocked(linkActor));
   _actuatorSlots[index] = ActuatorSlot{actuator};
+  // NOLINTNEXTLINE(modernize-return-braced-init-list): explicit ctor, braced form is ill-formed
   return ActuatorHandle(index);
 }
 

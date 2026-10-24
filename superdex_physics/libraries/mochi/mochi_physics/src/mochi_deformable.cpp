@@ -71,7 +71,7 @@ static void UpdateDirichletBC(
 
   // SNLE BC stores BC values as displacements, but we store BC positions.
   // Subtract our positions from the reference pose to update SNLE BC.
-  outLocalBC.poseValues.resize(inWorldBC->poseIndices.size());
+  outLocalBC.poseValues.resize_noinit(inWorldBC->poseIndices.size());
   Span<real const> refPositions = Flatten(mesh.mesh->GetNodeCoordinates());
   for (int i = 0; i < isize(inWorldBC->poseValues); i += 3) {
     Vec4r posWorld = ToSimdPoint(Load<3, Vec4r>(&inWorldBC->poseValues[i]));
@@ -89,16 +89,53 @@ void mochi::PreStepDeformableActorAsync(entt::registry& reg, entt::entity e) {
   ecs::InvokeOnEntity(&UpdateDirichletBC, reg, e);
 }
 
-template <ContactType kContactType, typename DiscretizationT>
+static real ComputeMaxContactSkinSpeed(
+    CContactSkinningData const& contactSkinning,
+    ColumnVectorView<real const> velocity) {
+  auto const& jacobian = contactSkinning.jacobian;
+  MOCHI_ASSERT_VERBOSE(
+      jacobian.Cols() == velocity.Rows(),
+      "Contact-skin Jacobian and velocity dimensions must match.");
+
+  real maxSpeedSqr = 0_r;
+  for (int row = 0; row < jacobian.Rows(); ++row) {
+    Vec4r skinVelocity{};
+    auto const indices = jacobian.Indices(row);
+    auto const values = jacobian.Values(row);
+    for (int i = 0; i < isize(indices); ++i) {
+      skinVelocity += velocity[indices[i]] * ToSimd(values[i]);
+    }
+    maxSpeedSqr = Max(maxSpeedSqr, NormSqr<3>(skinVelocity));
+  }
+  return Sqrt(maxSpeedSqr);
+}
+
+void deformable::UpdateMaxGeometrySpeed(
+    ecs::Included<TagDeformableActor>,
+    ecs::Excluded<TagNestedSoftActor, TagRodActor>,
+    CVelocitySlice<real, TimeStep::Current> const& velocity,
+    CColliderInfo const& collider,
+    CContactSkinningData const* contactSkinning,
+    CConservativeStepBounds& outStepBounds) {
+  // Match tight bounds: skin-only actors use the skin, while colliders also use the physics mesh.
+  real const physicsMaxSpeed = (collider.type != ColliderType::None || !contactSkinning)
+      ? MaxPackedVector3Norm<kSpaceDim3>(velocity.value.GetConstSpan())
+      : 0_r;
+  real const contactSkinMaxSpeed =
+      contactSkinning ? ComputeMaxContactSkinSpeed(*contactSkinning, velocity.value) : 0_r;
+  outStepBounds.maxGeometrySpeed = Max(physicsMaxSpeed, contactSkinMaxSpeed);
+}
+
+template <bool kIsSync, typename DiscretizationT>
 void deformable::SetupActiveCollisionNormals(
-    ecs::Excluded<TagShellActor, TagRodActor>,
+    ecs::Excluded<TagShellActor, TagRodActor, TagUseDeformableContactSkin>,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     DiscretizationT const& femDisc,
     CFinalDisplacementRef<TimeStep::Current> const& currentDispl,
     CFinalDisplacementRef<TimeStep::StageStart> const& stageStartDispl,
     CRootTransform const& transform,
     [[maybe_unused]] CContactSamples<TimeStep::Current> const& contactPositions,
-    CActiveCollisions<kContactType, TimeStep::Current>& activeCollisions) {
+    CActiveCollisions<kIsSync, TimeStep::Current>& activeCollisions) {
   MOCHI_PROFILE_SCOPE();
   static_assert(
       std::is_same_v<DiscretizationT, CFemBoundaryDiscretization> ||
@@ -113,55 +150,31 @@ void deformable::SetupActiveCollisionNormals(
   ColumnVectorView<real const> displForNormals =
       explicitNormals ? stageStartDispl.value : currentDispl.value;
 
-  auto const rotWorldFromCollidingT = ToVMatrix3x3Transpose(transform.worldFromLocal.GetRotation());
-
-  // Process active collisions in parallel
-  ParallelForEach("SetupCollisionResultNormals", activeCollisions, 1, [&](auto& activeCollision) {
-    auto& collisionResult = activeCollision.collisionResult;
-    if (collisionResult.sampleIndices.empty()) {
-      return;
-    }
-
-    collisionResult.normalColliding.resize_noinit(collisionResult.sampleIndices.size());
-
-    // Initialize with the transform of the first contact. For rigid colliders, it is shared by all.
-    auto const& jacColliderFromWorld = explicitNormals
-        ? collisionResult.jacColliderFromWorldStageStart
-        : collisionResult.jacColliderFromWorld;
-    auto jacColliderFromCollidingT =
-        Dot3x3(rotWorldFromCollidingT, Transpose3x3(jacColliderFromWorld[0]));
-
-    femDisc.Visit([&](auto const& discretizationImpl) {
-      using DiscretizationImplT = std::decay_t<decltype(discretizationImpl)>;
-      static int constexpr kNumQuads = DiscretizationImplT::kNumQuads;
-      static int constexpr kNumEleNodes = DiscretizationImplT::kNumEleNodes;
-      int prevElementIndex = -1;
-      NdArray<Vec4r, kNumEleNodes> nodeCoords;
-
-      for (size_t i = 0; i < collisionResult.sampleIndices.size(); i++) {
-        int const sampleIndex = collisionResult.sampleIndices[i];
-
-        // Fetch element and quad point.
-        int const elementIndex = sampleIndex / kNumQuads;
-        int const quadPointIndex = sampleIndex % kNumQuads;
+  details::SetupActiveCollisionNormalsFromElements(
+      explicitNormals,
+      transform,
+      femDisc,
+      activeCollisions,
+      [&](auto const& discretizationImpl, int elementIndex, int quadPointIndex) -> Vec4r {
+        using DiscretizationImplT = std::decay_t<decltype(discretizationImpl)>;
+        static int constexpr kNumEleNodes = DiscretizationImplT::kNumEleNodes;
         auto const& element = discretizationImpl.femElements[elementIndex];
-
-        // Cache deformed node coordinates if the element index has changed.
-        if (elementIndex != prevElementIndex) {
-          auto const baseElementDofIndices = kSpaceDim3 * element.GetBaseElement().Nodes();
-          for (int j = 0; j < kNumEleNodes; ++j) {
-            nodeCoords[j] = ToSimd(element.nodesCrdsPhys[j]) +
-                Load<3, Vec4r>(&displForNormals[baseElementDofIndices[j]]);
+        auto const baseElementDofIndices = kSpaceDim3 * element.GetBaseElement().Nodes();
+        NdArray<Vec4r, kNumEleNodes> nodeCoords;
+        for (int j = 0; j < kNumEleNodes; ++j) {
+          if constexpr (std::is_same_v<DiscretizationT, CFemBoundaryDiscretization>) {
+            nodeCoords[j] = ToSimd(element.nodesCrdsPhys[j]);
+          } else {
+            nodeCoords[j] = ToSimd(element.coordinates[element.Nodes()[j]]);
           }
-
-          prevElementIndex = elementIndex;
+          nodeCoords[j] += Load<3, Vec4r>(&displForNormals[baseElementDofIndices[j]]);
         }
 
-        // Compute the surface normal at the quadrature point in the colliding actor's local frame.
+        // Compute the surface normal in the colliding actor's local frame. Linear elements have a
+        // constant normal across their quadrature points.
         Vec4r normalColliding;
         if constexpr (std::is_same_v<DiscretizationT, CFemBoundaryDiscretization>) {
-          // Tetrahedral trace: 3D parametric, 3x3 Jacobian. Use the trace's
-          // QuadraturePointEvaluateMap and QuadraturePointEvaluateWeightNormal.
+          // Tetrahedral trace: evaluate the deformed normal from the tetrahedral map.
           Vec4r vmap;
           VMatrix3x3r vdmap;
           element.QuadraturePointEvaluateMap(quadPointIndex, nodeCoords, vmap, vdmap);
@@ -170,10 +183,7 @@ void deformable::SetupActiveCollisionNormals(
           element.QuadraturePointEvaluateWeightNormal(
               quadPointIndex, det, Invert3x3(vdmap, det), unused, normalColliding);
         } else {
-          // Triangular surface (Pk2DElement): evaluate the deformed tangent map (3x2) at this
-          // quad point as `tangent_k(q) = Σ_f deformed_pos[f] * dBasisParametric[q][f][k]`,
-          // then `normal = normalize(cross(tangent_0, tangent_1))`. This is the general FEM
-          // formula and matches the rest-shape computation in `Pk2DElement::QuadratureEvaluateMap`.
+          // Triangular surface: evaluate the deformed tangent map as in Pk2DElement::Initialize.
           using ElementImplT = std::decay_t<decltype(element)>;
           Vec4r tangent0{};
           Vec4r tangent1{};
@@ -185,35 +195,24 @@ void deformable::SetupActiveCollisionNormals(
           }
           normalColliding = Normalize<3>(Cross3(tangent0, tangent1));
         }
-
-        // Transform to the collider's local frame.
-        if (jacColliderFromWorld.size() == 1) {
-          collisionResult.normalColliding[i] =
-              ToReal3(DotVecMat3x3(normalColliding, jacColliderFromCollidingT));
-        } else {
-          normalColliding = DotVecMat3x3(normalColliding, rotWorldFromCollidingT);
-          collisionResult.normalColliding[i] =
-              ToReal3(DotMatVec3x3(jacColliderFromWorld[i], normalColliding));
-        }
-      }
-    });
-  });
+        return normalColliding;
+      });
 }
 
-#define MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(CONTACT_TYPE, DISCRETIZATION_TYPE)    \
-  template void deformable::SetupActiveCollisionNormals<CONTACT_TYPE, DISCRETIZATION_TYPE>( \
-      ecs::Excluded<TagShellActor, TagRodActor>,                                            \
-      ecs::CtxGlobal<CSimulationParams const>,                                              \
-      DISCRETIZATION_TYPE const&,                                                           \
-      CFinalDisplacementRef<TimeStep::Current> const&,                                      \
-      CFinalDisplacementRef<TimeStep::StageStart> const&,                                   \
-      CRootTransform const&,                                                                \
-      CContactSamples<TimeStep::Current> const&,                                            \
-      CActiveCollisions<CONTACT_TYPE, TimeStep::Current>&);
-MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(ContactType::Async, CFemBoundaryDiscretization);
-MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(ContactType::Sync, CFemBoundaryDiscretization);
-MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(ContactType::Async, CFemSurfaceDiscretization);
-MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(ContactType::Sync, CFemSurfaceDiscretization);
+#define MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(IS_SYNC, DISCRETIZATION_TYPE)    \
+  template void deformable::SetupActiveCollisionNormals<IS_SYNC, DISCRETIZATION_TYPE>( \
+      ecs::Excluded<TagShellActor, TagRodActor, TagUseDeformableContactSkin>,          \
+      ecs::CtxGlobal<CSimulationParams const>,                                         \
+      DISCRETIZATION_TYPE const&,                                                      \
+      CFinalDisplacementRef<TimeStep::Current> const&,                                 \
+      CFinalDisplacementRef<TimeStep::StageStart> const&,                              \
+      CRootTransform const&,                                                           \
+      CContactSamples<TimeStep::Current> const&,                                       \
+      CActiveCollisions<IS_SYNC, TimeStep::Current>&);
+MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(/*kIsSync*/ false, CFemBoundaryDiscretization);
+MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(/*kIsSync*/ true, CFemBoundaryDiscretization);
+MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(/*kIsSync*/ false, CFemSurfaceDiscretization);
+MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST(/*kIsSync*/ true, CFemSurfaceDiscretization);
 #undef MOCHI_SETUP_ACTIVE_COLLISIONS_KINEMATICS_INST
 
 template <typename ElementT>
@@ -226,7 +225,7 @@ static void ComputeAsyncContactResponseImpl(
     [[maybe_unused]] CContactSamples<TimeStep::Current> const& samples,
     ContactEvalConfig const& config,
     real dtStage,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CDeformablePointAsyncCollisionsResponse& outResponse,
     bool evalEner,
     bool evalGrad,
@@ -271,10 +270,10 @@ static void ComputeAsyncContactResponseImpl(
     int const numActiveSamples = isize(contactQuery.sampleIndices);
     collisionResponse.ResizeNoInit(numActiveSamples, evalEner, evalGrad, evalHess);
 
-    // Add the transformation between collider and world space.
-    auto const& rotColliderFromWorld = config.explicitNormals
-        ? contactQuery.jacColliderFromWorldStageStart
-        : contactQuery.jacColliderFromWorld;
+    // Add the transformation between collider and world space. The response is the gradient wrt the
+    // current contact points, so map it back through the current collider frame even when explicit
+    // normals take the friction plane from the stage-start frame.
+    auto const& rotColliderFromWorld = contactQuery.jacColliderFromWorld;
     MOCHI_ASSERT(
         isize(rotColliderFromWorld) == 1,
         "Collider transform must be shared by all sample points for async contact.");
@@ -329,7 +328,7 @@ void deformable::ComputeAsyncContactResponse(
     DiscretizationType const& femBoundaryDisc,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CTimeIntegratorState const& intState,
     CRootTransform const& rootTransform,
     AssemblyParams const& params,
@@ -373,7 +372,7 @@ void deformable::ComputeAsyncContactResponse(
       DISCRETIZATION_TYPE const&,                                                         \
       CContactSamples<TimeStep::Current> const&,                                          \
       CColliderInfo const&,                                                               \
-      CActiveCollisions<ContactType::Async, TimeStep::Current>&,                          \
+      CActiveCollisions</*kIsSync*/ false, TimeStep::Current>&,                           \
       CTimeIntegratorState const&,                                                        \
       CRootTransform const&,                                                              \
       AssemblyParams const&,                                                              \
@@ -387,7 +386,7 @@ MOCHI_COMPUTE_ASYNC_CONTACT_RESPONSE_INST(CFemSegmentDiscretization, 4);
 template <typename ActorTag, typename DiscretizationType>
 void deformable::SetupCollidingJacobians(
     ecs::Included<ActorTag>,
-    ecs::Excluded<TagRomActor, TagSoftSkinnedActor, TagUseVisualMeshContact>,
+    ecs::Excluded<TagRomActor, TagNestedSoftActor, TagUseDeformableContactSkin>,
     DiscretizationType const& discretization,
     CRootTransform const& transform,
     CDofOffset const& dofOffset,
@@ -408,7 +407,7 @@ void deformable::SetupCollidingJacobians(
     DynamicArray<JacData*> syncJacs(&tempAlloc);
     syncJacs.reserve(outJacobians.size());
     for (int i = 0; i < isize(outJacobians); ++i) {
-      if (outJacobians[i].type == ContactType::Sync) {
+      if (outJacobians[i].isSync) {
         syncJacs.push_back(&outJacobians[i]);
       }
     }
@@ -417,15 +416,15 @@ void deformable::SetupCollidingJacobians(
     int constexpr kMinPerTask = 2;
     ParallelForEach(
         "deformable::SetupCollidingJacobians Range", syncJacs, kMinPerTask, [&](JacData* jac) {
-          MOCHI_ASSERT_VERBOSE(jac->type == ContactType::Sync);
+          MOCHI_ASSERT_VERBOSE(jac->isSync);
 
           // Create differentiable map
           using DQuad = DMapQuad<typename DiscretizationT::ElementT>;
           DQuad dquad(discretizationImpl.femElements, jac->query->jacColliderFromWorld);
           DMap<DQuad, DMapRTConst, DMapDeformable<kNumFields>> dmap(&dquad, &dtransform, &dsoft);
 
-          auto& jacs = *(jac->jacs);
-          dmap.GetJac(jac->query->sampleIndices, jacs);
+          auto jacs = jac->PrepareJacs(1);
+          dmap.GetJac(jac->query->sampleIndices, jacs, jac->JacScratch());
           jacs[0].CompressIndices();
         });
   });
@@ -434,7 +433,7 @@ void deformable::SetupCollidingJacobians(
 #define MOCHI_SETUP_COLLIDING_JACOBIANS_INST(ACTOR_TAG, DISCRETIZATION_TYPE)         \
   template void deformable::SetupCollidingJacobians<ACTOR_TAG, DISCRETIZATION_TYPE>( \
       ecs::Included<ACTOR_TAG>,                                                      \
-      ecs::Excluded<TagRomActor, TagSoftSkinnedActor, TagUseVisualMeshContact>,      \
+      ecs::Excluded<TagRomActor, TagNestedSoftActor, TagUseDeformableContactSkin>,   \
       DISCRETIZATION_TYPE const& discretization,                                     \
       CRootTransform const& transform,                                               \
       CDofOffset const& dofOffset,                                                   \
@@ -462,7 +461,7 @@ void deformable::SetupColliderJacobians(
   // Compute Jacobians
   for (auto& jac : outJacobians) {
     dinvmap.SetData(jac.query);
-    auto& jacs = *jac.jacs;
+    auto jacs = jac.PrepareJacs(1);
     dmap.GetJac({}, jacs);
     jacs[0].CompressIndices();
   }
@@ -471,41 +470,22 @@ void deformable::SetupColliderJacobians(
 void deformable::EmplaceContactComponents(
     entt::registry& reg,
     entt::entity e,
-    int numCollidingSamples) {
+    int numCollidingSamples,
+    int numContactPartitions) {
   reg.emplace<TagUseContact>(e);
-  reg.emplace<CConservativePotentialColliders<ContactType::Async>>(e);
-  reg.emplace<CConservativePotentialColliders<ContactType::Sync>>(e);
-  reg.emplace<CPotentialColliders<ContactType::Async>>(e);
-  reg.emplace<CPotentialColliders<ContactType::Sync>>(e);
+  reg.emplace<CConservativePotentialColliders</*kIsSync*/ false>>(e);
+  reg.emplace<CConservativePotentialColliders</*kIsSync*/ true>>(e);
+  reg.emplace<CPotentialColliders</*kIsSync*/ false>>(e);
+  reg.emplace<CPotentialColliders</*kIsSync*/ true>>(e);
   reg.emplace<CContactSamples<TimeStep::Current>>(e, numCollidingSamples);
   reg.emplace<CContactSamples<TimeStep::StageStart>>(e, numCollidingSamples);
-  reg.emplace<CContactCorrespondence<ContactType::Async>>(e, numCollidingSamples);
-  reg.emplace<CContactCorrespondence<ContactType::Sync>>(e, numCollidingSamples);
-  reg.emplace<CActiveCollisions<ContactType::Async, TimeStep::Current>>(e);
-  reg.emplace<CActiveCollisions<ContactType::Async, TimeStep::StageStart>>(e);
-  reg.emplace<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e);
-  reg.emplace<CActiveCollisions<ContactType::Sync, TimeStep::StageStart>>(e);
+  reg.emplace<CContactCorrespondence</*kIsSync*/ false>>(e, numCollidingSamples);
+  reg.emplace<CContactCorrespondence</*kIsSync*/ true>>(e, numCollidingSamples);
+  reg.emplace<CActiveCollisions</*kIsSync*/ false, TimeStep::Current>>(e, numContactPartitions);
+  reg.emplace<CActiveCollisions</*kIsSync*/ false, TimeStep::StageStart>>(e, numContactPartitions);
+  reg.emplace<CActiveCollisions</*kIsSync*/ true, TimeStep::Current>>(e, numContactPartitions);
+  reg.emplace<CActiveCollisions</*kIsSync*/ true, TimeStep::StageStart>>(e, numContactPartitions);
   reg.emplace<CCollJacs<CollRole::Colliding>>(e);
-}
-
-void deformable::ComputeLumpedMassMatrix(
-    CFullSparsityPattern const& sparsity,
-    CMassMatrix const& massMatrix,
-    CLumpedMassMatrix& outLumpedMassMatrix) {
-  MOCHI_PROFILE_SCOPE();
-
-  auto const& graph = sparsity.graph;
-  MOCHI_ASSERT(
-      isize(massMatrix.values) == graph.NumTargets(),
-      "Mass matrix values size must match the number of non-zeros in the sparsity pattern.");
-
-  int const numRows = isize(graph);
-  auto const pointers = graph.GetPointers();
-  outLumpedMassMatrix.values.resize_noinit(numRows);
-  for (int row = 0; row < numRows; ++row) {
-    outLumpedMassMatrix.values[row] =
-        HSum(Span(massMatrix.values.data() + pointers[row], pointers[row + 1] - pointers[row]));
-  }
 }
 
 void mochi::deformable::RecordRigidTransformEval(
@@ -519,6 +499,7 @@ void mochi::deformable::RecordState(
     CVelocitySlice<real, TimeStep::Current> const& vel,
     CDisplacementSlice<real, TimeStep::Current, DisplacementLayer::Skinned> const* dispSkinned,
     CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned> const* velSkinned,
+    CIntegrationVelocitySlices<DisplacementLayer::Skinned> const* integrationVelSkinned,
     CRodPose<TimeStep::Current> const* rodPose,
     [[maybe_unused]] ecs::OptionalTag<TagSoftActor> isSoft,
     [[maybe_unused]] ecs::OptionalTag<TagShellActor> isShell,
@@ -561,8 +542,8 @@ void mochi::deformable::RecordState(
     RecordDataset("displacementSkinned", dims, dispSkinned->value.GetConstSpan(), outData);
   }
 
-  // Velocities of the skinned layer
-  if (velSkinned) {
+  // Velocities of the skinned layer (only if state)
+  if (velSkinned && integrationVelSkinned) {
     MOCHI_ASSERT_VERBOSE(isSoft, "Skinned velocities are only supported for soft actors");
     MOCHI_ASSERT(velSkinned->value.size() % 3 == 0, "Expected 3 values per node");
     MOCHI_ASSERT(isize(velSkinned->value) == isize(dispSpan), "Size mismatch");

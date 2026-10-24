@@ -19,8 +19,8 @@
 #include <mochi_core/solvers/newton_solver_params.h>
 #include <mochi_core/solvers/newton_solver_status.h>
 #include <mochi_core/solvers/snle_problem.h>
+#include <mochi_core/utils/basic_utils.h>
 
-#include <cmath>
 #include <limits>
 
 namespace mochi {
@@ -69,6 +69,63 @@ struct LineSearch {
    * condition for improvement.
    */
   static bool ArmijoOrResidualNorm(Problem& problem, Status& status, LsParams const& params);
+
+ private:
+  /**
+   * Slope test of the trials whose merit change is within an estimate of the merit's rounding
+   * error.
+   *
+   * Near convergence, typically in single precision, the merit change of a good step can be
+   * smaller than its rounding error, so the merit test can reject the step on rounding error. With
+   * E0 and E1 the merits at x and at the trial x + s dx, ε the machine epsilon of T and
+   * k = @ref kRoundingErrorFactor, a trial that fails the merit test with
+   * |E1 - E0| <= 2 k ε |E0| is accepted if
+   * F(x + s dx)·dx <= (2 c1 - 1) F(x)·dx, with F the residual and c1 the Armijo constant of the
+   * merit test. This is the Armijo condition on (s / 2) (F(x)·dx + F(x + s dx)·dx), the
+   * trapezoidal estimate of E1 - E0, which is exact on quadratic merits and free of the
+   * cancellation in E1 - E0: Hager and Zhang's approximate Armijo condition (2005). It applies
+   * only to trials that have a finite merit and fail the merit test, and never accepts one whose
+   * slope or slope bound is not finite.
+   */
+  // TODO: Explore applying the slope test also to trials that pass the merit test within the band.
+  class RoundingErrorSlopeTest {
+   public:
+    /**
+     * @param[in] merit0 Merit E0 at the start of the line search.
+     * @param[in] slope0 F(x)·dx at the start of the line search.
+     * @param[in] c1 Armijo constant c1 of the merit test.
+     */
+    RoundingErrorSlopeTest(double merit0, double slope0, double c1)
+        : _merit0(merit0),
+          _band(2.0 * kRoundingErrorFactor * std::numeric_limits<T>::epsilon() * Abs(merit0)),
+          _slopeBound((2.0 * c1 - 1.0) * slope0) {}
+
+    /**
+     * Whether the trial, with finite merit @p merit and the increment holding @p scale times dx,
+     * changes the merit within the band and passes the slope test. Assembles the residual if the
+     * slope decides.
+     */
+    [[nodiscard]] bool Passes(Problem& problem, double merit, T scale) const {
+      MOCHI_ASSERT_VERBOSE(IsFinite(merit), "The slope test requires a finite merit.");
+      if (!IsFinite(_slopeBound) || !NearEqual(merit, _merit0, _band)) {
+        return false;
+      }
+      problem.UpdateResidual(); // No-op if already assembled
+      double const slope = problem.GetResidual().Dot(problem.GetIncrement());
+      return IsFinite(slope) && slope <= scale * _slopeBound;
+    }
+
+   private:
+    // The band allows each of the two merits a rounding error of k ε |E0|. |E0| stands in for the
+    // rounding magnitudes of the merit's terms, which cancellation within the terms can make
+    // orders of magnitude larger, hence the large k.
+    // TODO: Explore per-term rounding magnitudes instead of |E0| for the band. See D125958065.
+    static constexpr double kRoundingErrorFactor = 1000.0;
+
+    double const _merit0;
+    double const _band; // 2 k ε |E0|
+    double const _slopeBound; // (2 c1 - 1) F(x)·dx
+  };
 };
 
 template <typename T>
@@ -96,12 +153,18 @@ bool LineSearch<T>::Simple(Problem& problem, Status& status, LsParams const& par
   // Save current solution
   ColumnVector<T> const sol0(problem.GetSolution());
 
+  // Simple requires no sufficient decrease, hence c1 = 0
+  RoundingErrorSlopeTest const slopeTest(
+      status.merit, problem.GetResidual().Dot(problem.GetIncrement()), /*c1*/ 0.0);
+
   bool improved = false;
+  auto scale = T(1);
   int& it = status.numLastLSIterDone;
   for (it = 0; it < params.maxIter; ++it) {
     // Compute new candidate solution
     if (it > 0) {
       problem.SetSolution(sol0, /*invokePost*/ false);
+      scale *= params.alpha;
       problem.ScaleIncrement(params.alpha);
     }
     problem.UpdateSolution();
@@ -111,7 +174,9 @@ bool LineSearch<T>::Simple(Problem& problem, Status& status, LsParams const& par
     double const merit = problem.GetObjective();
 
     // Check enough improvement
-    if (merit <= (status.merit + std::abs(status.merit * params.maxRelIncrease))) {
+    if (IsFinite(merit) &&
+        (merit <= (status.merit + Abs(status.merit * params.maxRelIncrease)) ||
+         slopeTest.Passes(problem, merit, scale))) {
       status.merit = merit;
       improved = true;
       break;
@@ -136,6 +201,7 @@ bool LineSearch<T>::Armijo(Problem& problem, Status& status, LsParams const& par
   double const dotDx0Res0 = problem.GetResidual().Dot(problem.GetIncrement());
   MOCHI_ASSERT_VERBOSE(dotDx0Res0 <= 0, "Armijo line search requires a descent direction.");
   double const factor0 = dotDx0Res0 * params.wolfe1;
+  RoundingErrorSlopeTest const slopeTest(status.merit, dotDx0Res0, params.wolfe1);
 
   bool improved = false;
   auto scale = T(1);
@@ -154,7 +220,8 @@ bool LineSearch<T>::Armijo(Problem& problem, Status& status, LsParams const& par
     double const merit = problem.GetObjective();
 
     // Check enough improvement
-    if (merit <= status.merit + scale * factor0) {
+    if (IsFinite(merit) &&
+        (merit <= status.merit + scale * factor0 || slopeTest.Passes(problem, merit, scale))) {
       status.merit = merit;
       improved = true;
       break;
@@ -180,9 +247,11 @@ bool LineSearch<T>::WolfeWeak(Problem& problem, Status& status, LsParams const& 
   MOCHI_ASSERT_VERBOSE(dotDx0Res0 <= 0, "Wolfe line search requires a descent direction.");
   double const t1 = params.wolfe1 * dotDx0Res0;
   double const t2 = params.wolfe2 * dotDx0Res0;
+  RoundingErrorSlopeTest const slopeTest(status.merit, dotDx0Res0, params.wolfe1);
 
   bool improved = false;
   auto scale = T(1);
+  auto scaleNew = scale;
   auto scaleMin = T(0);
   auto scaleMax = std::numeric_limits<T>::infinity();
   int& it = status.numLastLSIterDone;
@@ -193,6 +262,8 @@ bool LineSearch<T>::WolfeWeak(Problem& problem, Status& status, LsParams const& 
     // Compute new candidate solution
     if (it > 0) {
       problem.SetSolution(sol0, /*invokePost*/ false);
+      problem.ScaleIncrement(scaleNew / scale);
+      scale = scaleNew;
     }
     problem.UpdateSolution();
 
@@ -205,21 +276,18 @@ bool LineSearch<T>::WolfeWeak(Problem& problem, Status& status, LsParams const& 
     double const merit = problem.GetObjective();
 
     // Check current iterate
-    if (!std::isfinite(dotDxRes) || !std::isfinite(merit) || (merit > status.merit + scale * t1)) {
-      // If not finite or 1st Wolfe condition is not met, reduce the scale.
+    if (!IsFinite(dotDxRes) || !IsFinite(merit) ||
+        (merit > status.merit + scale * t1 && !slopeTest.Passes(problem, merit, scale))) {
+      // If not finite, or neither the 1st Wolfe condition nor the slope test is met, reduce the
+      // scale.
       scaleMax = scale;
-      T const scaleNew = scaleMin + params.alpha * (scale - scaleMin);
-      problem.ScaleIncrement(scaleNew / scale);
-      scale = scaleNew;
+      scaleNew = scaleMin + params.alpha * (scale - scaleMin);
     } else if (dotDxRes < t2 * scale) {
-      // If 1st Wolfe condition is met but 2nd is not, increase the scale.
+      // If the 2nd Wolfe condition is not met, increase the scale.
       scaleMin = scale;
-      T const scaleNew =
-          std::isfinite(scaleMax) ? T(0.5) * (scale + scaleMax) : scale / params.alpha;
-      problem.ScaleIncrement(scaleNew / scale);
-      scale = scaleNew;
+      scaleNew = IsFinite(scaleMax) ? T(0.5) * (scale + scaleMax) : scale / params.alpha;
     } else {
-      // If both conditions are met, update merit and exit line search.
+      // Otherwise, update merit and exit line search.
       status.merit = merit;
       improved = true;
       break;
@@ -246,9 +314,11 @@ bool LineSearch<T>::WolfeStrong(Problem& problem, Status& status, LsParams const
   MOCHI_ASSERT_VERBOSE(dotDx0Res0 <= 0, "Wolfe line search requires a descent direction.");
   double const t1 = params.wolfe1 * dotDx0Res0;
   double const t2 = params.wolfe2 * dotDx0Res0;
+  RoundingErrorSlopeTest const slopeTest(status.merit, dotDx0Res0, params.wolfe1);
 
   bool improved = false;
   auto scale = T(1);
+  auto scaleNew = scale;
   auto scaleMin = T(0);
   auto scaleMax = std::numeric_limits<T>::infinity();
   int& it = status.numLastLSIterDone;
@@ -259,6 +329,8 @@ bool LineSearch<T>::WolfeStrong(Problem& problem, Status& status, LsParams const
     // Compute new candidate solution
     if (it > 0) {
       problem.SetSolution(sol0, /*invokePost*/ false);
+      problem.ScaleIncrement(scaleNew / scale);
+      scale = scaleNew;
     }
     problem.UpdateSolution();
 
@@ -270,23 +342,19 @@ bool LineSearch<T>::WolfeStrong(Problem& problem, Status& status, LsParams const
     double const dotDxRes = problem.GetResidual().Dot(problem.GetIncrement());
     double const merit = problem.GetObjective();
 
-    if (!std::isfinite(dotDxRes) || !std::isfinite(merit) || (merit > status.merit + scale * t1) ||
-        (dotDxRes > std::abs(t2 * scale))) {
-      // If not finite, 1st Wolfe condition is not met, or 2nd Wolfe condition is not met by above,
-      // reduce the scale.
+    if (!IsFinite(dotDxRes) || !IsFinite(merit) ||
+        (merit > status.merit + scale * t1 && !slopeTest.Passes(problem, merit, scale)) ||
+        (dotDxRes > Abs(t2 * scale))) {
+      // If not finite, or neither the 1st Wolfe condition nor the slope test is met, or the 2nd
+      // Wolfe condition is not met by above, reduce the scale.
       scaleMax = scale;
-      T const scaleNew = scaleMin + params.alpha * (scale - scaleMin);
-      problem.ScaleIncrement(scaleNew / scale);
-      scale = scaleNew;
-    } else if (dotDxRes < -std::abs(t2 * scale)) {
+      scaleNew = scaleMin + params.alpha * (scale - scaleMin);
+    } else if (dotDxRes < -Abs(t2 * scale)) {
       // If 2nd Wolfe condition is not met by below, increase the scale.
       scaleMin = scale;
-      T const scaleNew =
-          std::isfinite(scaleMax) ? T(0.5) * (scale + scaleMax) : scale / params.alpha;
-      problem.ScaleIncrement(scaleNew / scale);
-      scale = scaleNew;
+      scaleNew = IsFinite(scaleMax) ? T(0.5) * (scale + scaleMax) : scale / params.alpha;
     } else {
-      // If both conditions are met, update merit and exit line search.
+      // Otherwise, update merit and exit line search.
       status.merit = merit;
       improved = true;
       break;
@@ -325,7 +393,7 @@ bool LineSearch<T>::ResidualNorm(Problem& problem, Status& status, LsParams cons
     problem.UpdateResidual();
     auto const resNorm = problem.GetResidual().Norm();
 
-    if (resNorm <= resNorm0) {
+    if (IsFinite(resNorm) && resNorm <= resNorm0) {
       improved = true;
       break;
     }
@@ -352,12 +420,17 @@ bool LineSearch<T>::ArmijoOrResidualNorm(Problem& problem, Status& status, LsPar
     return ResidualNorm(problem, status, localParams);
   }
   double const factor0 = dotDx0Res0 * params.wolfe1;
+  RoundingErrorSlopeTest const slopeTest(status.merit, dotDx0Res0, params.wolfe1);
 
   // Save current solution
   ColumnVector<T> const sol0(problem.GetSolution());
 
   // Compute current residual norm
   auto const resNorm0 = problem.GetResidual().Norm();
+  auto const residualNormDecreased = [&] {
+    auto const resNorm = problem.GetResidual().Norm();
+    return IsFinite(resNorm) && resNorm < resNorm0;
+  };
 
   bool improved = false;
   auto scale = T(1);
@@ -378,8 +451,9 @@ bool LineSearch<T>::ArmijoOrResidualNorm(Problem& problem, Status& status, LsPar
 
     // Check improvement of the residual norm or enough improvement of the merit
     double const merit = problem.GetObjective();
-    auto const resNorm = problem.GetResidual().Norm();
-    if ((merit <= status.merit + scale * factor0) || (resNorm < resNorm0)) {
+    if ((IsFinite(merit) &&
+         (merit <= status.merit + scale * factor0 || slopeTest.Passes(problem, merit, scale))) ||
+        residualNormDecreased()) {
       status.merit = merit;
       improved = true;
       break;

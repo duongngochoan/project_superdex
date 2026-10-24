@@ -34,10 +34,9 @@ MOCHI_FORCE_INLINE constexpr T IntegralSqrt(T a) {
       std::is_integral_v<T> && !std::is_same_v<std::remove_cv_t<T>, bool>, "Unsupported type");
 
   // Base case.
-  if (a < 2)
-    MOCHI_UNLIKELY {
-      return a;
-    }
+  if (a < 2) MOCHI_UNLIKELY {
+    return a;
+  }
 
   // Find square root using binary search.
   T lo = T(1);
@@ -69,11 +68,9 @@ MOCHI_FORCE_INLINE constexpr T Sinc(T x) {
   T x2 = x * x;
   T x4 = x2 * x2;
 
-  if (x4 < std::numeric_limits<T>::epsilon())
-    MOCHI_UNLIKELY {
-      return T(1) - x2 / T(6);
-    }
-  else {
+  if (x4 < std::numeric_limits<T>::epsilon()) MOCHI_UNLIKELY {
+    return T(1) - x2 / T(6);
+  } else {
     return Sin(x) / x;
   }
 }

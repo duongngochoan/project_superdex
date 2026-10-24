@@ -16,17 +16,16 @@
 
 #include "meshing/processing_modifiers/export_mochi_model.h"
 
-#include "app/app.h" // SuperDexStudio::GetFileDialogPath
 #include "meshing/mesh_conversion.h" // MeshSectionsToModel (render->mochi space conversion for .mochi.h5)
 #include "meshing/processing_modifiers/processing_export_path.h" // DefaultExportPath
 #include "meshing/processing_modifiers/processing_mesh_utils.h" // SectionFromMeshData, MeshDataFromSections, EndsWithNoCase
-#include "ui/imgui_widgets.h" // ImGui::SimpleReflectionStruct, ImGui::InputText
 
 #include <picojson/picojson.h>
 
 #include <superdex_robotics/utils/file_utils.h> // kCollisionSubdir
 
-#include <imguios/imguios.h>
+#include <imgui.h>
+#include <misc/cpp/imgui_stdlib.h> // ImGui::InputText(std::string*)
 
 #include <mochi_mesh/isosurface_reconstruction.h> // ReconstructSurfaceFromSdf
 
@@ -39,6 +38,7 @@
 #include <mochi_core/utils/dynamic_string.h>
 #include <mochi_physics/utils/mochi_model_utils.h> // BakeSdf, SaveToFile, FileFormat
 
+#include <array>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -95,6 +95,10 @@ class MochiModelExportMethod : public ReflectedMethod<MochiModelExportProps> {
       _props.exportPath = SuggestedExportPath(sourceFilePath);
     }
   }
+  void OverrideExportPath(std::string const& path) override {
+    _props.exportPath = NormalizeMochiModelExportPath(path);
+    _autoExportPath = false;
+  }
 
   // An auto path is reproduced on load, so it is left out of the document entirely; the presence of
   // the key is exactly what marks a path as the user's own (see DeserializeProps).
@@ -105,10 +109,11 @@ class MochiModelExportMethod : public ReflectedMethod<MochiModelExportProps> {
     }
   }
 
-  void DeserializeProps(picojson::value const& in) override {
-    ReflectedMethod::DeserializeProps(in);
+  int DeserializeProps(picojson::value const& in) override {
+    int const issues = ReflectedMethod::DeserializeProps(in);
     // A stored path means the user chose it, even if it happens to equal the current suggestion.
     _autoExportPath = _props.exportPath.empty();
+    return issues;
   }
   // Show the input surface (the "Mochi Model") next to the reconstructed SDF surface, matching the
   // Model Viewer's Mochi Model section so the two reads are consistent. The input block is a copy
@@ -126,7 +131,12 @@ class MochiModelExportMethod : public ReflectedMethod<MochiModelExportProps> {
 
   void ShowParams(ModifierGuiContext const& gui) override {
     ModifierTooltip const& tooltip = gui.tooltip;
-    (void)ImGui::SimpleReflectionStruct(_props.sdf);
+    if (gui.host) {
+      (void)gui.host->ReflectedStruct(
+          static_cast<SReflect::StructTypeInfo const&>(
+              SReflect::GetTypeInfo<mochi::GridSdfParams>()),
+          &_props.sdf);
+    }
     ImGui::TextUnformatted("Bakes a grid SDF from the input surface; the output buffer is its");
     ImGui::TextUnformatted("reconstructed surface (preview only).");
 
@@ -141,7 +151,10 @@ class MochiModelExportMethod : public ReflectedMethod<MochiModelExportProps> {
         "pipeline. Turn this off (or press Browse) to choose the path yourself.");
     ImGui::SameLine();
     ImGui::BeginDisabled(_autoExportPath);
-    ImGui::InputText("Path (.mochi.h5)", &_props.exportPath);
+    std::string exportPath{_props.exportPath.data(), _props.exportPath.size()};
+    if (ImGui::InputText("Path (.mochi.h5)", &exportPath)) {
+      _props.exportPath = exportPath;
+    }
     if (ImGui::IsItemDeactivatedAfterEdit()) {
       _props.exportPath = NormalizeMochiModelExportPath(
           std::string{_props.exportPath.data(), _props.exportPath.size()});
@@ -150,12 +163,12 @@ class MochiModelExportMethod : public ReflectedMethod<MochiModelExportProps> {
     ImGui::EndDisabled();
     // Browse stays live while Auto is on: choosing a file IS taking the path over, so it turns Auto
     // off. Cancelling leaves everything as it was -- Browse only ever turns Auto off, never on.
-    if (ImGui::Button("Browse##sdfexport")) {
+    if (gui.host && ImGui::Button("Browse##sdfexport")) {
       // Filter on "*.h5" (not "*.mochi.h5"): the native save dialog treats the extension as the
       // text after the last dot, so a "*.mochi.h5" filter makes it re-append ".mochi.h5" to a name
       // that already ends in it (doubling the suffix). "*.h5" matches .mochi.h5 without
       // re-appending.
-      char const* filters[] = {"*.h5"};
+      constexpr std::array<char const*, 1> filters{"*.h5"};
       std::string const defaultPath = processing::ExportDialogStartPath(
           std::string{_props.exportPath.data(), _props.exportPath.size()},
           SuggestedExportPath(gui.sourceFilePath),
@@ -165,15 +178,10 @@ class MochiModelExportMethod : public ReflectedMethod<MochiModelExportProps> {
       // last-used directory when a default's parent is missing, which would defeat suggesting it.
       superdex::robotics::EnsureDirectoriesCreated(
           defaultPath, mochi::ErrorLog{mochi::LogChannel::Warning});
-      mochi::Path const chosen = SuperDexStudio::GetFileDialogPath(
-          "Export Mochi Model",
-          filters,
-          1,
-          "Mochi Model (*.mochi.h5)",
-          /*isSaveDialog=*/true,
-          mochi::Path{defaultPath});
-      if (!chosen.IsEmpty()) {
-        _props.exportPath = NormalizeMochiModelExportPath(chosen.ToString());
+      std::string const chosen = gui.host->SaveFileDialog(
+          "Export Mochi Model", filters, "Mochi Model (*.mochi.h5)", defaultPath);
+      if (!chosen.empty()) {
+        _props.exportPath = NormalizeMochiModelExportPath(chosen);
         _autoExportPath = false;
       }
     }

@@ -24,8 +24,11 @@
 
 #if MOCHI_USE_OCCT
 
+#include "step_face_colors.h"
+
 #include <BRepMesh_Context.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <IMeshTools_MeshAlgoType.hxx>
@@ -37,23 +40,31 @@
 #include <STEPControl_Reader.hxx>
 #include <Standard_Failure.hxx>
 #include <Standard_Integer.hxx>
+#include <TDocStd_Document.hxx>
 #include <TopAbs.hxx>
 #include <TopExp.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopTools_IndexedMapOfShape.hxx>
+#include <TopTools_MapOfShape.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
 #include <cstdio>
+#include <map>
+#include <optional>
 #include <string>
 #include <utility>
 
 namespace {
 
 using namespace mochi::mesh::cli;
+
+// OCCT emits the geometry in millimeters (see LoadStepShape); Mochi works in meters.
+constexpr double kMillimetersToMeters = 0.001;
 
 // Reads a STEP file into a single combined OCCT shape. Returns false (and sets @p error) on any
 // read or transfer failure.
@@ -91,6 +102,96 @@ bool LoadStepShape(std::string const& path, TopoDS_Shape& outShape, CliError& er
   return true;
 }
 
+bool CheckTessellationRequest(
+    std::string_view stepFilePath,
+    StepTessellationParams const& params,
+    CliError& error) {
+  MOCHI_MESH_CLI_ERROR_IF(stepFilePath.empty(), error, "STEP file path is empty.");
+  MOCHI_MESH_CLI_ERROR_IF(
+      !(params.linearDeflection > 0.0) || !(params.angularDeflection > 0.0),
+      error,
+      "STEP tessellation deflections must be positive.");
+  MOCHI_MESH_CLI_ERROR_RETURN(error, false);
+  return true;
+}
+
+// Runs @p body, turning the Standard_Failure OpenCascade raises (or anything else thrown) into
+// @p error so a meshing failure becomes a clean error rather than crashing the helper, which would
+// corrupt the framed response.
+template <typename Body>
+auto RunGuarded(CliError& error, Body&& body) -> decltype(body()) {
+  try {
+    return body();
+  } catch (Standard_Failure const& failure) {
+    char const* const message = failure.GetMessageString();
+    std::fprintf(
+        stderr, "[superdex_mesh_cli] OpenCascade failure: %s\n", message ? message : "(none)");
+    MOCHI_MESH_CLI_ERROR_SET(error, "OpenCascade failed during STEP tessellation.");
+  } catch (...) {
+    MOCHI_MESH_CLI_ERROR_SET(error, "OpenCascade threw during STEP tessellation.");
+  }
+  return {};
+}
+
+// Tessellates every face of @p shape in place. This is the visual-preview tessellation; request
+// OpenCascade's Delabella triangulation algorithm explicitly. Delabella is OCCT's newer Delaunay
+// mesher and is NOT the default (the historic default is Watson), so it must be selected via the
+// meshing context.
+void MeshWithDelabella(TopoDS_Shape const& shape, StepTessellationParams const& params) {
+  IMeshTools_Parameters meshParams;
+  meshParams.Deflection = params.linearDeflection;
+  meshParams.Angle = params.angularDeflection;
+  meshParams.Relative = false;
+  meshParams.InParallel = true;
+  Handle(BRepMesh_Context) const context = new BRepMesh_Context(IMeshTools_MeshAlgoType_Delabella);
+  BRepMesh_IncrementalMesh mesher;
+  mesher.SetShape(shape);
+  mesher.ChangeParameters() = meshParams;
+  mesher.Perform(context);
+}
+
+// Appends @p face's triangulation to @p mesh, in meters and the renderer's Y-up frame.
+void AppendFaceTriangles(TopoDS_Face const& face, MeshData& mesh) {
+  TopLoc_Location location;
+  Handle(Poly_Triangulation) const triangulation = BRep_Tool::Triangulation(face, location);
+  if (triangulation.IsNull() || triangulation->NbTriangles() == 0) {
+    return;
+  }
+  gp_Trsf const transform = location.Transformation();
+  // A REVERSED face's natural normal is flipped relative to the solid's outward normal, so its
+  // triangle winding must be reversed to keep a consistent outward orientation.
+  bool const reversed = (face.Orientation() == TopAbs_REVERSED);
+
+  // Each face's triangulation has its own node set; append this face's nodes (in parent space) and
+  // rebase its 1-based triangle indices into the combined vertex list. Vertices on shared edges are
+  // intentionally left unwelded, which yields crisp face boundaries for CAD geometry.
+  int const baseIndex = GetNumNodes(mesh);
+  for (Standard_Integer i = 1; i <= triangulation->NbNodes(); ++i) {
+    gp_Pnt const p = triangulation->Node(i).Transformed(transform);
+    // Convert OCCT's native Z-up frame to the Y-up frame the glTF/render pipeline expects (matching
+    // cad_conversion's RWGltf Zup->Yup): (x, y, z) -> (x, z, -y), i.e. -90 deg about X. This is a
+    // proper rotation, so it does not affect the triangle winding handled below.
+    mesh.coordinates.push_back(p.X() * kMillimetersToMeters);
+    mesh.coordinates.push_back(p.Z() * kMillimetersToMeters);
+    mesh.coordinates.push_back(-p.Y() * kMillimetersToMeters);
+  }
+  for (Standard_Integer i = 1; i <= triangulation->NbTriangles(); ++i) {
+    Standard_Integer n1 = 0;
+    Standard_Integer n2 = 0;
+    Standard_Integer n3 = 0;
+    triangulation->Triangle(i).Get(n1, n2, n3);
+    int i1 = baseIndex + (n1 - 1);
+    int i2 = baseIndex + (n2 - 1);
+    int i3 = baseIndex + (n3 - 1);
+    if (reversed) {
+      std::swap(i1, i3);
+    }
+    mesh.connectivity.push_back(i1);
+    mesh.connectivity.push_back(i2);
+    mesh.connectivity.push_back(i3);
+  }
+}
+
 } // namespace
 
 MeshData mochi::mesh::cli::TessellateStep(
@@ -98,108 +199,96 @@ MeshData mochi::mesh::cli::TessellateStep(
     StepTessellationParams const& params,
     CliError& error) {
   MOCHI_MESH_CLI_ERROR_RETURN(error, {});
-
-  MOCHI_MESH_CLI_ERROR_IF(stepFilePath.empty(), error, "STEP file path is empty.");
-  MOCHI_MESH_CLI_ERROR_IF(
-      !(params.linearDeflection > 0.0) || !(params.angularDeflection > 0.0),
-      error,
-      "STEP tessellation deflections must be positive.");
-  MOCHI_MESH_CLI_ERROR_RETURN(error, {});
+  if (!CheckTessellationRequest(stepFilePath, params, error)) {
+    return {};
+  }
 
   TopoDS_Shape shape;
   if (!LoadStepShape(std::string(stepFilePath), shape, error)) {
     return {};
   }
 
-  // OCCT emits the geometry in millimeters (see LoadStepShape); Mochi works in meters.
-  constexpr double kMillimetersToMeters = 0.001;
-
-  // OpenCascade reports failures by raising Standard_Failure; catch it so a meshing failure becomes
-  // a clean error rather than crashing the helper (which would corrupt the framed response).
-  try {
-    // Tessellate every face of the shape in place. This is the visual-preview tessellation; request
-    // OpenCascade's Delabella triangulation algorithm explicitly. Delabella is OCCT's newer
-    // Delaunay mesher and is NOT the default (the historic default is Watson), so it must be
-    // selected via the meshing context.
-    IMeshTools_Parameters meshParams;
-    meshParams.Deflection = params.linearDeflection;
-    meshParams.Angle = params.angularDeflection;
-    meshParams.Relative = false;
-    meshParams.InParallel = true;
-    Handle(BRepMesh_Context) const context =
-        new BRepMesh_Context(IMeshTools_MeshAlgoType_Delabella);
-    BRepMesh_IncrementalMesh mesher;
-    mesher.SetShape(shape);
-    mesher.ChangeParameters() = meshParams;
-    mesher.Perform(context);
+  MeshData mesh = RunGuarded(error, [&] {
+    MeshWithDelabella(shape, params);
 
     // Collect unique faces (a compound may reference the same face more than once).
     TopTools_IndexedMapOfShape faceMap;
     TopExp::MapShapes(shape, TopAbs_FACE, faceMap);
 
-    MeshData mesh;
-    mesh.nodesPerElement = 3;
+    MeshData result;
     for (Standard_Integer fi = 1; fi <= faceMap.Extent(); ++fi) {
-      TopoDS_Face const face = TopoDS::Face(faceMap(fi));
-      TopLoc_Location location;
-      Handle(Poly_Triangulation) const triangulation = BRep_Tool::Triangulation(face, location);
-      if (triangulation.IsNull() || triangulation->NbTriangles() == 0) {
-        continue;
-      }
-      gp_Trsf const transform = location.Transformation();
-      // A REVERSED face's natural normal is flipped relative to the solid's outward normal, so its
-      // triangle winding must be reversed to keep a consistent outward orientation.
-      bool const reversed = (face.Orientation() == TopAbs_REVERSED);
+      AppendFaceTriangles(TopoDS::Face(faceMap(fi)), result);
+    }
+    return result;
+  });
+  MOCHI_MESH_CLI_ERROR_IF(
+      error.IsOK() && GetNumElements(mesh) == 0, error, "STEP tessellation produced no triangles.");
+  MOCHI_MESH_CLI_ERROR_RETURN(error, {});
+  return mesh;
+}
 
-      // Each face's triangulation has its own node set; append this face's nodes (in parent space)
-      // and rebase its 1-based triangle indices into the combined vertex list. Vertices on shared
-      // edges are intentionally left unwelded, which yields crisp face boundaries for CAD geometry.
-      int const baseIndex = GetNumNodes(mesh);
-      for (Standard_Integer i = 1; i <= triangulation->NbNodes(); ++i) {
-        gp_Pnt const p = triangulation->Node(i).Transformed(transform);
-        // Convert OCCT's native Z-up frame to the Y-up frame the glTF/render pipeline expects
-        // (matching cad_conversion's RWGltf Zup->Yup): (x, y, z) -> (x, z, -y), i.e. -90 deg about
-        // X. This is a proper rotation, so it does not affect the triangle winding handled below.
-        mesh.coordinates.push_back(static_cast<double>(p.X() * kMillimetersToMeters));
-        mesh.coordinates.push_back(static_cast<double>(p.Z() * kMillimetersToMeters));
-        mesh.coordinates.push_back(static_cast<double>(-p.Y() * kMillimetersToMeters));
-      }
-      for (Standard_Integer i = 1; i <= triangulation->NbTriangles(); ++i) {
-        Standard_Integer n1 = 0;
-        Standard_Integer n2 = 0;
-        Standard_Integer n3 = 0;
-        triangulation->Triangle(i).Get(n1, n2, n3);
-        int i1 = baseIndex + (n1 - 1);
-        int i2 = baseIndex + (n2 - 1);
-        int i3 = baseIndex + (n3 - 1);
-        if (reversed) {
-          std::swap(i1, i3);
-        }
-        mesh.connectivity.push_back(i1);
-        mesh.connectivity.push_back(i2);
-        mesh.connectivity.push_back(i3);
+std::vector<ColorMeshData> mochi::mesh::cli::TessellateStepByColor(
+    std::string_view stepFilePath,
+    StepTessellationParams const& params,
+    CliError& error) {
+  MOCHI_MESH_CLI_ERROR_RETURN(error, {});
+  if (!CheckTessellationRequest(stepFilePath, params, error)) {
+    return {};
+  }
+
+  // Read through XCAF, unlike TessellateStep, because STEPControl_Reader drops styles.
+  Handle(TDocStd_Document) document;
+  if (!occ::LoadStepDocument(std::string(stepFilePath), document, error)) {
+    return {};
+  }
+
+  std::vector<ColorMeshData> meshes = RunGuarded(error, [&] {
+    std::vector<occ::StyledFace> const faces = occ::CollectStyledFaces(document);
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (occ::StyledFace const& styled : faces) {
+      builder.Add(compound, styled.face);
+    }
+    MeshWithDelabella(compound, params);
+
+    // Ordered so the uncolored faces (nullopt) come first and the colored ones follow by rgb.
+    std::map<std::optional<uint32_t>, MeshData> byColor;
+    TopTools_MapOfShape visited;
+    for (occ::StyledFace const& styled : faces) {
+      if (visited.Add(styled.face)) {
+        AppendFaceTriangles(styled.face, byColor[styled.rgb]);
       }
     }
 
-    MOCHI_MESH_CLI_ERROR_IF(
-        GetNumElements(mesh) == 0, error, "STEP tessellation produced no triangles.");
-    MOCHI_MESH_CLI_ERROR_RETURN(error, {});
-    return mesh;
-  } catch (Standard_Failure const& failure) {
-    char const* const message = failure.GetMessageString();
-    std::fprintf(
-        stderr, "[superdex_mesh_cli] OpenCascade failure: %s\n", message ? message : "(none)");
-    MOCHI_MESH_CLI_ERROR_SET(error, "OpenCascade failed during STEP tessellation.");
-    return {};
-  } catch (...) {
-    MOCHI_MESH_CLI_ERROR_SET(error, "OpenCascade threw during STEP tessellation.");
-    return {};
-  }
+    std::vector<ColorMeshData> result;
+    for (auto& [rgb, mesh] : byColor) {
+      if (GetNumElements(mesh) > 0) {
+        result.push_back({rgb.has_value(), rgb.value_or(0u), std::move(mesh)});
+      }
+    }
+    return result;
+  });
+  occ::CloseStepDocument(document);
+  MOCHI_MESH_CLI_ERROR_IF(
+      error.IsOK() && meshes.empty(), error, "STEP tessellation produced no triangles.");
+  MOCHI_MESH_CLI_ERROR_RETURN(error, {});
+  return meshes;
 }
 
 #else // !MOCHI_USE_OCCT
 
 mochi::mesh::cli::MeshData mochi::mesh::cli::TessellateStep(
+    std::string_view /*stepFilePath*/,
+    StepTessellationParams const& /*params*/,
+    CliError& error) {
+  MOCHI_MESH_CLI_ERROR_RETURN(error, {});
+  MOCHI_MESH_CLI_ERROR_SET(
+      error, "STEP tessellation is not supported on this platform (OpenCascade unavailable).");
+  return {};
+}
+
+std::vector<mochi::mesh::cli::ColorMeshData> mochi::mesh::cli::TessellateStepByColor(
     std::string_view /*stepFilePath*/,
     StepTessellationParams const& /*params*/,
     CliError& error) {

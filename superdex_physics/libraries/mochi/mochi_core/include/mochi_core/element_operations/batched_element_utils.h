@@ -21,6 +21,8 @@
 #include <mochi_core/utils/simd.h>
 #include <mochi_core/utils/span.h>
 
+#include <utility>
+
 namespace mochi::fem {
 
 // Batched element vector (displacement, residual).
@@ -58,10 +60,15 @@ MOCHI_FORCE_INLINE void PackBasisAndQuadWeight(
   constexpr int kNumNodes = ElementT::kNumDofs;
   alignas(alignof(V)) real staging[V::kSize]{};
   for (int f = 0; f < kNumNodes; ++f) {
-    for (size_t b = 0; b < kBatchSize; ++b) {
-      staging[b] = elements[elementIndices[b]].basisEvaluated[q][f];
+    if constexpr (requires { ElementT::kBasisEvaluated; }) {
+      // Shared by all elements of the type: broadcast it rather than gather identical values.
+      batchedBasis[f] = V(ElementT::kBasisEvaluated[q][f]);
+    } else {
+      for (size_t b = 0; b < kBatchSize; ++b) {
+        staging[b] = elements[elementIndices[b]].basisEvaluated[q][f];
+      }
+      batchedBasis[f] = Load<V>(staging);
     }
-    batchedBasis[f] = Load<V>(staging);
   }
   for (size_t b = 0; b < kBatchSize; ++b) {
     staging[b] = elements[elementIndices[b]].quadWeights[q] * extraWeight[b];
@@ -69,53 +76,67 @@ MOCHI_FORCE_INLINE void PackBasisAndQuadWeight(
   batchedQuadWeight = Load<V>(staging);
 }
 
-/// @brief Gather the stage-start target for a batch of elements: the inertia predictor u₀ + Δt·v₀,
-///   or the stage-start displacement u₀ only when @p kGatherVelocity is false.
-///
-/// @tparam kBatchSize Batch size.
-/// @tparam ElementT Element type.
-/// @tparam kGatherVelocity If true, add Δt·v₀. If false, gather u₀ only; @p predVeloRaw and
-///   @p dtStage are then unused and @p predVeloRaw may be empty.
-/// @tparam kNumFields Number of fields per node. Defaults to ElementT::kSpaceDim.
-/// @tparam kStride Stride (in DoFs) between consecutive elements in @p indicesFlat.
-///   Defaults to ElementT::kNumDofs * kNumFields (matching a uniform-stride L2G).
-///   Set to a larger value when gathering a sub-stencil from a padded L2G with wider stride
-///   (e.g., 3-node triangle inertia from a 6-node shell bending stencil with stride 18).
+/**
+ * @brief Gather a batch element vector from a global vector, e.g. the solution or the predicted
+ * target.
+ *
+ * @tparam kBatchSize  Number of elements per batch
+ * @tparam ElementT    Element type
+ * @tparam kNumFields  Number of fields per node
+ * @tparam kStride     Stride (in DoFs) between consecutive elements in @p indicesFlat. Defaults to
+ *                     ElementT::kNumDofs * kNumFields (matching a uniform-stride L2G). Set to a
+ *                     larger value when gathering a sub-stencil from a padded L2G with wider stride
+ *                     (e.g., 3-node triangle inertia from a 6-node shell bending stencil with
+ *                     stride 18).
+ * @param[in]  indicesFlat       Flat local-to-global DoF indices
+ * @param[in]  globalElemIndices Per-batch-lane element indices (padded to kBatchSize)
+ * @param[in]  globalVec         Global vector
+ * @param[out] outBatchElemVec   Batch element vector
+ */
 template <
     int kBatchSize,
     class ElementT,
-    bool kGatherVelocity = true,
     int kNumFields = ElementT::kSpaceDim,
     int kStride = ElementT::kNumDofs * kNumFields>
-MOCHI_FORCE_INLINE void GatherPredTarget(
+MOCHI_FORCE_INLINE void GatherBatchElementVector(
     Span<int const> indicesFlat,
-    NdArray<int, kBatchSize> const& elementIndices,
-    Span<real const> predDispRaw,
-    [[maybe_unused]] Span<real const> predVeloRaw,
-    [[maybe_unused]] real dtStage,
-    BatchElementVector<kBatchSize, ElementT, kNumFields>& outPredTarget) {
-  static_assert(ElementT::kSpaceDim == 3, "GatherPredTarget requires kSpaceDim == 3");
-  static_assert(
-      kNumFields == ElementT::kSpaceDim, "GatherPredTarget requires kNumFields == kSpaceDim");
-  static_assert(kStride >= ElementT::kNumDofs * kNumFields, "Stride must be >= element DoF count.");
+    NdArray<int, kBatchSize> const& globalElemIndices,
+    Span<real const> globalVec,
+    BatchElementVector<kBatchSize, ElementT, kNumFields>& outBatchElemVec) {
   using V = BatchReal<kBatchSize>;
+  static_assert(ElementT::kSpaceDim == 3, "GatherBatchElementVector requires kSpaceDim == 3");
+  static_assert(kNumFields <= 4, "GatherBatchElementVector requires kNumFields <= 4");
   constexpr int kNumNodes = ElementT::kNumDofs;
-  alignas(alignof(V)) real nodeStaging[V::kSize * 3] MOCHI_NO_INIT;
-  for (int n = 0; n < kNumNodes; ++n) {
-    for (int b = 0; b < V::kSize; ++b) {
-      int const globalDof =
-          indicesFlat[elementIndices[Min(b, kBatchSize - 1)] * kStride + n * kNumFields];
-      Vec4r nodeTarget = Load<3, Vec4r>(&predDispRaw[globalDof]);
-      if constexpr (kGatherVelocity) {
-        nodeTarget += Vec4r{dtStage} * Load<3, Vec4r>(&predVeloRaw[globalDof]);
-      }
-      Store<3>(&nodeStaging[b * 3], nodeTarget);
+  constexpr int kNumEleDofs = kNumNodes * kNumFields;
+  static_assert(kStride >= kNumEleDofs, "Stride must be >= element DoF count.");
+
+#if MOCHI_ASSERT_VERBOSE_ENABLED
+  for (int b = 0; b < kBatchSize; ++b) {
+    int const* const elemDofs = &indicesFlat[globalElemIndices[b] * kStride];
+    for (int d = 0; d < kNumEleDofs; ++d) {
+      MOCHI_ASSERT_VERBOSE(
+          elemDofs[d] == elemDofs[d - d % kNumFields] + d % kNumFields,
+          "Per-node DoFs must be contiguous in the global vector.");
     }
-    LoadTransposed<V::kSize>(
-        nodeStaging,
-        outPredTarget[n * kNumFields + 0],
-        outPredTarget[n * kNumFields + 1],
-        outPredTarget[n * kNumFields + 2]);
+  }
+#endif // MOCHI_ASSERT_VERBOSE_ENABLED
+
+  // Per-node DoFs are contiguous in the global vector, so each node needs one index load per lane.
+  // The lanes are expanded at compile time: some compilers (e.g. MSVC) otherwise do not unroll a
+  // loop over them and keep the node pointers in memory.
+  // TODO: Consider loading each lane's node values with one vector load and transpose them in
+  // registers. Needs a LoadTransposed variant that takes one pointer per lane. See D122821232.
+  auto const gatherNode =
+      [&]<size_t... kLanes>(int nodeDof, std::index_sequence<kLanes...>) MOCHI_FORCE_INLINE_LAMBDA {
+        int const elemDof[] = {
+            globalElemIndices[Min(static_cast<int>(kLanes), kBatchSize - 1)] * kStride...};
+        real const* const nodeValues[] = {&globalVec[indicesFlat[elemDof[kLanes] + nodeDof]]...};
+        for (int f = 0; f < kNumFields; ++f) {
+          outBatchElemVec[nodeDof + f] = V{nodeValues[kLanes][f]...};
+        }
+      };
+  for (int nI = 0; nI < kNumNodes; ++nI) {
+    gatherNode(nI * kNumFields, std::make_index_sequence<V::kSize>{});
   }
 }
 

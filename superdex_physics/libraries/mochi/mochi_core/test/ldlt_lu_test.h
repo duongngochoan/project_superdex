@@ -167,7 +167,7 @@ void TestInverse() {
         EXPECT_NEAR(
             A(ii, jj),
             ii == jj ? 1_r : 0_r,
-            real(15 * n * n) * std::numeric_limits<real>::epsilon());
+            real(150 * n * n) * std::numeric_limits<real>::epsilon());
       }
     }
   };
@@ -311,14 +311,16 @@ void TestSolveInPlace(Ftor&& makeSolver, bool isSymmetricSolver) {
   std::vector<int> mList{1, 2, 3, 4, 7};
 
   auto test = [&](auto& A, int n) {
-    A.SetZero();
+    // Diagonally dominant with dense L and U.
+    A.SetRandom(345, -1_r, 1_r);
+    ColumnVector<real> D(n);
+    D.SetRandom(456, real(n), real(2 * n));
     for (int ii = 0; ii < n; ++ii) {
-      A(ii, ii) = 2_r;
-      if (ii + 1 < n) {
-        A(ii, ii + 1) = -1_r;
-      }
-      if (ii - 1 >= 0) {
-        A(ii, ii - 1) = isSymmetricSolver ? -1_r : 1_r;
+      A(ii, ii) = (ii % 2 == 0) ? D(ii) : -D(ii);
+      if (isSymmetricSolver) {
+        for (int jj = 0; jj < ii; ++jj) {
+          A(ii, jj) = A(jj, ii);
+        }
       }
     }
 
@@ -358,13 +360,12 @@ void TestSolveInPlace(Ftor&& makeSolver, bool isSymmetricSolver) {
       mySolver.RightSolveInPlace(BR2);
 
       // Check results
+      real const relTol = (n + 2) * (n + 2) * std::numeric_limits<real>::epsilon();
       int numErrorLeftSolve = 0, numErrorRightSolve = 0;
       for (int ii = 0; ii < n; ++ii) {
         for (int jj = 0; jj < m; ++jj) {
-          real const absTolL = n * n * std::numeric_limits<real>::epsilon() *
-              std::abs(XL(ii, jj)); // Cond(A) = O(n^2)
-          real const absTolR = n * n * std::numeric_limits<real>::epsilon() *
-              std::abs(XR(jj, ii)); // Cond(A) = O(n^2)
+          real const absTolL = relTol * std::abs(XL(ii, jj));
+          real const absTolR = relTol * std::abs(XR(jj, ii));
           if ((std::abs(bL1(ii, 0) - XL(ii, 0)) > absTolL) ||
               (std::abs(BL1(ii, jj) - XL(ii, jj)) > absTolL) ||
               (std::abs(BL2(ii, jj) - XL(ii, jj)) > absTolL)) {

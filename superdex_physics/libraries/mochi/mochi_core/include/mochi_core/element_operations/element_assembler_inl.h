@@ -132,81 +132,30 @@ namespace mochi {
  * one uint64_t holding the `ready`, `acquired` or `finished` state.
  * Though most C++ programmer who have attempted to take advantage of the full C++ memory model
  * may be familiar with the `release` and `acquire` concepts of the model, they may not be aware
- * of the details regarding the writing and reading of several atomic variables. For x86 machines,
- * this does not cause any problem, as the hardware implements a sequentially consistent
- * model always. However for ARM and RISC-V, this is not the case. The following is an explanation
- * of a surprising behavior that the dynamic dispatch has to protect itself against:
+ * of the details regarding the writing and reading of several atomic variables. This protocol
+ * avoids the missed-completion outcome on x86 because its TSO ordering and atomic completion RMW
+ * order the subsequent dependency loads. ARM and RISC-V permit weaker outcomes under
+ * acquire/release ordering alone. The following is an explanation of a surprising behavior that
+ * the dynamic dispatch has to protect itself against:
  *
  *    Let's assume thread A and thread B complete work of aggregates a and b at the same time and
  *    that aggregate c depends on both a and b. A will mark finished_a = true atomically and
- *    B will mark finished_b = true. Such marking has to be done with a release semantic, since
- *    the modifications made by the threads must become visible to other threads that will check
- *    for the completion of that work. After having marked that their work is finished, both threads
- *    will examine the dependencies of `c`. Surprisingly, with a `release` or `release and acquire`
- *    semantic on the atomic operations of A and B, it is possible that both A sees
- *    finished_b == false  and B sees finished_a == false thus leading both to the conclusion that
- *    c is not ready. This is possible because in such case, these architectures do not guarantee
- *    any visible order of operations on different atomic variables. A is allowed to see
- *    a stale value of finished_b that B updates if it is in a different atomic variables than
- *    finished_a and similarly for B.
- *    The only update mode that guarantees that will not happen is a sequentially consistent
- *    update.
+ *    B will mark finished_b = true. After marking their work as finished, both threads examine
+ *    the dependencies of `c`. With only release completion updates and acquire dependency loads,
+ *    it is possible that A sees finished_b == false and B sees finished_a == false. Both threads
+ *    then conclude that c is not ready, and no thread will examine it again.
  *
- *  The `finished` atomics are the only place where the strictest and costliest sequentially
- *  consistent mode of operation is being used.
+ *    To prevent this, both the completion updates and the dependency observations participate in
+ *    the same sequentially consistent order. If both threads missed the other's completion, each
+ *    completion would have to follow the other thread's dependency observation in that order,
+ *    contradicting the program order from each completion to its subsequent observations.
+ *
+ *  The `finished` atomics are the only place in the concurrent protocol where the strictest and
+ *  costliest sequentially consistent mode of operation is used, for both updates and observations.
  *
  */
 
 namespace details {
-
-/**
- * @brief Gather batch element solution from the global solution vector.
- *
- * @tparam ElementT    Element type
- * @tparam kNumFields  Number of fields per node
- * @tparam kBatchSize  Number of elements per batch
- * @param[in]  globalSol         Global solution vector
- * @param[in]  indicesFlat       Flat local-to-global DoF indices
- * @param[in]  globalElemIndices Per-batch-lane element indices (padded to kBatchSize)
- * @param[out] outBatchElemSol   Batch element displacement vector
- */
-template <class ElementT, int kNumFields, int kBatchSize>
-MOCHI_FORCE_INLINE void GatherBatchElementSolution(
-    ColumnVectorView<real const> globalSol,
-    Span<int const> indicesFlat,
-    NdArray<int, kBatchSize> const& globalElemIndices,
-    fem::BatchElementVector<kBatchSize, ElementT, kNumFields>& outBatchElemSol) {
-  using V = BatchReal<kBatchSize>;
-  static_assert(ElementT::kSpaceDim == 3, "GatherBatchElementSolution requires kSpaceDim == 3");
-  static_assert(kNumFields <= 4, "GatherBatchElementSolution requires kNumFields <= 4");
-  constexpr int kNumNodes = ElementT::kNumDofs;
-  constexpr int kNumEleDofs = kNumNodes * kNumFields;
-
-  for (int d = 0; d < kNumEleDofs; ++d) {
-    if constexpr (V::kSize == 2) {
-      outBatchElemSol[d] =
-          V{globalSol[indicesFlat[globalElemIndices[Min(0, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(1, kBatchSize - 1)] * kNumEleDofs + d]]};
-    } else if constexpr (V::kSize == 4) {
-      outBatchElemSol[d] =
-          V{globalSol[indicesFlat[globalElemIndices[Min(0, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(1, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(2, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(3, kBatchSize - 1)] * kNumEleDofs + d]]};
-    } else {
-      static_assert(V::kSize == 8, "Unsupported SIMD size");
-      outBatchElemSol[d] =
-          V{globalSol[indicesFlat[globalElemIndices[Min(0, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(1, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(2, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(3, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(4, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(5, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(6, kBatchSize - 1)] * kNumEleDofs + d]],
-            globalSol[indicesFlat[globalElemIndices[Min(7, kBatchSize - 1)] * kNumEleDofs + d]]};
-    }
-  }
-}
 
 template <class ElementT, int kNumFields, int kBatchSize, bool kGatherSolution>
 using MaybeNoDispElOpFnType = std::conditional_t<
@@ -260,6 +209,10 @@ MOCHI_FORCE_INLINE void ScatterBatchElementResults(
   // as scalar lane storage instead of using repeated SIMD lane extraction. We keep the explicit
   // BatchReal::operator[] access here because that optimization relies on
   // reinterpret_cast<real const*> and unsupported SIMD storage-layout/aliasing assumptions.
+  //
+  // TODO: Consider reading the scattered values with loads that match Store's partial stores, so
+  // that they forward from an earlier element's store to a shared node, mostly with
+  // locality-friendly element orders. See D123691790.
   for (int b = 0; b < actualBatchSize; ++b) {
     int const cur = b & 1;
     int const nxt = 1 - cur;
@@ -342,8 +295,8 @@ MOCHI_FORCE_INLINE bool InvokeBatchedElOp(
     bool psdDRes) {
   if constexpr (kGatherSolution) {
     fem::BatchElementVector<kBatchSize, ElementT, kNumFields> batchDisp MOCHI_NO_INIT;
-    GatherBatchElementSolution<ElementT, kNumFields, kBatchSize>(
-        globalSol, indicesFlat, batchElemIndices, batchDisp);
+    fem::GatherBatchElementVector<kBatchSize, ElementT, kNumFields>(
+        indicesFlat, batchElemIndices, globalSol.GetConstSpan(), batchDisp);
     return batchedElOp(
         batchElemIndices, indicesFlat, batchDisp, outEnergy, outRes, outDRes, psdDRes);
   } else {
@@ -380,11 +333,16 @@ MOCHI_FORCE_INLINE void ProcessBatch(
   if (assemObj) {
     batchEnergy = {};
   }
+  // Zeroed in loops: required to avoid memset calls (e.g. on MSVC).
   if constexpr (kAssemRes) {
-    batchRes = {};
+    for (int i = 0; i < batchRes.size(); ++i) {
+      batchRes[i] = SimdZero<BatchReal<kBatchSize>>();
+    }
   }
   if constexpr (kAssemDRes) {
-    batchDRes = {};
+    for (int i = 0; i < batchDRes.size(); ++i) {
+      batchDRes[i] = SimdZero<BatchReal<kBatchSize>>();
+    }
   }
 
   bool const hasOutput = InvokeBatchedElOp<kGatherSolution, ElementT, kNumFields, kBatchSize>(
@@ -523,8 +481,10 @@ static void DynamicLoadBalancingAssembly(
 
     // Per-thread buffers.
     BatchDouble<kBatchSize> batchEnergy{};
-    fem::BatchElementVector<kBatchSize, ElementT, kNumFields> batchRes{};
-    fem::BatchElementMatrix<kBatchSize, ElementT, kNumFields> batchDRes{};
+    fem::BatchElementVector<kBatchSize, ElementT, kNumFields> batchRes
+        MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
+    fem::BatchElementMatrix<kBatchSize, ElementT, kNumFields> batchDRes
+        MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
 
     if (numThreads == 1) {
       // Single-threaded: linear pass over all (active) elements to improve cache locality.
@@ -559,11 +519,14 @@ static void DynamicLoadBalancingAssembly(
       double* obj = assemObj ? &localObj : nullptr;
 
       DynamicArray<int> activeElems;
-      activeElems.reserve(2 * nbs.NumElements() / numGroups);
+      bool const useSubset = !isElementActive.empty();
+      if (useSubset) {
+        activeElems.reserve(2 * nbs.NumElements() / numGroups);
+      }
 
-      auto processGroup = [&](Span<int const> groupElements) {
+      auto processGroup = [&, useSubset](Span<int const> groupElements) {
         Span<int const> elemsToProcess = groupElements;
-        if (!isElementActive.empty()) {
+        if (useSubset) {
           activeElems.clear();
           for (auto e : groupElements) {
             if (isElementActive[e]) {
@@ -764,17 +727,11 @@ void AssembleObjResDRes(
 }
 
 namespace details {
-template <
-    class ElementT,
-    int kNumFields,
-    int kBatchSize,
-    bool kGatherSolution,
-    typename InitEleDResFn>
+template <class ElementT, int kNumFields, int kBatchSize, bool kGatherSolution>
 void AssembleAndProjectObjResDResImpl(
     Local2GlobalMap const& l2g,
     MaybeNoDispElOpFnType<ElementT, kNumFields, kBatchSize, kGatherSolution> const& batchedElOp,
     AssemblyActiveSubset const& activeSubset,
-    InitEleDResFn const& initEleDResFn,
     ColumnVectorView<real const> globalSol,
     RowMatrixView<real const> J,
     double& outObj,
@@ -858,8 +815,10 @@ void AssembleAndProjectObjResDResImpl(
 
     // Per-batch objective, residual and dresidual.
     BatchDouble<kBatchSize> batchEnergy{};
-    fem::BatchElementVector<kBatchSize, ElementT, kNumFields> batchRes{};
-    fem::BatchElementMatrix<kBatchSize, ElementT, kNumFields> batchDRes{};
+    fem::BatchElementVector<kBatchSize, ElementT, kNumFields> batchRes
+        MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
+    fem::BatchElementMatrix<kBatchSize, ElementT, kNumFields> batchDRes
+        MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
 
     // Per-element residual and dresidual.
     alignas(alignof(Simd<real>)) ColumnVector<real, kNumEleDofs> eleRes MOCHI_NO_INIT;
@@ -886,11 +845,16 @@ void AssembleAndProjectObjResDResImpl(
       if (params.assemObj) {
         batchEnergy = {};
       }
+      // Zeroed in loops: required to avoid memset calls (e.g. on MSVC).
       if (params.assemRes) {
-        batchRes = {};
+        for (int i = 0; i < batchRes.size(); ++i) {
+          batchRes[i] = SimdZero<BatchReal<kBatchSize>>();
+        }
       }
       if (params.assemDRes) {
-        batchDRes = {};
+        for (int i = 0; i < batchDRes.size(); ++i) {
+          batchDRes[i] = SimdZero<BatchReal<kBatchSize>>();
+        }
       }
 
       bool const hasOutput = InvokeBatchedElOp<kGatherSolution, ElementT, kNumFields, kBatchSize>(
@@ -903,12 +867,12 @@ void AssembleAndProjectObjResDResImpl(
           params.assemDRes ? &batchDRes : nullptr,
           params.psdDRes);
 
-      // Determine whether to add the element contribution to the output.
-      bool const addElemObj = params.assemObj && hasOutput;
-      bool const addElemRes = params.assemRes && hasOutput;
+      if (!hasOutput) {
+        continue;
+      }
 
       // Add objective.
-      if (addElemObj) {
+      if (params.assemObj) {
         auto* dstObj = assembleToOutput ? &outObj : &workerObj[iTask];
         for (int b = 0; b < actualBatchSize; ++b) {
           *dstObj += batchEnergy[b];
@@ -919,29 +883,16 @@ void AssembleAndProjectObjResDResImpl(
       for (int b = 0; b < actualBatchSize; ++b) {
         int const eleIdx = batchElemIndices[b];
 
-        // Set eleDRes via initEleDResFn, then add batch element op contribution.
-        bool nonZeroInitDRes = false;
-        if (params.assemDRes) {
-          // Initialization of the element dresidual may be different for each element, e.g. if
-          // initializing to the mass matrix.
-          nonZeroInitDRes = initEleDResFn(eleDRes, eleIdx);
-          MOCHI_ASSERT_VERBOSE(
-              nonZeroInitDRes || eleDRes.NormSqr() == 0, "Inconsistent initialization.");
-          if (hasOutput) {
-            for (int i = 0; i < kNumEleDofs; ++i) {
-              for (int j = 0; j < kNumEleDofs; ++j) {
-                eleDRes(i, j) += batchDRes[i * kNumEleDofs + j][b];
-              }
-            }
-          }
-        }
-
         // NOTE: If all the element operations have zero dresidual, the dresidual projection could
         // be skipped. This is not an important use-case as of today but could be optimized in the
         // future.
-        bool const addElemDRes = params.assemDRes && (nonZeroInitDRes || hasOutput);
+        if (params.assemDRes) {
+          for (int i = 0; i < kNumEleDofs; ++i) {
+            for (int j = 0; j < kNumEleDofs; ++j) {
+              eleDRes(i, j) = batchDRes[i * kNumEleDofs + j][b];
+            }
+          }
 
-        if (addElemDRes) {
           // If the dresidual needs to be assembled, it pays off to copy the element Jacobian to
           // consecutive memory and then project in a single & larger matrix-matrix product.
           l2g.GetElementNodes(eleIdx, nodes);
@@ -950,7 +901,7 @@ void AssembleAndProjectObjResDResImpl(
                 J.template MiddleRows<kNumFields>(kNumFields * nodes[i], kNumFields);
           }
 
-          if (addElemRes) {
+          if (params.assemRes) {
             for (int d = 0; d < kNumEleDofs; ++d) {
               eleRes[d] = batchRes[d][b];
             }
@@ -961,7 +912,7 @@ void AssembleAndProjectObjResDResImpl(
           auto dstDRes = assembleToOutput ? outDRes : AsView(workerDRes[iTask]);
           DeJe = eleDRes * Je; // Col-major = Row-major x Row-major
           dstDRes += Je.Transpose() * DeJe; // Col-major += Col-major x Col-major
-        } else if (addElemRes) {
+        } else if (params.assemRes) {
           // If the dresidual doesn't need to be assembled, it's faster to perform the residual
           // projection through a series of per-node matrix-vector products than to copy the element
           // Jacobian to consecutive memory and project in a single & larger matrix-vector product.
@@ -996,12 +947,11 @@ void AssembleAndProjectObjResDResImpl(
 
 } // namespace details
 
-template <class ElementT, int kNumFields, int kBatchSize, typename InitEleDResFn>
+template <class ElementT, int kNumFields, int kBatchSize>
 void AssembleAndProjectObjResDRes(
     Local2GlobalMap const& l2g,
     ElOpFnType<ElementT, kNumFields, kBatchSize> const& batchedElOp,
     AssemblyActiveSubset const& activeSubset,
-    InitEleDResFn const& initEleDResFn,
     ColumnVectorView<real const> globalSol,
     RowMatrixView<real const> J,
     double& outObj,
@@ -1013,15 +963,14 @@ void AssembleAndProjectObjResDRes(
       kNumFields,
       kBatchSize,
       /*kGatherSolution*/ true>(
-      l2g, batchedElOp, activeSubset, initEleDResFn, globalSol, J, outObj, outRes, outDRes, params);
+      l2g, batchedElOp, activeSubset, globalSol, J, outObj, outRes, outDRes, params);
 }
 
-template <class ElementT, int kNumFields, int kBatchSize, typename InitEleDResFn>
+template <class ElementT, int kNumFields, int kBatchSize>
 void AssembleAndProjectObjResDRes(
     Local2GlobalMap const& l2g,
     NoDispElOpFnType<ElementT, kNumFields, kBatchSize> const& batchedElOp,
     AssemblyActiveSubset const& activeSubset,
-    InitEleDResFn const& initEleDResFn,
     RowMatrixView<real const> J,
     double& outObj,
     ColumnVectorView<real> outRes,
@@ -1035,7 +984,6 @@ void AssembleAndProjectObjResDRes(
       l2g,
       batchedElOp,
       activeSubset,
-      initEleDResFn,
       /*globalSol*/ {},
       J,
       outObj,

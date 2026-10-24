@@ -31,7 +31,6 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -51,6 +50,10 @@ struct CMeshPivot {
 struct CSimplicialMesh : public NoCopy {
   explicit CSimplicialMesh(std::shared_ptr<SimplicialMesh const> const& meshIn) : mesh(meshIn) {
     MOCHI_ASSERT(mesh);
+    MOCHI_ASSERT_VERBOSE(
+        mesh->GetNumActiveNodes() == mesh->GetNumNodes(),
+        "Only rigid actors accept simulation meshes with nodes that no element references, and "
+        "they never have this component.");
   }
   std::shared_ptr<SimplicialMesh const> mesh;
 };
@@ -66,13 +69,8 @@ struct CTetrahedralMesh : public NoCopy {
 };
 
 /*
-  Stores a constant pointer to a surface mesh. In rigid actors, this mesh is used for the
-  computation of the moment of inertia and contact. In the general case, it is used for the debug
-  draw. This differs from the CVisualMesh as this is intended to be the surface portion of any
-  computational mesh. In the case of actors with computational mesh being a volumetric mesh (eg.
-  soft actors) this will be the boundary of the computational mesh (the full mesh, not the
-  subsampled mesh) in the case of actors with computational mesh being a surface mesh (eg. rigid
-  actors, shell etc) then this will be the pointer to the same mesh used for computations.
+  Stores the surface of the actor's physics mesh: the tet boundary, the triangle mesh, or the
+  articulated skin surface. Rod actors do not have it.
 */
 struct CSurfaceMesh : public NoCopy {
   explicit CSurfaceMesh(std::shared_ptr<TriangularMesh const> const& meshIn) : mesh(meshIn) {
@@ -105,6 +103,21 @@ struct CVisualMesh : public NoCopy {
   std::shared_ptr<MeshEmbedding const> embedding;
 };
 
+/*
+  Stores the shape's contact skin, regardless of whether the actor uses it for contact. The
+  embedding is null for rods, which store it in CRodContactSkinEmbedding instead.
+*/
+struct CContactSkinMesh : public NoCopy {
+  explicit CContactSkinMesh(
+      std::shared_ptr<TriangularMesh const> const& meshIn,
+      std::shared_ptr<LinearMeshEmbedding const> const& embeddingIn = {})
+      : mesh(meshIn), embedding(embeddingIn) {
+    MOCHI_ASSERT(mesh != nullptr);
+  }
+  std::shared_ptr<TriangularMesh const> mesh;
+  std::shared_ptr<LinearMeshEmbedding const> embedding;
+};
+
 /// @brief ECS component for the local-to-global map of the actor discretization.
 struct CLocal2GlobalMap final : public Local2GlobalMap, public NoCopy {};
 
@@ -124,30 +137,6 @@ struct CBoundaryLocal2GlobalMap final : public Local2GlobalMap, public NoCopy {
 struct CContactLocal2GlobalMap final : public Local2GlobalMap, public NoCopy {};
 
 /*
-  Stores the sparsity pattern for the full DOF system matrix of a simulated actor
-*/
-struct CFullSparsityPattern final : public NoCopy {
-  MOCHI_DECLARE_MOVE(CFullSparsityPattern);
-
-  CFullSparsityPattern() = default;
-  explicit CFullSparsityPattern(Graph<int, int> graphIn) : graph(std::move(graphIn)) {}
-
-  Graph<int, int> graph;
-};
-
-/*
-  Stores the sparsity pattern for the reduced DOF system matrix of a simulated actor
-*/
-struct CReducedSparsityPattern final : public NoCopy {
-  MOCHI_DECLARE_MOVE(CReducedSparsityPattern);
-
-  CReducedSparsityPattern() = default;
-  explicit CReducedSparsityPattern(Graph<int, int> graphIn) : graph(std::move(graphIn)) {}
-
-  Graph<int, int> graph;
-};
-
-/*
   Stores the FEM discretization of a simulated actor.
 */
 template <typename ElementT_>
@@ -161,6 +150,8 @@ struct FemDiscretizationBase : public NoCopy {
 
 template <typename ElementT_>
 struct FemDiscretization : public FemDiscretizationBase<ElementT_> {
+  // TODO: Explore a structure-of-arrays layout for per-element data, so batched kernels load SIMD
+  // lanes directly instead of gathering them.
   std::vector<ElementT_> femElements;
 
   int GetNumQuadPoints() const {
@@ -180,10 +171,9 @@ struct FemDiscretizationLite : public FemDiscretizationBase<ElementT_> {
 };
 
 /*
-  Specializations of FemDiscretization for linear tetrahedra with different quadrature rules.
+  Specialization of FemDiscretization for linear tetrahedra.
 */
 using CFemVolumeDiscretizationP1Q1 = FemDiscretization<tetrahedral::Pk3DElement<1, 1>>;
-using CFemVolumeDiscretizationP1Q4 = FemDiscretization<tetrahedral::Pk3DElement<1, 4>>;
 
 /*
   Specializations of FemDiscretization for boundary trace elements with different quadrature rules.
@@ -225,13 +215,10 @@ struct CFemBoundaryDiscretization : public CVariant<
       ActorBoundaryElementType const& elementType) {
     auto disc = CreateNoInitialize(elementType);
     disc.Visit([&](auto& femBoundaryDiscImpl) {
-      using BoundaryDiscretizationT = std::decay_t<decltype(femBoundaryDiscImpl)>;
-
       femBoundaryDiscImpl.femElements.reserve(mesh.GetNumBoundaryFaces());
       for (auto const& bdface : mesh.GetBoundaryFaces()) {
         femBoundaryDiscImpl.femElements.emplace_back(
-            MakeBoundaryElement<BoundaryDiscretizationT>(
-                femVolDisc.femElements[bdface.element], bdface.faceNum));
+            femVolDisc.femElements[bdface.element], bdface.faceNum);
       }
     });
 
@@ -239,38 +226,6 @@ struct CFemBoundaryDiscretization : public CVariant<
   }
 
  private:
-  template <typename FemBoundaryDiscretizationT, typename FemVolumeElementT>
-  static auto MakeBoundaryElement(FemVolumeElementT const& volElement, int faceNum) {
-    using ElementT = typename FemBoundaryDiscretizationT::ElementT;
-    if constexpr (std::is_same_v<FemBoundaryDiscretizationT, CFemBoundaryDiscretizationP1Q1_1>) {
-      return ElementT{volElement, faceNum, tetrahedral::kTetrahedralTraceQuadrature1[faceNum]};
-    } else if constexpr (std::is_same_v<
-                             FemBoundaryDiscretizationT,
-                             CFemBoundaryDiscretizationP1Q1_3>) {
-      return ElementT{volElement, faceNum, tetrahedral::kTetrahedralTraceQuadrature3[faceNum]};
-    } else if constexpr (std::is_same_v<
-                             FemBoundaryDiscretizationT,
-                             CFemBoundaryDiscretizationP1Q1_6>) {
-      return ElementT{volElement, faceNum, tetrahedral::kTetrahedralTraceQuadrature6[faceNum]};
-    } else if constexpr (std::is_same_v<
-                             FemBoundaryDiscretizationT,
-                             CFemBoundaryDiscretizationP1Q1_7>) {
-      return ElementT{volElement, faceNum, tetrahedral::kTetrahedralTraceQuadrature7[faceNum]};
-    } else if constexpr (std::is_same_v<
-                             FemBoundaryDiscretizationT,
-                             CFemBoundaryDiscretizationP1Q1_12>) {
-      return ElementT{volElement, faceNum, tetrahedral::kTetrahedralTraceQuadrature12[faceNum]};
-    } else if constexpr (std::is_same_v<
-                             FemBoundaryDiscretizationT,
-                             CFemBoundaryDiscretizationP1Q1_16>) {
-      return ElementT{volElement, faceNum, tetrahedral::kTetrahedralTraceQuadrature16[faceNum]};
-    } else {
-      static_assert(
-          std::is_void_v<FemBoundaryDiscretizationT>,
-          "MakeBoundaryElement not implemented for this boundary discretization type.");
-    }
-  }
-
   static CFemBoundaryDiscretization CreateNoInitialize(
       ActorBoundaryElementType const& elementType) {
     switch (elementType) {
@@ -505,7 +460,7 @@ class CActiveVolumeElements : public NoCopy {
     int const meshNumVolElems = _mesh->GetNumElements();
 
     _indices.reserve(meshNumVolElems);
-    _uniqueNodeIds.reserve(meshNumVolElems * TetrahedralMesh::kNodesPerElement);
+    _uniqueNodeIds.reserve(_mesh->GetNumActiveNodes());
 
     // _isActive must be of the same size as the vol elements
     _isActive.resize(meshNumVolElems, false);
@@ -827,7 +782,7 @@ class CActiveUniqueNodes : public NoCopy {
       CActiveVolumeElements const& activeVolElem,
       CActiveBoundaryFaces const& activeBdFaces)
       : _mesh(tetMesh) {
-    _indices.reserve(_mesh->GetNumElements() * TetrahedralMesh::kNodesPerElement);
+    _indices.reserve(_mesh->GetNumActiveNodes());
     Recompute(activeVolElem, activeBdFaces);
   }
 
@@ -851,7 +806,7 @@ class CActiveUniqueNodes : public NoCopy {
     std::vector<bool> seenNodes(_mesh->GetNumNodes(), false);
 
     _indices.clear();
-    _indices.reserve(volNodes.size() + bdNodes.size());
+    _indices.reserve(Min(isize(volNodes) + isize(bdNodes), _mesh->GetNumActiveNodes()));
     for (auto nodeIdx : volNodes) {
       // No need to check seenNodes. volNodes are unique.
       _indices.push_back(nodeIdx);

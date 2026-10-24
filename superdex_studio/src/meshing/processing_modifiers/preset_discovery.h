@@ -21,6 +21,7 @@
 // StudioProcessing document (same schema as a model's saved pipeline) that the "Populate Default
 // Processing" dropdown can load to replace the current stack.
 
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -32,9 +33,9 @@ struct ProcessingPreset {
   std::string description; // optional tooltip text from the JSON's "description" field
 };
 
-// Returns the presets found next to the executable's `processing_presets/` folder (override the
-// directory with the MOCHI_STUDIO_PRESETS_DIR environment variable), sorted by name. Empty if the
-// folder is absent.
-std::vector<ProcessingPreset> DiscoverProcessingPresets();
+// Returns the presets found in the `processing_presets/` folder of @p executableDir, the directory
+// holding the studio executable (override the folder with the MOCHI_STUDIO_PRESETS_DIR environment
+// variable), sorted by name. Empty if the folder is absent.
+std::vector<ProcessingPreset> DiscoverProcessingPresets(std::filesystem::path const& executableDir);
 
 } // namespace superdex::studio

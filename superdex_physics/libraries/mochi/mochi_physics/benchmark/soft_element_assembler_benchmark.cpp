@@ -21,13 +21,11 @@
 #include <mochi_core/geometry/tetrahedral_mesh.h>
 #include <mochi_core/linear_algebra/krylov_interop.h>
 #include <mochi_core/linear_algebra/matrix.h>
-#include <mochi_core/linear_algebra/utils/matrix_conversions.h>
 #include <mochi_core/materials/batched_smith_neo_hookean.h>
 #include <mochi_core/materials/material_params.h>
 #include <mochi_core/materials/reference_material_stiffness.h>
 #include <mochi_core/utils/local_to_global_map.h>
 #include <mochi_core/utils/profile.h>
-#include <mochi_core/utils/sparsity_utils.h>
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/src/mochi_soft.h>
 
@@ -101,25 +99,13 @@ static void ElementAssemblerBenchmark(
       std::make_unique<TetrahedralMesh>(coordinates, connectivity);
   mochi::DestroyContext(mochiContext);
 
-  // FEM Discretizations
-  using VolumeElementLow = tetrahedral::Pk3DElement<1, 1>;
-  using VolumeElementHigh = tetrahedral::Pk3DElement<1, 4>;
+  // FEM Discretization
+  using VolumeElement = tetrahedral::Pk3DElement<1, 1>;
   int const numElements = tetMesh->GetNumElements();
-  std::vector<VolumeElementLow> femLowVolDisc;
-  std::vector<VolumeElementHigh> femHighVolDisc;
-  femLowVolDisc.reserve(numElements);
-  femHighVolDisc.reserve(numElements);
+  std::vector<VolumeElement> femVolDisc;
+  femVolDisc.reserve(numElements);
   for (int i = 0; i < numElements; ++i) {
-    femLowVolDisc.emplace_back(
-        i,
-        tetMesh->GetNodeCoordinates(),
-        tetMesh->GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature1);
-    femHighVolDisc.emplace_back(
-        i,
-        tetMesh->GetNodeCoordinates(),
-        tetMesh->GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature4);
+    femVolDisc.emplace_back(i, tetMesh->GetNodeCoordinates(), tetMesh->GetElementConnectivity());
   }
 
   // Nodal based structure.
@@ -147,8 +133,7 @@ static void ElementAssemblerBenchmark(
 
   double merit = 0.0;
   auto res = ColumnVector<real>::Zero(numGlobalDofs);
-  auto dres = ToBlockSparseMatrix<3>(MakeSparseMatrix(l2g));
-  dres.SetZero();
+  auto dres = BlockSparseMatrix<real, 3>(tetMesh->GetNumNodes(), nbs.GetNToN());
   MOCHI_ASSERT(res.Rows() == sol.Rows());
   MOCHI_ASSERT(dres.Rows() == sol.Rows());
 
@@ -158,10 +143,10 @@ static void ElementAssemblerBenchmark(
   bool const assemDRes = resultFlags & kResultDRes;
 
   // Other stuff element operations might need (arbitrary values)
-  ColumnVector<real> predGlobalDisp(numGlobalDofs);
-  ColumnVector<real> predGlobalVelo(numGlobalDofs);
-  predGlobalDisp.SetRandom(111, -1_r, 1_r);
-  predGlobalVelo.SetRandom(222, -1_r, 1_r);
+  ColumnVector<real> stageStartDispl(numGlobalDofs);
+  ColumnVector<real> predTarget(numGlobalDofs);
+  stageStartDispl.SetRandom(111, -1_r, 1_r);
+  predTarget.SetRandom(222, -1_r, 1_r);
 
   constexpr real kDt = 0.1_r; // Arbitrary
 
@@ -263,8 +248,7 @@ static void ElementAssemblerBenchmark(
                      bool) -> bool { return true; };
     } else if (useNoMaterialStress) {
       batchedOp = soft::MakeBatchedBodyOp(
-          MakeConstSpan(femLowVolDisc),
-          MakeConstSpan(femHighVolDisc),
+          MakeConstSpan(femVolDisc),
           noOpConstitutive,
           referenceStiffness,
           /*hasStress*/ true,
@@ -272,8 +256,8 @@ static void ElementAssemblerBenchmark(
           (elopFlags & kElOpInertia) != 0,
           kDefaultGravity,
           kDensity,
-          predGlobalDisp.GetConstSpan(),
-          predGlobalVelo.GetConstSpan(),
+          predTarget.GetConstSpan(),
+          stageStartDispl.GetConstSpan(),
           kDt,
           /*massDampingScale*/ 0_r,
           stiffnessDampingFactor,
@@ -281,8 +265,7 @@ static void ElementAssemblerBenchmark(
           /*activeVolWeights*/ Span<real const>{});
     } else {
       batchedOp = soft::MakeBatchedBodyOp(
-          MakeConstSpan(femLowVolDisc),
-          MakeConstSpan(femHighVolDisc),
+          MakeConstSpan(femVolDisc),
           batchedConstitutive,
           referenceStiffness,
           (elopFlags & kElOpStress) != 0,
@@ -290,8 +273,8 @@ static void ElementAssemblerBenchmark(
           (elopFlags & kElOpInertia) != 0,
           kDefaultGravity,
           kDensity,
-          predGlobalDisp.GetConstSpan(),
-          predGlobalVelo.GetConstSpan(),
+          predTarget.GetConstSpan(),
+          stageStartDispl.GetConstSpan(),
           kDt,
           /*massDampingScale*/ 0_r,
           stiffnessDampingFactor,

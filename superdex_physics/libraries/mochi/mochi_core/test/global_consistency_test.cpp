@@ -19,14 +19,12 @@
 #include <mochi_core/elements/tetrahedral/finite_element.h>
 #include <mochi_core/geometry/tetrahedral_mesh.h>
 #include <mochi_core/linear_algebra/matrix.h>
-#include <mochi_core/linear_algebra/sparse_matrix.h>
 #include <mochi_core/linear_algebra/utils/matrix_conversions.h>
 #include <mochi_core/materials/batched_smith_neo_hookean.h>
 #include <mochi_core/materials/material_params.h>
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/local_to_global_map.h>
 #include <mochi_core/utils/math_utils.h>
-#include <mochi_core/utils/sparsity_utils.h>
 
 #include <algorithm>
 #include <cmath>
@@ -96,7 +94,7 @@ TEST(GlobalConsistency, cube) {
   real volume = 0_r;
   for (auto& e : elements) {
     for (int q = 0; q < e.kNumQuadPoints; ++q) {
-      volume += e.dMapEvaluatedDet[q] * e.quadrature.weights[q];
+      volume += e.quadWeights[q];
     }
   }
   EXPECT_TRUE(NearEqual(1_r, volume)); // unit cube
@@ -116,7 +114,7 @@ TEST(GlobalConsistency, cube) {
 
   ColumnVector<real> sol(total_dofs);
   ColumnVector<real> res(total_dofs);
-  auto dres = ToBlockSparseMatrix<3>(MakeSparseMatrix(l2g));
+  auto dres = BlockSparseMatrix<real, 3>(total_dofs / 3, nbs.GetNToN());
 
   // Set arbitrary(but deterministic) values into the solution vector
   for (int i = 0; i < total_dofs; ++i) {
@@ -125,7 +123,6 @@ TEST(GlobalConsistency, cube) {
   }
 
   res.SetZero();
-  dres.SetZero();
   AssemblyParams tangentParams{
       .assemObj = false, .assemRes = true, .assemDRes = true, .psdDRes = true};
   AssemblyParams residualOnlyParams{

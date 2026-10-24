@@ -572,7 +572,7 @@ class TestScene(MochiTestBase):
     @requires_hdf5
     def test_scene_recording(self):
         scene = mochi.create_scene("My Scene")
-        self.assertFalse(scene.is_recording())
+        self.assertFalse(mochi.experimental.is_recording(scene))
 
         # Make a temp file, to generate a temp file path.
         file, temp_path = tempfile.mkstemp(
@@ -586,12 +586,15 @@ class TestScene(MochiTestBase):
             self.assertFalse(os.path.exists(temp_path))
 
             # Record a few steps
-            params = mochi.RecordingParams()
-            scene.start_recording(file_path=temp_path, params=params)
+            self._create_rigid_box_actor(scene)
+            params = mochi.experimental.RecordingParams.all()
+            mochi.experimental.start_recording(
+                scene, file_path=temp_path, params=params
+            )
             scene.step(0.1)
             scene.step(0.2)
             scene.step(0.3)
-            scene.stop_recording()
+            mochi.experimental.stop_recording(scene)
 
             # Make sure a file was created
             self.assertTrue(os.path.exists(temp_path))
@@ -628,6 +631,37 @@ class TestScene(MochiTestBase):
         layer_names = []
         scene.enumerate_contact_layer_names(lambda name: layer_names.append(name))
         self.assertEqual("abcd", "".join(sorted(layer_names)))
+
+        mochi.destroy_scene(scene)
+
+    def test_scene_contact_pair_params_override(self):
+        scene = mochi.create_scene("Contact Pair Override Scene")
+        handle_a = self._create_rigid_box_actor(scene).get_handle()
+        handle_b = self._create_rigid_box_actor(scene).get_handle()
+        with self.assertRaises(mochi.Error):
+            scene.get_contact_pair_params_override(handle_a, handle_b)
+
+        first = mochi.ContactPairParamsOverride(
+            penalty_coefficient=2e9, coulomb_friction_coefficient=0.0
+        )
+        scene.set_contact_pair_params_override(handle_a, handle_b, first)
+        self.assertTrue(scene.has_contact_pair_params_override(handle_b, handle_a))
+        self.assertEqual(
+            first, scene.get_contact_pair_params_override(handle_b, handle_a)
+        )
+
+        replacement = mochi.ContactPairParamsOverride(viscous_friction_coefficient=0.25)
+        scene.set_contact_pair_params_override(
+            actor_a=handle_b,
+            actor_b=handle_a,
+            params_override=replacement,
+        )
+        self.assertEqual(
+            replacement, scene.get_contact_pair_params_override(handle_a, handle_b)
+        )
+
+        scene.clear_contact_pair_params_override(handle_b, handle_a)
+        self.assertFalse(scene.has_contact_pair_params_override(handle_a, handle_b))
 
         mochi.destroy_scene(scene)
 

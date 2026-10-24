@@ -15,7 +15,9 @@
  */
 
 #include <mochi_core/contact/contact_partition.h>
+#include <mochi_core/utils/profile.h>
 
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -63,11 +65,11 @@ std::vector<ContactPartition> mochi::CreateContactPartitions(
   return outPartitions;
 }
 
-template std::vector<ContactPartition> mochi::CreateContactPartitions<IndexGroupsDescriptor>(
-    Span<typename IndexGroupsDescriptor::Descriptor const> samples);
-
 template std::vector<ContactPartition> mochi::CreateContactPartitions<IdDescriptor>(
     Span<typename IdDescriptor::Descriptor const> samples);
+
+template std::vector<ContactPartition> mochi::CreateContactPartitions<BoneIdsDescriptor>(
+    Span<typename BoneIdsDescriptor::Descriptor const> samples);
 
 std::vector<ContactPartition> mochi::CombinePartitions(
     Span<ContactPartition const> partitionsA,

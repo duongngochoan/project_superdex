@@ -557,8 +557,16 @@ enum class Factorization : char {
 template <typename Scalar, Factorization kFactType = Factorization::Cholesky>
 struct CudaSparseMatrixFactorization {
   using NonConstScalar = std::remove_const_t<Scalar>;
+// cuDSS 0.8 switched its API from cudaDataType_t to its own cudssDataType_t (same enumerator
+// values). Gate on CUDSS_VERSION so this keeps building against the pre-0.8 headers used by the
+// CUDA 12 configuration.
+#if CUDSS_VERSION >= 800
+  static cudssDataType_t constexpr kValueType =
+      (std::is_same_v<Scalar, float>) ? CUDSS_R_32F : CUDSS_R_64F;
+#else
   static cudaDataType_t constexpr kValueType =
       (std::is_same_v<Scalar, float>) ? CUDA_R_32F : CUDA_R_64F;
+#endif
 
   // Documentation from https://docs.nvidia.com/cuda/cudss/types.html#cudssmatrixtype-t-label
   // Symmetric positive-definite matrix Cholesky factorization will be computed
@@ -692,6 +700,27 @@ struct CudaSparseMatrixFactorization {
     _dssHandle = reinterpret_cast<cudssHandle_t>(mochi::details::GetCuDSSHandle());
     MOCHI_CUDSS_CHECK(cudssConfigCreate(&_solverConfig));
     MOCHI_CUDSS_CHECK(cudssDataCreate(_dssHandle, &_solverData));
+    // NOTE: the whole call is duplicated per branch because embedding a
+    // preprocessor directive inside the macro arguments below is undefined
+    // behavior (-Wembedded-directive).
+#if CUDSS_VERSION >= 800
+    MOCHI_CUDSS_CHECK(cudssMatrixCreateCsr(
+        &_A,
+        _n,
+        _n,
+        _nnz,
+        (void*)_d_rowPtr,
+        NULL,
+        (void*)_d_colIdx,
+        (void*)_d_values,
+        // offsetType (new in 0.8): int32 row offsets, same as the index type.
+        CUDSS_R_32I,
+        CUDSS_R_32I,
+        kValueType,
+        kMatrixType,
+        kMatrixView,
+        kBase));
+#else
     MOCHI_CUDSS_CHECK(cudssMatrixCreateCsr(
         &_A,
         _n,
@@ -706,6 +735,7 @@ struct CudaSparseMatrixFactorization {
         kMatrixType,
         kMatrixView,
         kBase));
+#endif
     //
     CudaVector<NonConstScalar> xtmp(_n), ytmp(_n);
     cudssMatrix_t d_xtmp, d_ytmp;

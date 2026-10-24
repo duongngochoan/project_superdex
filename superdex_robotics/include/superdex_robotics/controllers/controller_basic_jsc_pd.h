@@ -28,8 +28,8 @@ namespace superdex::robotics {
 /* @brief Joint-space PD controller parameters. */
 struct ControllerBasicJscPdParams {
   // joint space gains
-  DynamicArray<real> Kp = {}; // The position gain [Nm/rad]
-  DynamicArray<real> Kd = {}; // The position damping gain [Nms/rad]
+  DynamicArray<real> Kp = {}; // The position gain [N/m or Nm/rad]
+  DynamicArray<real> Kd = {}; // The position damping gain [Ns/m or Nms/rad]
 
   // The saturation magnitude of the controller output for each joint.
   // Values < 0 are interpreted as infinitiy
@@ -139,6 +139,9 @@ class MOCHI_API ControllerBasicJscPd : public ControllerBase {
 
   /* @brief Reset internal controller state (e.g., between episodes). */
   void Reset() override;
+
+  void ConfigureRecording(ControllerRecordingSink& sink, superdex::Error& error) const override;
+  void Record(ControllerRecordingSink& sink, superdex::Error& error) const override;
 
  protected:
   void CheckParams(Params const& params, superdex::Error& error);

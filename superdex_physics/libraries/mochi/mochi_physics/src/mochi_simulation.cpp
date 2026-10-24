@@ -17,8 +17,10 @@
 #include "mochi_simulation.h"
 
 #include "mochi_actor_convergence.h"
+#include "mochi_articulated_body.h"
 #include "mochi_ecs_utils.h"
 #include "mochi_integration.h"
+#include "mochi_island.h"
 #include "mochi_rigid.h"
 #include "mochi_soft.h"
 #include "mochi_solve.h"
@@ -32,10 +34,13 @@
 using namespace mochi;
 
 void mochi::GetIslandNewtonParams(
-    int numDofs,
-    SolverParams const& simParams,
+    entt::registry const& reg,
+    entt::entity island,
     NewtonSolverParams& outNewtonParams) {
   MOCHI_PROFILE_SCOPE();
+  int const numDofs = reg.get<CIslandDofInfo>(island).dofsSize;
+  auto const& descendants = reg.get<CIslandDescendants>(island);
+  auto const& simParams = reg.ctx<CSimulationParams const>();
 
   // Solver type
   outNewtonParams.solverType = simParams.nonLinearSolver.solverType;
@@ -51,10 +56,14 @@ void mochi::GetIslandNewtonParams(
   outNewtonParams.solRelTol = simParams.nonLinearSolver.relStepTol;
   outNewtonParams.stopIfNoImprovement = simParams.nonLinearSolver.stopIfNoImprovement;
 
-  // Retries and fallbacks
+  // Retries
   outNewtonParams.psdProjMode = simParams.nonLinearSolver.psdProjMode;
-  outNewtonParams.gradientDescentFallback = simParams.nonLinearSolver.gradientDescentFallback;
   outNewtonParams.fittedSaturationHessian = simParams.experimentalEval.fittedSaturationHessian;
+  if (!articulated::ReadsJointFrictionHessianChoice(reg, descendants.compoundActors)) {
+    // Mark the joint-friction pathway fitted where nothing reads it, so it doesn't trigger
+    // Newton retries.
+    outNewtonParams.fittedSaturationHessian.jointFriction = true;
+  }
 
   // Explosion control
   outNewtonParams.explosionControl = simParams.nonLinearSolver.explosionControl;
@@ -99,13 +108,13 @@ void mochi::GetIslandNewtonParams(
   outNewtonParams.lParams.normType = simParams.linearSolver.normType;
   if (simParams.linearSolver.maxIter == kAutoLinearSolverMaxIter) {
     // TODO: Tune the criteria to select the maximum number of iterations.
-    outNewtonParams.lParams.maxIter = Min(numDofs, kDefaultLinearSolverMaxIter);
+    outNewtonParams.lParams.maxIter = Clamp(numDofs, 1, kDefaultLinearSolverMaxIter);
   } else {
     outNewtonParams.lParams.maxIter = simParams.linearSolver.maxIter;
   }
   MOCHI_ASSERT(
-      outNewtonParams.lParams.maxIter >= 0,
-      "Maximum number of linear solver iterations must not be negative.");
+      outNewtonParams.lParams.maxIter > 0,
+      "Maximum number of iterations for iterative linear solvers must be positive.");
   outNewtonParams.lParams.absTol = simParams.linearSolver.absTol;
   outNewtonParams.lParams.relTol = simParams.linearSolver.relTol;
   outNewtonParams.lParams.relDivTol = simParams.linearSolver.relDivTol;
@@ -143,8 +152,6 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CExternalForces>(reg);
   ecs::RegisterComponent<CMassMatrix>(reg);
   ecs::RegisterComponent<CLumpedMassMatrix>(reg);
-  ecs::RegisterComponent<CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4>>(reg);
-  ecs::RegisterComponent<CPerElementMassMatrix<CFemSurfaceDiscretizationP1Q3>>(reg);
   ecs::RegisterComponent<CSimulationParams>(reg);
   ecs::RegisterComponent<TagGlobalDofsChanged>(reg);
   ecs::RegisterComponent<TagUseContact>(reg);

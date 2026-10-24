@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+#include <mochi_core/utils/defer.h>
+#include <mochi_core/utils/log.h>
+#include <mochi_core/utils/task_scheduler.h>
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/src/mochi_ecs.h>
 
@@ -29,10 +32,10 @@
 using namespace mochi;
 using namespace mochi::ecs;
 
-namespace {
-
 // NOLINTBEGIN(clang-diagnostic-unused-parameter) - This file contains many lambdas to test ESC
 // system functionality, but they don't actually use the lambda parameters.
+
+namespace {
 
 /******************************************************************************************
  ECS Components
@@ -51,6 +54,8 @@ struct ComponentC {
 
 struct TagA {};
 
+struct TagB {};
+
 struct ExternalData {
   int valueToAdd;
 };
@@ -67,12 +72,14 @@ struct GlobalData2 {
   int valueToAdd;
 };
 
+} // namespace
+
 /******************************************************************************************
  ECS Systems
 */
 
 // A system that is invoked on the whole registry, rather than an individual system
-void GlobalSystem(View<ComponentA, ComponentB> view, GlobalData const& global) {
+static void GlobalSystem(View<ComponentA, ComponentB> view, GlobalData const& global) {
   // Add global.valueToAdd to all ComponentA's
   for (auto e : view) {
     view.get<ComponentA>(e).value += global.valueToAdd;
@@ -89,7 +96,7 @@ void GlobalSystem(View<ComponentA, ComponentB> view, GlobalData const& global) {
   }
 }
 
-void GlobalSystem2(
+static void GlobalSystem2(
     View<ComponentA const, ComponentB> view,
     View<ComponentA const, ComponentC, TagA const> view2) {
   for (auto e : view) {
@@ -103,7 +110,7 @@ void GlobalSystem2(
   }
 }
 
-void GlobalSystemWithPartialRegistry(
+static void GlobalSystemWithPartialRegistry(
     PartialRegistry<ComponentA, ComponentB, ComponentC, TagA const> reg) {
   auto vA = reg.view<ComponentA>();
   for (auto e : vA) {
@@ -479,12 +486,13 @@ TEST(EcsSystem, GlobalSystemsMetadata) {
 }
 
 // Helper to collect all entities into a std::vector
-auto GetAllEntities(entt::registry const& reg) {
+static auto GetAllEntities(entt::registry const& reg) {
   std::vector<entt::entity> entities;
   reg.each([&](auto e) { entities.push_back(e); });
   return entities;
 }
 
+namespace {
 // Used to repeat the same test code with different invocation functions
 enum struct MethodToTest {
   InvokeOnEntity,
@@ -497,6 +505,7 @@ enum struct MethodToTest {
   ScheduleInvokeForEach,
   ScheduleInvokeForEachGlobal,
 };
+} // namespace
 
 // Helper to call to call a per-entity system for a list of entities
 template <MethodToTest kMethod, typename SystemT, typename SubsetT, typename... ExternalT>
@@ -537,7 +546,11 @@ static void TestInvokeForEach(SystemT system, entt::registry& reg, ExternalT... 
     }
   } else if constexpr (kMethod == MethodToTest::TryScheduleInvokeOnEntity) {
     TaskSemaphore sem;
-    TryScheduleInvokeOnEntity(sem, "label", system, reg, extParams...);
+    auto invoker = InvokerImpl<entt::type_list<>, ExternalT...>(extParams...);
+    for (auto e : GetAllEntities(reg)) {
+      bool wasCalled = TryScheduleInvokeOnEntity(sem, "label", system, reg, e, extParams...);
+      EXPECT_EQ(invoker.CanInvokeOnEntity(system, reg, e), wasCalled);
+    }
     sem.Wait();
   } else if constexpr (kMethod == MethodToTest::InvokeForEachGlobal) {
     InvokeForEachGlobal(system, reg, extParams...);
@@ -638,6 +651,30 @@ static void TestInvokeForEachLocal() {
     EXPECT_EQ(kNumEntities, result.count.load());
     EXPECT_EQ(totalValue, result.total.load());
   }
+
+  // Mixed matching, missing, and excluded entities
+  {
+    auto filteredSumFn =
+        +[](ComponentA const& comp, Excluded<TagA>, CtxGlobal<MutableResult const> out) {
+          out->count++;
+          out->total += comp.value;
+        };
+    reg.emplace<TagA>(allEntities[1]);
+    reg.erase<ComponentA>(allEntities[2]);
+
+    result.Reset();
+    TestInvokeForEachLocal<kMethod>(
+        filteredSumFn, reg, List{allEntities[0], allEntities[1], allEntities[2]});
+    EXPECT_EQ(1, result.count.load());
+    EXPECT_EQ(reg.get<ComponentA const>(allEntities[0]).value, result.total.load());
+
+    // One entity at a time: single-entity subsets stop at the first pool that rules the entity out.
+    for (int i = 0; i < 3; ++i) {
+      result.Reset();
+      TestInvokeForEachLocal<kMethod>(filteredSumFn, reg, List{allEntities[i]});
+      EXPECT_EQ(i == 0 ? 1 : 0, result.count.load());
+    }
+  }
 }
 
 template <MethodToTest kMethod>
@@ -691,15 +728,17 @@ static void TestInvokeForEach() {
     EXPECT_EQ(reg.get<ComponentA>(e3).value, 2); // A += 1
   }
 
-  // Read ComponentA, write ComponentB
+  // Read ComponentA twice, write ComponentB
   {
     reset(1);
-    auto fn = +[](ComponentA const& compA, ComponentB& compB) { compB.value += compA.value; };
+    auto fn = +[](ComponentA const& compA, ComponentA const& compA2, ComponentB& compB) {
+      compB.value += compA.value + compA2.value;
+    };
     TestInvokeForEach<kMethod>(fn, reg);
     EXPECT_EQ(reg.get<ComponentA>(e1).value, 1); // A is const
-    EXPECT_EQ(reg.get<ComponentB>(e1).value, 2); // B += A
+    EXPECT_EQ(reg.get<ComponentB>(e1).value, 3); // B += A + A
     EXPECT_EQ(reg.get<ComponentA>(e2).value, 1); // A is const
-    EXPECT_EQ(reg.get<ComponentB>(e2).value, 2); // B += A
+    EXPECT_EQ(reg.get<ComponentB>(e2).value, 3); // B += A + A
     EXPECT_EQ(reg.get<ComponentA>(e3).value, 1); // A is const
     EXPECT_EQ(reg.get<ComponentB>(e4).value, 1); // Skipped. No A.
   }
@@ -761,14 +800,27 @@ static void TestInvokeForEach() {
     EXPECT_EQ(2, data.callCount.load()); // Was also called for e5
   }
 
-  // Write ComponentA, exclude TagA
+  // Write ComponentA, exclude TagB, which no entity has, then TagA twice
   {
     reset(1);
-    auto fn = +[](ComponentA& compA, Excluded<TagA>) { compA.value++; };
+    auto fn =
+        +[](ComponentA& compA, Excluded<TagB>, Excluded<TagA>, Excluded<TagA>) { compA.value++; };
     TestInvokeForEach<kMethod>(fn, reg);
     EXPECT_EQ(reg.get<ComponentA>(e1).value, 2); // A += 1
     EXPECT_EQ(reg.get<ComponentA>(e2).value, 2); // A += 1
     EXPECT_EQ(reg.get<ComponentA>(e3).value, 1); // TagA, no change
+  }
+
+  // Read or exclude ComponentC, which no entity has, so the registry has no pool for it
+  {
+    reset(1);
+    auto readFn = +[](ComponentA& compA, ComponentC const&) { compA.value++; };
+    auto excludeFn = +[](ComponentA& compA, Excluded<ComponentC>) { compA.value += 2; };
+    TestInvokeForEach<kMethod>(readFn, reg);
+    TestInvokeForEach<kMethod>(excludeFn, reg);
+    EXPECT_EQ(reg.get<ComponentA>(e1).value, 3); // No C: A += 2
+    EXPECT_EQ(reg.get<ComponentA>(e2).value, 3); // No C: A += 2
+    EXPECT_EQ(reg.get<ComponentA>(e3).value, 3); // No C: A += 2
   }
 
   // External data passed by value
@@ -863,6 +915,22 @@ static void TestInvokeForEach() {
   // clang-format on
 }
 
+// Without a TaskScheduler, Schedule runs systems inline; with one, it runs them as async tasks.
+template <MethodToTest kMethod>
+static void TestInvokeForEachSyncAndAsync() {
+  TestInvokeForEach<kMethod>();
+
+  constexpr int kNumThreads = 2;
+  bool const wasWarningEnabled = IsLogChannelEnabled(LogChannel::Warning);
+  if (kNumThreads > TaskScheduler::GetNumSupportedLogicalProcessors()) {
+    // Disable warnings about using more threads than can run concurrently on the device.
+    EnableLogChannel(LogChannel::Warning, false);
+  }
+  MOCHI_DEFER(EnableLogChannel(LogChannel::Warning, wasWarningEnabled));
+  TaskScheduler scheduler(kNumThreads);
+  TestInvokeForEach<kMethod>();
+}
+
 TEST(EcsSystem, InvokeOnEntity) {
   TestInvokeForEach<MethodToTest::InvokeOnEntity>();
 }
@@ -871,19 +939,23 @@ TEST(EcsSystem, TryInvokeOnEntity) {
   TestInvokeForEach<MethodToTest::TryInvokeOnEntity>();
 }
 
+TEST(EcsSystem, TryScheduleInvokeOnEntity) {
+  TestInvokeForEachSyncAndAsync<MethodToTest::TryScheduleInvokeOnEntity>();
+}
+
 TEST(EcsSystem, InvokeForEach) {
   TestInvokeForEach<MethodToTest::InvokeForEach>();
   TestInvokeForEach<MethodToTest::InvokeForEachGlobal>();
 }
 
 TEST(EcsSystem, ParallelInvokeForEach) {
-  TestInvokeForEach<MethodToTest::ParallelInvokeForEach>();
-  TestInvokeForEach<MethodToTest::ParallelInvokeForEachGlobal>();
+  TestInvokeForEachSyncAndAsync<MethodToTest::ParallelInvokeForEach>();
+  TestInvokeForEachSyncAndAsync<MethodToTest::ParallelInvokeForEachGlobal>();
 }
 
 TEST(EcsSystem, ScheduleInvokeForEach) {
-  TestInvokeForEach<MethodToTest::ScheduleInvokeForEach>();
-  TestInvokeForEach<MethodToTest::ScheduleInvokeForEachGlobal>();
+  TestInvokeForEachSyncAndAsync<MethodToTest::ScheduleInvokeForEach>();
+  TestInvokeForEachSyncAndAsync<MethodToTest::ScheduleInvokeForEachGlobal>();
 }
 
 TEST(EcsSystem, SystemObjects) {
@@ -1020,5 +1092,3 @@ TEST(EcsSystem, PartialRegistryCallFunctions) {
 }
 
 // NOLINTEND(clang-diagnostic-unused-parameter)
-
-} // namespace

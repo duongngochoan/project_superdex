@@ -28,6 +28,7 @@
 #include <mochi_core/linear_algebra/krylov_interop.h>
 #include <mochi_core/utils/constants.h>
 
+#include <array>
 #include <memory>
 #include <vector>
 
@@ -221,14 +222,15 @@ GetNodeCoordinates(entt::registry const& reg, entt::entity e, int index, Error& 
     if (auto const* tetMesh = reg.try_get<CTetrahedralMesh const>(e)) {
       // Soft actor
       return tetMesh->mesh->GetNodeCoordinates();
-    } else if (auto const* surfMesh = reg.try_get<CSurfaceMesh const>(e)) {
-      // Shell actor
-      MOCHI_ASSERT_VERBOSE(reg.all_of<TagShellActor>(e), "Expected a shell actor");
-      return surfMesh->mesh->GetNodeCoordinates();
     } else if (auto const* polylineMesh = reg.try_get<CPolylineMesh const>(e)) {
-      // Rod actor
+      // Rod actor. Rod constraints always use centerline node indices, even when the actor exposes
+      // an authored surface mesh.
       MOCHI_ASSERT_VERBOSE(reg.all_of<TagRodActor>(e), "Expected a rod actor");
       return polylineMesh->nodes;
+    } else if (auto const* triMesh = reg.try_get<CTriangularMesh const>(e)) {
+      // Shell actor
+      MOCHI_ASSERT_VERBOSE(reg.all_of<TagShellActor>(e), "Expected a shell actor");
+      return triMesh->mesh->GetNodeCoordinates();
     } else {
       MOCHI_ERROR_SET(error, "Expected a soft, shell, or rod actor");
       return Span<Real3 const>{};
@@ -1046,9 +1048,9 @@ using RodAndRigidConstraintReg = ecs::PartialRegistry<
     CRootTransform const,
     CTimeIntegratorState const>;
 
-// Partial registry for global assembly that requires link actor Jacobian lookups
-using LinkActorAssemblyReg =
-    ecs::PartialRegistry<CArticulatedEntity const, CArticulatedRigidJacobian const>;
+// Partial registry for global assembly that requires link actor lookups
+using LinkActorAssemblyReg = ecs::
+    PartialRegistry<CArticulatedEntity const, CArticulatedRigidJacobian const, CDofOffset const>;
 
 // Empty target type, used for constraints that do not have a target value.
 struct NoTarget {};
@@ -1522,14 +1524,14 @@ void mochi::EvalConstraint(
 #undef MOCHI_TRY_CALL_EVAL_CONSTRAINT
 }
 
-template MOCHI_API void mochi::EvalConstraint<TimeStep::Current>(
+template void mochi::EvalConstraint<TimeStep::Current>(
     entt::registry&,
     entt::entity,
     Span<real>,
     Span<real>,
     Span<real>,
     bool&);
-template MOCHI_API void mochi::EvalConstraint<TimeStep::StageStart>(
+template void mochi::EvalConstraint<TimeStep::StageStart>(
     entt::registry&,
     entt::entity,
     Span<real>,
@@ -1651,7 +1653,8 @@ static void AssembleGlobalObjResDRes(
     double const* obj,
     ColumnVector<real, kDofsSize> const* res,
     Matrix<real, kDofsSize, kDofsSize> const* dres,
-    CCompoundConstraintSnle& outConstraintSnle) {
+    CCompoundConstraintSnle& outConstraintSnle,
+    Span<ArticulatedLinkResidual* const> outLinkResiduals) {
   MOCHI_PROFILE_SCOPE();
 
   // Add energy (objective is independent of DoF transformation)
@@ -1675,16 +1678,48 @@ static void AssembleGlobalObjResDRes(
       ArrayPlusEqualsIndexedDst(
           outDRes.Values().data(), dres->data(), globalDResIndices.data(), kDofsSize * kDofsSize);
     }
-  } else if (res || dres) {
-    // If some actors involved in the constraint are links of an articulation, then the constraint
-    // Jacobian used for the residual and (approximate) dresidual is
+    return;
+  }
+
+  // Some actors are links of an articulation. Constraints with mixed links are only assembled for
+  // the state grad targets.
+  if (res) {
+    // The residual on the DoFs of a link is already in link space. Add it to the link-space
+    // residual of its articulation. Add the residual on the DoFs of other actors directly.
+    MOCHI_ASSERT_VERBOSE(isize(outLinkResiduals) >= isize(info.actors));
+    auto& outRes = outConstraintSnle.residuals[0].second;
+    int constraintDofOffset = 0;
+    for (int o = 0; o < isize(info.actors); ++o) {
+      entt::entity const actor = info.actors[o];
+      auto const& actorDofs = info.actorDofs[o];
+      int const numActorDofs = isize(actorDofs);
+      int const actorDofsOffset = reg.get<CDofOffset const>(actor).dofsOffset;
+      if (TryGetParentArticulatedActorLocal(reg, actor) != entt::null) {
+        // Articulations without reduced DoFs have no link-space residual.
+        if (auto* outLinkResidual = outLinkResiduals[o]) {
+          for (int d = 0; d < numActorDofs; d += 3) {
+            outLinkResidual->AddTriple(
+                actorDofsOffset + actorDofs[d], res->template Slice<3>(constraintDofOffset + d, 3));
+          }
+        }
+      } else {
+        for (int d = 0; d < numActorDofs; ++d) {
+          outRes[actorDofsOffset + actorDofs[d]] += (*res)[constraintDofOffset + d];
+        }
+      }
+      constraintDofOffset += numActorDofs;
+    }
+  }
+
+  if (dres) {
+    // The constraint Jacobian used for the (approximate) dresidual is
     //
     // d(constraint value) / d(compound DoFs)
     //  = d(constraint value) / d(constraint DoFs) * d(constraint DoFs) / d(compound DoFs)
     //
     // where "constraint DoFs" includes position and/or rotation DoFs of the links, and "compound
-    // DoFs" instead uses reduced-pose DoFs of the parent articulation. In this code, function, we
-    // use the notation
+    // DoFs" instead uses reduced-pose DoFs of the parent articulation. In this function, we use the
+    // notation
     //
     //  J := d(constraint DoFs) / d(compound DoFs)
     //
@@ -1730,35 +1765,18 @@ static void AssembleGlobalObjResDRes(
       constraintDofOffset += numActorDofs;
     }
 
-    // Used to form residual and/or dresidual
-    auto JTranspose = Transpose(J);
+    // Compute transformed dresidual: dres_compound = J^T * dres_constraint * J
+    Matrix<real> const dresTransformed = Transpose(J) * (*dres) * J;
 
-    if (res) {
-      // Compute transformed residual: res_compound = J^T * res_constraint
-      ColumnVector<real> const resTransformed = JTranspose * (*res);
-
-      // Add to global residual using compound DoF indices
-      auto const& globalResIndices = sparsity.resIndices;
-      MOCHI_ASSERT_VERBOSE(isize(globalResIndices) == compoundDofsSize);
-      auto& outRes = outConstraintSnle.residuals[0].second;
-      ArrayPlusEqualsIndexedDst(
-          outRes.data(), resTransformed.data(), globalResIndices.data(), compoundDofsSize);
-    }
-
-    if (dres) {
-      // Compute transformed dresidual: dres_compound = J^T * dres_constraint * J
-      Matrix<real> const dresTransformed = JTranspose * (*dres) * J;
-
-      // Add to global dresidual
-      auto const& globalDResIndices = sparsity.dresIndices;
-      MOCHI_ASSERT_VERBOSE(isize(globalDResIndices) == compoundDofsSize * compoundDofsSize);
-      auto& outDRes = std::get<SparseMatrix<real>>(outConstraintSnle.dresiduals[0].matrix);
-      ArrayPlusEqualsIndexedDst(
-          outDRes.Values().data(),
-          dresTransformed.data(),
-          globalDResIndices.data(),
-          compoundDofsSize * compoundDofsSize);
-    }
+    // Add to global dresidual
+    auto const& globalDResIndices = sparsity.dresIndices;
+    MOCHI_ASSERT_VERBOSE(isize(globalDResIndices) == compoundDofsSize * compoundDofsSize);
+    auto& outDRes = std::get<SparseMatrix<real>>(outConstraintSnle.dresiduals[0].matrix);
+    ArrayPlusEqualsIndexedDst(
+        outDRes.Values().data(),
+        dresTransformed.data(),
+        globalDResIndices.data(),
+        compoundDofsSize * compoundDofsSize);
   }
 }
 
@@ -1766,6 +1784,7 @@ template <ConstraintType kType, GradTarget kGradTarget>
 static void AssembleConstraintT(
     AssemblyParams const& params,
     CCompoundConstraintSnle& outConstraintSnle,
+    Span<ArticulatedLinkResidual* const> outLinkResiduals,
     LinkActorAssemblyReg linkActorReg,
     typename ConstraintTraits<kType>::RegistryType reg,
     CConstraintInfo const& info,
@@ -1865,7 +1884,8 @@ static void AssembleConstraintT(
       params.assemObj ? &obj : nullptr,
       params.assemRes ? &res : nullptr,
       params.assemDRes ? &dres : nullptr,
-      outConstraintSnle);
+      outConstraintSnle,
+      outLinkResiduals);
 
   // Handle force queries
   handleQuery(ColumnVector<real, kDofsSize>(-res));
@@ -1943,7 +1963,7 @@ static void AssembleConstraintWrtInputT(
 
   // Global assembly
   AssembleGlobalObjResDRes<kTargetSize>(
-      sparsity, info, linkActorReg, nullptr, &res, nullptr, outConstraintSnle);
+      sparsity, info, linkActorReg, nullptr, &res, nullptr, outConstraintSnle, {});
 }
 
 template <GradTarget kGradTarget>
@@ -1967,7 +1987,23 @@ void mochi::AssembleConstraint(
     return;
   }
 
-  auto const& type = reg.get<CConstraintInfo const>(e).type;
+  auto const& info = reg.get<CConstraintInfo const>(e);
+
+  // Per constrained actor, the link-space residual of its articulation if the actor is a link of an
+  // articulation with reduced DoFs and the constraint has mixed links, or null otherwise. Only this
+  // compound's constraint task writes them, so they are passed as external parameters.
+  std::array<ArticulatedLinkResidual*, 2> linkResiduals{};
+  if constexpr (kGradTarget == GradTarget::Current || kGradTarget == GradTarget::Previous) {
+    if (info.hasMixedLinks) {
+      MOCHI_ASSERT_VERBOSE(isize(linkResiduals) >= isize(info.actors));
+      for (int o = 0; o < isize(info.actors); ++o) {
+        entt::entity const articulated = TryGetParentArticulatedActor(reg, info.actors[o]);
+        if (articulated != entt::null) {
+          linkResiduals[o] = reg.try_get<CArticulatedConstraintLinkResidual>(articulated);
+        }
+      }
+    }
+  }
 
   static_assert(
       static_cast<int>(ConstraintType::Count) == 16,
@@ -1985,7 +2021,8 @@ void mochi::AssembleConstraint(
           reg,                                                                                    \
           e,                                                                                      \
           std::cref(params),                                                                      \
-          std::ref(outConstraintSnle));                                                           \
+          std::ref(outConstraintSnle),                                                            \
+          MakeConstSpan(linkResiduals));                                                          \
     } else if constexpr (!std::                                                                   \
                              is_same_v<typename ConstraintTraits<kType>::TargetType, NoTarget>) { \
       ecs::InvokeOnEntity<ecs::policy::AllowMutableExternalParams>(                               \
@@ -1999,7 +2036,7 @@ void mochi::AssembleConstraint(
     }                                                                                             \
     break;
 
-  switch (type) {
+  switch (info.type) {
     case ConstraintType::None:
       MOCHI_ASSERT(false, "Invalid constraint type");
       break;
@@ -2025,22 +2062,22 @@ void mochi::AssembleConstraint(
 #undef MOCHI_TRY_INVOKE_ASSEMBLE_CONSTRAINT
 }
 
-template MOCHI_API void mochi::AssembleConstraint<GradTarget::Current>(
+template void mochi::AssembleConstraint<GradTarget::Current>(
     entt::registry&,
     entt::entity,
     AssemblyParams const&,
     CCompoundConstraintSnle&);
-template MOCHI_API void mochi::AssembleConstraint<GradTarget::Previous>(
+template void mochi::AssembleConstraint<GradTarget::Previous>(
     entt::registry&,
     entt::entity,
     AssemblyParams const&,
     CCompoundConstraintSnle&);
-template MOCHI_API void mochi::AssembleConstraint<GradTarget::CurrentInput>(
+template void mochi::AssembleConstraint<GradTarget::CurrentInput>(
     entt::registry&,
     entt::entity,
     AssemblyParams const&,
     CCompoundConstraintSnle&);
-template MOCHI_API void mochi::AssembleConstraint<GradTarget::PreviousInput>(
+template void mochi::AssembleConstraint<GradTarget::PreviousInput>(
     entt::registry&,
     entt::entity,
     AssemblyParams const&,

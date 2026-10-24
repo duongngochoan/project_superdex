@@ -15,20 +15,43 @@ using System.Collections.Generic;
 namespace CADRobotExporter.CAD
 {
     /// <summary>
+    /// The outcome of a configuration save so we can handle Yes/No/Cancel
+    /// </summary>
+    public enum ConfigSaveResult
+    {
+        /// The configuration was written to the document
+        Saved,
+        /// Nothing had changed, or there was no usable document to write to
+        NotNeeded,
+        /// The user was asked and chose not to save
+        Declined,
+        // The user asked to abort whatever triggered the save
+        Cancelled,
+    }
+
+    /// <summary>
     /// Abstract base class for CAD software bridges.
     /// Provides a common interface for interacting with different CAD systems.
     /// </summary>
     public abstract class CADBridge
     {
         /// <summary>
+        /// Whether the document this bridge was built against can still be talked to.
+        /// The document handle is cached for the lifetime of the bridge, but the user can close
+        /// the part or assembly while a form is still open. Anything that touches the document
+        /// has to assume it may already be gone.
+        /// </summary>
+        public abstract bool IsDocumentValid { get; }
+
+        /// <summary>
         /// Whether the joint visualization gizmo is currently being shown.
         /// </summary>
         public bool IsShowingJointGizmo { get; set; }
 
         /// <summary>
-        /// The current LinkNode being visualized in the joint gizmo.
+        /// The current Link being visualized in the joint gizmo.
         /// </summary>
-        public LinkNode CurrentNodeShown { get; set; }
+        public Link CurrentNodeShown { get; set; }
 
         /// <summary>
         /// Scale factor for the joint visualization gizmo.
@@ -76,9 +99,9 @@ namespace CADRobotExporter.CAD
         public bool IsShowingInertialGizmo { get; set; }
 
         /// <summary>
-        /// The current LinkNode being visualized for inertial properties (Link Properties tab).
+        /// The current Link being visualized for inertial properties (Link Properties tab).
         /// </summary>
-        public LinkNode CurrentLinkNodeShown { get; set; }
+        public Link CurrentLinkNodeShown { get; set; }
 
         /// <summary>
         /// Gets the title of the current document.
@@ -107,21 +130,23 @@ namespace CADRobotExporter.CAD
         /// <param name="baseNode">The root link node.</param>
         /// <param name="warnUser">Whether to warn the user about overwriting.</param>
         /// <param name="featureNameOverride">Optional override for the feature name.</param>
-        public abstract void SaveConfigurationFromTree(
+        /// <param name="allowCancel">Whether the save prompt may offer Cancel</param>
+        public abstract ConfigSaveResult SaveConfigurationFromTree(
             ExporterConfiguration config,
             LinkNode baseNode,
             bool warnUser,
-            string featureNameOverride = null);
+            string featureNameOverride = null,
+            bool allowCancel = false);
 
         /// <summary>
         /// Selects all components associated with a link.
         /// </summary>
-        public abstract void SelectLinkComponents(LinkNode node);
+        public abstract void SelectLinkComponents(Link link);
 
         /// <summary>
         /// Selects all joint-related components for a link.
         /// </summary>
-        public abstract void SelectJointComponents(LinkNode node);
+        public abstract void SelectJointComponents(Link link);
 
         /// <summary>
         /// Unselects all objects

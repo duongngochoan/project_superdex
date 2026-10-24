@@ -30,7 +30,10 @@ namespace mochi::fem {
 /// @param[in] elements  Element data array.
 /// @param[in] disp  Batched displacements. Only the first ElementT::kNumDofs * ElementT::kSpaceDim
 /// entries are read, so it may be a prefix span into a larger element vector.
-/// @param[in,out] outEnergy  If non-null, accumulates per-element energy.
+/// @param[in] stageStartDisp  Batched stage-start displacements, laid out like @p disp. Only read
+/// if @p outEnergy is non-null.
+/// @param[in,out] outEnergy  If non-null, accumulates the per-element energy -∫ρg·(u - u₀),
+/// relative to the stage-start displacement u₀.
 /// @param[in,out] outRes  If non-empty, accumulates per-element residual into the first
 /// ElementT::kNumDofs * ElementT::kSpaceDim entries.
 /// @param[in] gravity  Gravity acceleration vector [m/s²].
@@ -45,6 +48,7 @@ bool GravityWork(
     NdArray<int, kBatchSize> const& elementIndices,
     Span<ElementT const> elements,
     Span<BatchReal<kBatchSize> const> disp,
+    Span<BatchReal<kBatchSize> const> stageStartDisp,
     BatchDouble<kBatchSize>* outEnergy,
     Span<BatchReal<kBatchSize>> outRes,
     Real3 gravity,
@@ -68,6 +72,9 @@ bool GravityWork(
   static_assert(kNumNodes == 3 || kNumNodes == 4);
   MOCHI_ASSERT_VERBOSE(disp.size() >= kNumNodes * kSpaceDim, "Displacement span is too small.");
   MOCHI_ASSERT_VERBOSE(
+      !outEnergy || stageStartDisp.size() >= kNumNodes * kSpaceDim,
+      "Stage-start displacement span is too small.");
+  MOCHI_ASSERT_VERBOSE(
       outRes.empty() || outRes.size() >= kNumNodes * kSpaceDim, "Residual span is too small.");
 
   bool const evalObj = (outEnergy != nullptr);
@@ -80,30 +87,25 @@ bool GravityWork(
 
   V3 const gd = {V{gravity[0] * density}, V{gravity[1] * density}, V{gravity[2] * density}};
 
-  alignas(alignof(V)) real staging[V::kSize]{};
-
   for (int q = 0; q < kNumQuads; ++q) {
-    // NOTE: When evalObj is true, basis, quad-weight, and map-position gathers could be fused into
-    // one per-lane pass. Measured slightly faster in benchmarks but not enough to justify the
-    // additional complexity.
     NdArray<V, kNumNodes> basis MOCHI_NO_INIT;
     V quadWeight MOCHI_NO_INIT;
     PackBasisAndQuadWeight(elementIndices, elements, extraWeight, q, basis, quadWeight);
 
     if (evalObj) {
-      // y_q = map_q + Σ_f N_f(q) * u_f  (interpolate displacement to quad point)
-      V3 y = {};
-      for (int f = 0; f < kNumNodes; ++f) {
-        y += basis[f] * V3{disp[f * kSpaceDim], disp[f * kSpaceDim + 1], disp[f * kSpaceDim + 2]};
-      }
-
-      // Add map_q (reference position at quad point).
-      // NOTE: The reference position is a constant offset and could be excluded from the objective.
+      // y_q = Σ_f N_f(q) * (u_f - u₀_f)  (interpolate the displacement since the stage start)
+      // TODO: Explore using the predicted target u₀ + Δt·v₀, instead of the stage start u₀, as the
+      // gravity energy's reference, to shrink its rounding error in moving bodies.
+      V3 y MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
       for (int d = 0; d < kSpaceDim; ++d) {
-        for (int b = 0; b < kBatchSize; ++b) {
-          staging[b] = elements[elementIndices[b]].mapEvaluated[q][d];
-        }
-        y[d] += Load<V>(staging);
+        y[d] = V{0_r};
+      }
+      for (int f = 0; f < kNumNodes; ++f) {
+        int const i = f * kSpaceDim;
+        y += basis[f] *
+            V3{disp[i] - stageStartDisp[i],
+               disp[i + 1] - stageStartDisp[i + 1],
+               disp[i + 2] - stageStartDisp[i + 2]};
       }
 
       // merit -= dot(y, gravity*density) * w_q
@@ -129,6 +131,7 @@ MOCHI_FORCE_INLINE bool GravityWork(
     NdArray<int, kBatchSize> const& elementIndices,
     Span<ElementT const> elements,
     BatchElementVector<kBatchSize, ElementT> const& disp,
+    BatchElementVector<kBatchSize, ElementT> const& stageStartDisp,
     BatchDouble<kBatchSize>* outEnergy,
     BatchElementVector<kBatchSize, ElementT>* outRes,
     Real3 gravity,
@@ -138,6 +141,7 @@ MOCHI_FORCE_INLINE bool GravityWork(
       elementIndices,
       elements,
       MakeConstSpan(disp),
+      MakeConstSpan(stageStartDisp),
       outEnergy,
       outRes ? MakeSpan(*outRes) : Span<BatchReal<kBatchSize>>{},
       gravity,

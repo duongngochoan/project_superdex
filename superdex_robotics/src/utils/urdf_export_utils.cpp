@@ -199,7 +199,7 @@ void WriteMeshElement(
     Quaternion const& rotation,
     Real3 const& translation,
     std::filesystem::path const& urdfDir) {
-  std::string const relPath = MakeRelativeMeshPath(path.c_str(), urdfDir);
+  std::string const relPath = MakeRelativeMeshPath(path, urdfDir);
   if (relPath.empty()) {
     return;
   }
@@ -333,7 +333,7 @@ GenerateUrdfXml(BotPrefab const& bot, std::filesystem::path const& urdfDir, Erro
     // Find parent link name.
     std::string_view parentName;
     if (link.parentLink >= 0 && link.parentLink < numLinks) {
-      parentName = bot.links[link.parentLink].name.c_str();
+      parentName = bot.links[link.parentLink].name;
     }
 
     tx::XMLElement* jointXml = doc.NewElement("joint");
@@ -407,7 +407,7 @@ GenerateUrdfXml(BotPrefab const& bot, std::filesystem::path const& urdfDir, Erro
 
   tx::XMLPrinter printer;
   doc.Print(&printer);
-  return std::string(printer.CStr(), printer.CStrSize() > 0 ? printer.CStrSize() - 1 : 0);
+  return {printer.CStr(), printer.CStrSize() > 0 ? printer.CStrSize() - 1 : 0};
 }
 
 } // namespace

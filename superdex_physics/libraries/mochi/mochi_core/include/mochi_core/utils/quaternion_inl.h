@@ -51,15 +51,14 @@ inline Quaternion Quaternion::FromUnitAxisAngle(Vec4r normalizedAxis, real angle
   // Log a warning in debug builds if the axis is not unit length (non-fatal unlike an assert).
 #if MOCHI_ASSERT_VERBOSE_ENABLED && MOCHI_LOG_ENABLED
   auto norm = Norm<3>(normalizedAxis);
-  if (!NearEqual(norm, 1_r, 20_r * kDefaultNearEqualEpsilon<real>))
-    MOCHI_UNLIKELY {
-      MOCHI_LOG_WARNING(
-          "Quaternion::FromUnitAxisAngle expects a unit length vector, but got [%g, %g, %g] (magnitude %g).",
-          normalizedAxis[0],
-          normalizedAxis[1],
-          normalizedAxis[2],
-          norm);
-    }
+  if (!NearEqual(norm, 1_r, 20_r * kDefaultNearEqualEpsilon<real>)) MOCHI_UNLIKELY {
+    MOCHI_LOG_WARNING(
+        "Quaternion::FromUnitAxisAngle expects a unit length vector, but got [%g, %g, %g] (magnitude %g).",
+        normalizedAxis[0],
+        normalizedAxis[1],
+        normalizedAxis[2],
+        norm);
+  }
 #endif
   // Use double precision to avoid rounding error in the trig functions.
   double c = Cos(static_cast<double>(angleRadians) * 0.5);
@@ -79,12 +78,10 @@ inline Quaternion Quaternion::FromAxisAngle(Real3 const& axis, real angleRadians
 inline Quaternion Quaternion::FromRotationVector(Vec4r rotVector) {
   Vec4r angle = VNorm<3>(rotVector);
   real rangle = Get0(angle);
-  if (rangle > 1e-9_r)
-    MOCHI_LIKELY {
-      Vec4r axis = ToSimdDirection(rotVector) / angle;
-      return FromUnitAxisAngle(axis, rangle);
-    }
-  else {
+  if (rangle > 1e-9_r) MOCHI_LIKELY {
+    Vec4r axis = ToSimdDirection(rotVector) / angle;
+    return FromUnitAxisAngle(axis, rangle);
+  } else {
     // q = (xyz, w)
     // xyz = v/|v| * sin(|v|/2) ≈ v/|v| * |v|/2 = 0.5 * v
     // w = cos(|v|/2) ≈ 1 - |v|^2/8 ≈ 1

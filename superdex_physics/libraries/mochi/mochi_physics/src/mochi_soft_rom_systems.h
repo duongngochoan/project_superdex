@@ -125,10 +125,10 @@ inline void EntityGetSolution(
 
 // Assemble a soft ROM by reading the full DOF CActorSnle, projecting to the reduced DOFs.
 // Must be called AFTER the regular soft actor assembly.
-MOCHI_API void AssembleFullToReduced(
+void AssembleFullToReduced(
     AssemblyParams const& params,
     ecs::Included<TagSoftActor, TagRomActor>,
-    ecs::OptionalTag<TagSoftSkinnedActor> isSkinned,
+    ecs::OptionalTag<TagNestedSoftActor> isNestedSoft,
     ecs::OptionalTag<TagUseGravity> hasGravityTag,
     ecs::OptionalTag<TagUseInertia> hasInertiaTag,
     ecs::OptionalTag<TagUseStress> hasStressTag,
@@ -139,26 +139,24 @@ MOCHI_API void AssembleFullToReduced(
     CActorSnle& actorSnle);
 
 // Assemble and project the volume terms.
-MOCHI_API void AssembleAndProjectBody(
+void AssembleAndProjectBody(
     AssemblyParams const& params, // External parameter
     ecs::Included<TagSoftActor, TagRomActor>,
     ecs::CtxGlobal<CSceneGravity const> sceneGravity,
     ecs::OptionalTag<TagUseGravity> hasGravityTag,
     ecs::OptionalTag<TagUseInertia> hasInertiaTag,
     ecs::OptionalTag<TagUseStress> hasStressTag,
-    ecs::OptionalTag<TagSoftSkinnedActor> isSkinned,
+    ecs::OptionalTag<TagNestedSoftActor> isNestedSoft,
     CSkinnedEnergy const& skinnedEnergy,
     CRomProjectionStrategy const& projectionStrategy,
     CLocal2GlobalMap const& l2g,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CRootTransform const& rootTransform,
     CSoftMaterialParams const& materialParams,
     CTimeIntegratorState const& intState,
     CDisplacementSlice<real, TimeStep::Current> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart> const& stageStartDispl,
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
-    CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4> const& perElemMass,
     CRomJacobian const& jacobian,
     CActorSnle& outSnle,
     CActiveVolumeElements const* activeVolElems = nullptr);
@@ -168,7 +166,7 @@ void AssembleAndProjectAsyncContact(
     AssemblyParams const& params, // External parameter
     entt::entity e,
     ecs::Included<TagSoftActor, TagRomActor, TagUseContact>,
-    ecs::Excluded<TagSoftSkinnedActor>,
+    ecs::Excluded<TagNestedSoftActor>,
     ecs::OptionalTag<TagQueryActiveContacts> queryActiveContacts,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     ContactAssemblyReg reg,
@@ -177,7 +175,7 @@ void AssembleAndProjectAsyncContact(
     CBoundaryLocal2GlobalMap const& bdL2g,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CRootTransform const& rootTransform,
     CTimeIntegratorState const& intState,
     CRomJacobian const& jacobian,
@@ -201,11 +199,12 @@ using RigidTransformRegistryExp = ecs::PartialRegistry<
 template <TimeStep kTimeStep>
 std::optional<TransformRT> GetRigidTransform(RigidTransformRegistryExp reg, entt::entity entity);
 
-// Modify the contact Jacobians stored in outContact.mapInfo to account for the rigid transform
-// layer.
+// Add rigid-layer contact Jacobians. outContact.sampleIndices must index positionsInColliding.
 void AddRigidContactJacobians(
     RigidTransformRegistryExp reg,
     entt::entity entity,
+    Span<Real3 const> positionsInColliding,
+    TransformRT const& worldFromColliding,
     ContactDetectionResult& outContact);
 
 /***************************************************************************
@@ -247,7 +246,7 @@ void PreStagePipeline(entt::registry& reg, Span<entt::entity const> entities);
 
 // Updates velocity in ROM space by taking finite differences between the current and stage-start
 // ROM state as raw vectors. Called every time the solution is set.
-MOCHI_API void UpdateCurrentRomVelocity(
+void UpdateCurrentRomVelocity(
     ecs::Included<TagSoftActor, TagRomActor>,
     ecs::OptionalTag<TagRomActorFixRigidTransformInSolve> isRigidTransformFixedInSolve,
     CRomCommonProperties const& props,

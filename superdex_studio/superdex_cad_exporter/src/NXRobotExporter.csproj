@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
@@ -284,6 +284,7 @@
       <HintPath>..\packages\Newtonsoft.Json.13.0.4\lib\net45\Newtonsoft.Json.dll</HintPath>
     </Reference>
     <Reference Include="PresentationCore" />
+    <Reference Include="WindowsFormsIntegration" />
     <Reference Include="PresentationFramework" />
     <Reference Include="Serilog, Version=2.0.0.0, Culture=neutral, PublicKeyToken=24c2f752a8e58a10, processorArchitecture=MSIL">
       <HintPath>..\packages\Serilog.2.12.0\lib\net47\Serilog.dll</HintPath>
@@ -352,17 +353,15 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="UI\MessageBoxHelper.cs" />
-    <Compile Include="UI\ProgressIndicatorForm.cs">
-      <SubType>Form</SubType>
-    </Compile>
-    <Compile Include="UI\ProgressIndicatorForm.Designer.cs">
-      <DependentUpon>ProgressIndicatorForm.cs</DependentUpon>
-    </Compile>
+    <Compile Include="UI\ProgressIndicatorWindow.cs" />
     <Compile Include="UI\ProgressIndicatorManager.cs" />
     <Compile Include="RobotDescription\Mimic.cs" />
     <Compile Include="RobotDescription\Utilities.cs" />
     <Compile Include="Utilities\Logger.cs" />
     <Compile Include="Utilities\NativeWindowWrapper.cs" />
+    <Compile Include="Utilities\WpfWindowOwner.cs" />
+    <Compile Include="Utilities\PresetStore.cs" />
+    <Compile Include="Utilities\ShellMruDirectory.cs" />
     <Compile Include="Properties\Resources.Designer.cs">
       <AutoGen>True</AutoGen>
       <DesignTime>True</DesignTime>
@@ -371,7 +370,8 @@
     <Compile Include="UI\AssemblyExportForm.cs">
       <SubType>Form</SubType>
     </Compile>
-    <Compile Include="UI\AssemblyExportForm.Designer.cs">
+    <Compile Include="UI\Theme\FluentTheme.cs" />
+    <Compile Include="UI\AssemblyExportForm.Layout.cs">
       <DependentUpon>AssemblyExportForm.cs</DependentUpon>
     </Compile>
     <Compile Include="RobotExport\ExportHelper.cs" />
@@ -387,6 +387,9 @@
     <Compile Include="RobotDescription\Color.cs" />
     <Compile Include="RobotDescription\Dynamics.cs" />
     <Compile Include="Export\ExportFormat.cs" />
+    <Compile Include="Export\ExporterConfiguration.cs" />
+    <Compile Include="Export\ExporterConfigurationPresets.cs" />
+    <Compile Include="Export\MeshFormat.cs" />
     <Compile Include="Export\FormatWriterBase.cs" />
     <Compile Include="Export\FormatWriterFactory.cs" />
     <Compile Include="Export\IFormatWriter.cs" />
@@ -401,7 +404,23 @@
     <Compile Include="RobotDescription\Joint.cs" />
     <Compile Include="RobotDescription\Limit.cs" />
     <Compile Include="RobotDescription\Link.cs" />
+    <Compile Include="UI\ViewModels\MeshFormatSelection.cs" />
+    <Compile Include="UI\ViewModels\RobotValidation.cs" />
+    <Compile Include="UI\ViewModels\MeshingSettings.cs" />
+    <Compile Include="UI\ViewModels\LinkPropertiesViewModel.cs" />
+    <Compile Include="UI\ViewModels\JointPropertiesViewModel.cs" />
+    <Compile Include="UI\ViewModels\KinematicsSummary.cs" />
+    <Compile Include="UI\Views\KinematicsSummaryView.cs" />
+    <Compile Include="UI\ViewModels\TendonSummary.cs" />
+    <Compile Include="UI\Views\TendonsSummaryView.cs" />
+    <Compile Include="UI\Views\NumericSpinner.cs" />
+    <Compile Include="UI\Views\JointPropertiesView.cs" />
+    <Compile Include="UI\Views\InertialPropertiesView.cs" />
+    <Compile Include="UI\Views\VisualPropertiesView.cs" />
+    <Compile Include="UI\Views\MeshingColumnView.cs" />
+    <Compile Include="UI\Views\MeshExportView.cs" />
     <Compile Include="UI\LinkNode.cs" />
+    <Compile Include="UI\LinkTreeItem.cs" />
     <Compile Include="RobotDescription\Mass.cs" />
     <Compile Include="RobotDescription\Material.cs" />
     <Compile Include="RobotDescription\Mesh.cs" />
@@ -421,13 +440,6 @@
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
       <LastGenOutput>Resources.Designer.cs</LastGenOutput>
-    </EmbeddedResource>
-    <EmbeddedResource Include="UI\AssemblyExportForm.resx">
-      <DependentUpon>AssemblyExportForm.cs</DependentUpon>
-      <SubType>Designer</SubType>
-    </EmbeddedResource>
-    <EmbeddedResource Include="UI\ProgressIndicatorForm.resx">
-      <DependentUpon>ProgressIndicatorForm.cs</DependentUpon>
     </EmbeddedResource>
   </ItemGroup>
   <ItemGroup>

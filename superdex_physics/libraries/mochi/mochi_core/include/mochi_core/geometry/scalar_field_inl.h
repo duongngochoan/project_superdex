@@ -174,71 +174,6 @@ MOCHI_FORCE_INLINE bool DenseGrid3D<T>::Contains(Real3 const& point) const {
 }
 
 template <typename T>
-template <int kBatchSize>
-MOCHI_FORCE_INLINE NdArray<Simd<T, kBatchSize>, 3> DenseGrid3D<T>::VectorizePoints(
-    Span<Real3 const> points) const {
-  using TVec = Simd<T, kBatchSize>;
-  using TVec3 = NdArray<TVec, 3>;
-  auto const numPoints = isize(points);
-  MOCHI_ASSERT_VERBOSE(numPoints > 0 && numPoints <= kBatchSize, "Invalid number of points.");
-  if (numPoints == kBatchSize) {
-    TVec3 out;
-    LoadTransposed(&points[0][0], out[0], out[1], out[2]);
-    return out;
-  } else {
-    int const i0 = 0;
-    int const i1 = (1 < numPoints) ? 1 : i0;
-    [[maybe_unused]] int const i2 = (2 < numPoints) ? 2 : i0;
-    [[maybe_unused]] int const i3 = (3 < numPoints) ? 3 : i0;
-    [[maybe_unused]] int const i4 = (4 < numPoints) ? 4 : i0;
-    [[maybe_unused]] int const i5 = (5 < numPoints) ? 5 : i0;
-    [[maybe_unused]] int const i6 = (6 < numPoints) ? 6 : i0;
-    [[maybe_unused]] int const i7 = i0;
-    if constexpr (kBatchSize == 8) {
-      return {
-          TVec{
-              points[i0][0],
-              points[i1][0],
-              points[i2][0],
-              points[i3][0],
-              points[i4][0],
-              points[i5][0],
-              points[i6][0],
-              points[i7][0]},
-          TVec{
-              points[i0][1],
-              points[i1][1],
-              points[i2][1],
-              points[i3][1],
-              points[i4][1],
-              points[i5][1],
-              points[i6][1],
-              points[i7][1]},
-          TVec{
-              points[i0][2],
-              points[i1][2],
-              points[i2][2],
-              points[i3][2],
-              points[i4][2],
-              points[i5][2],
-              points[i6][2],
-              points[i7][2]}};
-    } else if constexpr (kBatchSize == 4) {
-      return {
-          TVec{points[i0][0], points[i1][0], points[i2][0], points[i3][0]},
-          TVec{points[i0][1], points[i1][1], points[i2][1], points[i3][1]},
-          TVec{points[i0][2], points[i1][2], points[i2][2], points[i3][2]}};
-    } else {
-      static_assert(kBatchSize == 2, "Unsupported batch size");
-      return {
-          TVec{points[i0][0], points[i1][0]},
-          TVec{points[i0][1], points[i1][1]},
-          TVec{points[i0][2], points[i1][2]}};
-    }
-  }
-}
-
-template <typename T>
 template <
     int kBatchSize,
     GridExtrapolation kExtrapolationType,
@@ -424,53 +359,6 @@ MOCHI_FORCE_INLINE void DenseGrid3D<T>::TrilinearSampleBatch(
     MOCHI_ASSERT_VERBOSE(
         outGradients == nullptr,
         "To return gradients, kComputeGradients must be true at compile time.");
-  }
-}
-
-template <typename T>
-template <GridExtrapolation kExtrapolationType>
-void DenseGrid3D<T>::TrilinearSample(
-    Span<Real3 const> points,
-    Span<T> outValues,
-    TrilinearSamplerOptions<kExtrapolationType>) const {
-  int constexpr kBatchSize = Simd<T>::kSize;
-  using TVec = Simd<T, kBatchSize>;
-  int const numPoints = isize(points);
-  for (int i = 0; i < numPoints; i += kBatchSize) {
-    int const count = Min(kBatchSize, numPoints - i);
-    auto const pts = VectorizePoints<kBatchSize>(points.subspan(i, count));
-    TVec values MOCHI_NO_INIT;
-    TrilinearSampleBatch<kBatchSize, kExtrapolationType>(pts, &values);
-    Store(&outValues[i], values, count);
-  }
-}
-
-template <typename T>
-template <GridExtrapolation kExtrapolationType>
-void DenseGrid3D<T>::TrilinearSampleGradient(
-    Span<Real3 const> points,
-    Span<Scalar3> outGradients,
-    TrilinearSamplerOptions<kExtrapolationType>) const {
-  int constexpr kBatchSize = Simd<T>::kSize;
-  using TVec = Simd<T, kBatchSize>;
-  using TVec3 = NdArray<TVec, 3>;
-  int const numPoints = isize(points);
-  for (int i = 0; i < numPoints; i += kBatchSize) {
-    int const count = Min(kBatchSize, numPoints - i);
-    auto const pts = VectorizePoints<kBatchSize>(points.subspan(i, count));
-    TVec3 grad MOCHI_NO_INIT;
-    TrilinearSampleBatch<
-        kBatchSize,
-        kExtrapolationType,
-        /*kComputeValues*/ false,
-        /*kComputeGradients*/ true>(pts, nullptr, &grad);
-    if (count == kBatchSize) {
-      StoreTransposed(&outGradients[i][0], grad[0], grad[1], grad[2]);
-    } else {
-      for (int ii = 0; ii < count; ++ii) {
-        outGradients[i + ii] = {Get(grad[0], ii), Get(grad[1], ii), Get(grad[2], ii)};
-      }
-    }
   }
 }
 

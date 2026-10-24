@@ -23,6 +23,8 @@
 #include <mochi_core/utils/interval.h>
 #include <mochi_core/utils/span.h>
 
+#include <cstddef>
+
 namespace mochi {
 
 /**
@@ -101,14 +103,21 @@ class Local2GlobalMap {
   [[nodiscard]] int GetElementOffset(int eleIdx) const;
 
   /** @brief Returns a span with the global indices of an element. */
-  [[nodiscard]] Span<int const> GetGlobalIndices(int eleIdx) const;
+  [[nodiscard]] Span<int const> GetGlobalIndices(int eleIdx) const {
+    MOCHI_ASSERT_VERBOSE(eleIdx < isize(_eleSizes), "Invalid element index");
+    return {_indices.data() + _eleOffsets[eleIdx], static_cast<size_t>(_eleSizes[eleIdx])};
+  }
 
   /**
-   * @brief Returns the stencil indices of each local DoF for an element. In standard FEM, this is
-   * just [0, ..., (# of local DoFs) - 1] for each element, but it may be nontrivial for
-   * macro-element stencils (e.g., bending stiffness in shell/shells).
+   * @brief Returns the stencil indices of each local DoF for an element. Requires @ref
+   * InitializeStencilIndices, which macro-element stencils (e.g., bending stiffness in shells) use.
+   * Maps without them, as in standard FEM, implicitly use [0, ..., (# of local DoFs) - 1].
    */
-  [[nodiscard]] Span<int const> GetStencilIndices(int eleIdx) const;
+  [[nodiscard]] Span<int const> GetStencilIndices(int eleIdx) const {
+    MOCHI_ASSERT_VERBOSE(eleIdx >= 0 && eleIdx < isize(_eleSizes), "Invalid element index");
+    MOCHI_ASSERT_VERBOSE(!_stencilIndices.empty(), "Stencil indices not initialized");
+    return {_stencilIndices.data() + _eleOffsets[eleIdx], static_cast<size_t>(_eleSizes[eleIdx])};
+  }
 
   /** @brief Gets the global nodes of an element. */
   void GetElementNodes(int eleIdx, Span<int> outNodes) const;
@@ -232,13 +241,9 @@ void Local2GlobalMap::InitializeFromMeshAndBasis(
   Span<int const> topology = mesh->GetFlatConnectivity();
   _globalRange = Interval<int>{0, numGloDofs};
   _indices.reserve(numLocDofs);
-  _stencilIndices.reserve(numLocDofs);
-  int dofCount = 0;
   for (int n : topology) {
     for (int f = 0; f < numFields; ++f) {
       _indices.push_back(n * numFields + f);
-      _stencilIndices.push_back(dofCount % numEleDofs);
-      dofCount++;
     }
   }
 }

@@ -24,8 +24,10 @@
 
 #include <math/vec3.h>
 
+#include <array>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -64,9 +66,9 @@ struct AxisColors {
 };
 
 inline constexpr AxisColors kAxisX = {
-    IM_COL32(233, 55, 81, 255), // red, normal
-    IM_COL32(255, 61, 90, 255), // red, hovered
-    IM_COL32(207, 49, 72, 255)}; // red, active
+    IM_COL32(230, 45, 45, 255), // red, normal
+    IM_COL32(255, 55, 55, 255), // red, hovered
+    IM_COL32(204, 40, 40, 255)}; // red, active
 inline constexpr AxisColors kAxisY = {
     IM_COL32(131, 204, 15, 255), // green, normal
     IM_COL32(148, 230, 17, 255), // green, hovered
@@ -75,7 +77,7 @@ inline constexpr AxisColors kAxisZ = {
     IM_COL32(46, 134, 233, 255), // blue, normal
     IM_COL32(50, 147, 255, 255), // blue, hovered
     IM_COL32(41, 119, 207, 255)}; // blue, active
-inline constexpr AxisColors kAxes[3] = {kAxisX, kAxisY, kAxisZ};
+inline constexpr std::array<AxisColors, 3> kAxes = {kAxisX, kAxisY, kAxisZ};
 
 // Frame-background highlight for a name input whose value collides with an existing name.
 inline ImVec4 const kNameConflictColor(0.5f, 0.0f, 0.0f, 1.0f);
@@ -175,6 +177,14 @@ bool InputText(
     ImGuiInputTextCallback callback = nullptr,
     void* user_data = nullptr);
 
+bool InputTextMultiline(
+    char const* label,
+    mochi::DynamicString* str,
+    ImVec2 const& size = ImVec2(0, 0),
+    ImGuiInputTextFlags flags = 0,
+    ImGuiInputTextCallback callback = nullptr,
+    void* user_data = nullptr);
+
 // Name InputText that highlights (kNameConflictColor) and shows a "name already used" tooltip when
 // @p collides is true. Returns true if the text changed. Shared by the actor detail panels.
 bool NameInputWithCollisionCheck(char const* label, mochi::DynamicString& name, bool collides);
@@ -201,7 +211,7 @@ bool ViewportOrientationGizmo(
 
 bool DragFloatXYZ(
     char const* label,
-    float v[3],
+    float v[3], // NOLINT(modernize-avoid-c-arrays) Array parameters are pointers.
     float v_speed = 1.0f,
     float v_min = 0.0f,
     float v_max = 0.0f,
@@ -422,6 +432,15 @@ void HoverableSeparatorText(char const* label);
 // prose (SetTooltip never wraps, so the caller would have to hard-code newlines).
 void ItemTooltipWrapped(char const* text);
 
+// Read-only, selectable (and so copyable) multi-line text block. Sized to its content up to
+// @p maxLines, after which it scrolls. Pass a monospace @p font (may be null) when the text has
+// space-padded columns to line up.
+void ReadOnlyTextBlock(
+    char const* id,
+    std::string const& text,
+    ImFont* font = nullptr,
+    int maxLines = 10);
+
 // True/False dropdown, the shape reflected bool fields get. Preferred over Checkbox in settings
 // panels: it fills the value column like the drag widgets do, with the value centered to match
 // them. Returns true when the value changed.
@@ -452,6 +471,12 @@ bool SimpleReflectionStruct(
   return SimpleReflectionStruct(
       static_cast<SReflect::StructTypeInfo const&>(typeInfo), &value, overrideFn, readOnlyFn);
 }
+
+// Labels the elements of resizable arrays SimpleReflectionStruct draws until the matching pop, e.g.
+// joint names for per-DOF arrays, and flags such arrays whose length differs. @p labels must stay
+// alive until then.
+void PushReflectionArrayLabels(std::span<std::string const> labels);
+void PopReflectionArrayLabels();
 
 // Render an editable combo for a reflected enum (type-erased entry point).
 bool SimpleReflectionEnum(char const* label, SReflect::EnumTypeInfo const& enumInfo, void* enumPtr);

@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pyre-strict
-
 from typing import Any, Callable, Iterator, Optional, Sequence, overload
 import numpy as np
 import numpy.typing as npt
@@ -234,6 +232,35 @@ class DynamicArrayArticulatedSingleDofTargetConstraintPrefab:
 type ArrayLikeArticulatedSingleDofTargetConstraintPrefab = (
     Sequence[ArticulatedSingleDofTargetConstraintPrefab] |
     DynamicArrayArticulatedSingleDofTargetConstraintPrefab |
+    npt.NDArray[Any]
+)
+
+class DynamicArrayContactPairParamsOverrideEntry:
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(
+        self,
+        size: int,
+        value: ContactPairParamsOverrideEntry = ...,
+    ) -> None: ...
+    @overload
+    def __init__(self, sequence: Sequence[ContactPairParamsOverrideEntry]) -> None: ...
+    def __len__(self) -> int: ...
+    def __getitem__(self, index: int) -> ContactPairParamsOverrideEntry: ...
+    def __setitem__(
+        self,
+        index: int,
+        value: ContactPairParamsOverrideEntry,
+    ) -> None: ...
+    def __iter__(self) -> Iterator[ContactPairParamsOverrideEntry]: ...
+    def append(self, value: ContactPairParamsOverrideEntry) -> None: ...
+    def clear(self) -> None: ...
+    def resize(self, size: int) -> None: ...
+
+type ArrayLikeContactPairParamsOverrideEntry = (
+    Sequence[ContactPairParamsOverrideEntry] |
+    DynamicArrayContactPairParamsOverrideEntry |
     npt.NDArray[Any]
 )
 
@@ -719,6 +746,8 @@ class SceneParams:
         gravity: Optional[mochi_physics.Real3Like] = ...,
         solver: Optional[mochi_physics.SolverParams] = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidActorPrefab(mochi_physics.RigidActorParams):
     """Prefab parameters for a rigid actor.
@@ -732,8 +761,8 @@ class RigidActorPrefab(mochi_physics.RigidActorParams):
 
     Note:
         The inherited :attr:`~superdex.physics.RigidActorParams.name` field need not
-        be unique, but a name shared by more than one actor cannot be referenced by
-        a constraint, pose controller, or contact filter.
+        be unique, but a name shared by more than one actor cannot be used by
+        name-based prefab references.
     """
     comment: Optional[str]
     """Optional serialized comment."""
@@ -872,6 +901,8 @@ class RigidActorPrefab(mochi_physics.RigidActorParams):
         render_model_rotation: mochi_physics.QuaternionLike = ...,
         render_model_translation: mochi_physics.Real3Like = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class SoftActorPrefab(mochi_physics.SoftActorParams):
     """Prefab parameters for a soft actor.
@@ -886,8 +917,8 @@ class SoftActorPrefab(mochi_physics.SoftActorParams):
     Note:
         When used as a standalone soft actor prefab, the inherited
         :attr:`~superdex.physics.SoftActorParams.name` field need not be unique, but
-        a name shared by more than one actor cannot be referenced by a constraint,
-        pose controller, or contact filter.
+        a name shared by more than one actor cannot be used by name-based prefab
+        references.
     """
     comment: Optional[str]
     """Optional serialized comment."""
@@ -908,14 +939,17 @@ class SoftActorPrefab(mochi_physics.SoftActorParams):
     """
     sdf: mochi_physics.GridSdfParams
     """[Experimental] Parameters used to construct a grid-based Signed Distance Field
-    (SDF) if the shape doesn't already have one.
+    (SDF) from the shape's surface mesh.
 
     Note:
-        Ignored if :attr:`~superdex.physics.prefab.SoftActorPrefab.collider_type` is
-        not :class:`SDF <superdex.physics.ColliderType>`.
+        Ignored unless
+        :attr:`~superdex.physics.prefab.SoftActorPrefab.collider_type` is
+        :class:`SDF <superdex.physics.ColliderType>` or :class:`AUTO
+        <superdex.physics.ColliderType>`.
 
     Note:
-        Ignored if the shape already has a grid-based SDF.
+        The SDF is computed when the actor is created, even if the shape already has
+        one.
 
     Warning:
         This is an experimental feature. It may be changed or removed in the future.
@@ -946,7 +980,8 @@ class SoftActorPrefab(mochi_physics.SoftActorParams):
         actors that move far from their initial position.
 
     Note:
-        Ignored by soft skinned actors, which do not support recentering.
+        Ignored for nested soft actors in soft-skinned actors, which do not support
+        recentering.
 
     Warning:
         This is an experimental feature. It may be changed or removed in the future.
@@ -957,9 +992,14 @@ class SoftActorPrefab(mochi_physics.SoftActorParams):
         """Scale [x, y, z] to bake into the shape file.
 
         Note:
-            All components must be strictly positive and finite. Negative scale
-            (mirroring) is not supported and rejected at
-            :func:`~superdex.physics.prefab.add_to_scene`.
+            All components must be non-zero and finite. Negative components mirror the
+            corresponding model-space axes, including
+            :attr:`~superdex.physics.prefab.SoftActorPrefab.node_displacements`.
+
+        Note:
+            When used in
+            :attr:`~superdex.physics.prefab.SoftSkinnedActorPrefab.soft_params`, all
+            components must be equal and strictly positive.
 
         Note:
             If :attr:`~superdex.physics.prefab.SoftActorPrefab.flow_file` is set,
@@ -1055,6 +1095,39 @@ class SoftActorPrefab(mochi_physics.SoftActorParams):
         """
     @render_model_translation.setter
     def render_model_translation(self, value: mochi_physics.Real3Like) -> None: ...
+    @property
+    def node_displacements(self) -> Optional[mochi_physics.DynamicArrayReal]:
+        """Optional initial nodal displacements in model space, flattened as [x0, y0,
+        z0,
+        x1, y1, z1, ...].
+
+        Values are expressed in the model frame of
+        :attr:`~superdex.physics.prefab.SoftActorPrefab.shape_file`, the same frame as
+        its node positions. The model transform baked into the shape
+        (:attr:`~superdex.physics.prefab.SoftActorPrefab.scale`,
+        :attr:`~superdex.physics.prefab.SoftActorPrefab.shape_rotation`, and the
+        effective prefab scale) is applied to the displacements too.
+        :attr:`~superdex.physics.prefab.SoftActorPrefab.shape_translation` does not
+        affect them. Displacements for a preset
+        :attr:`~superdex.physics.SoftActorParams.shape` are applied unchanged, like its
+        geometry. Applied right after the actor is created, see
+        :meth:`~superdex.physics.Actor.set_displacements`.
+
+        Note:
+            Ignored if unset or empty. Otherwise, must contain 3 finite values per
+            simulation node.
+
+        Note:
+            For nested soft actors in
+            :attr:`~superdex.physics.prefab.SoftSkinnedActorPrefab.soft_params`, values
+            are the soft displacements in the unposed (bind-pose) frame, before skinning
+            is applied.
+        """
+    @node_displacements.setter
+    def node_displacements(
+        self,
+        value: Optional[mochi_physics.ArrayLikeReal],
+    ) -> None: ...
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -1069,6 +1142,7 @@ class SoftActorPrefab(mochi_physics.SoftActorParams):
         has_gravity: bool = ...,
         has_inertia: bool = ...,
         has_stress: bool = ...,
+        use_contact_skin: bool = ...,
         boundary_element_type: mochi_physics.ActorBoundaryElementType | int = ...,
         comment: Optional[str] = ...,
         shape_file: str = ...,
@@ -1086,7 +1160,10 @@ class SoftActorPrefab(mochi_physics.SoftActorParams):
         render_model_scale: mochi_physics.Real3Like = ...,
         render_model_rotation: mochi_physics.QuaternionLike = ...,
         render_model_translation: mochi_physics.Real3Like = ...,
+        node_displacements: Optional[mochi_physics.ArrayLikeReal] = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ArticulatedJointPrefab(mochi_physics.ArticulatedJointParams):
     """Joint parameters for an articulated actor prefab."""
@@ -1304,6 +1381,7 @@ class ArticulatedSkinPrefab(mochi_physics.ArticulatedSkinParams):
         contact: mochi_physics.ContactParams = ...,
         boundary_element_type: mochi_physics.ActorBoundaryElementType | int = ...,
         boundary_subsampling: Optional[mochi_physics.BoundarySubsamplingParams] = ...,
+        non_colliding_links: Optional[mochi_physics.ArrayLikeString] = ...,
         shape_file: str = ...,
         render_model_file: str = ...,
         render_model_scale: mochi_physics.Real3Like = ...,
@@ -1334,9 +1412,8 @@ class ArticulatedActorPrefab:
         nested actors.
 
     Note:
-        A name shared by more than one actor cannot be referenced by a constraint,
-        pose controller, or contact filter (see
-        :class:`~superdex.physics.prefab.PoseControllerPrefab`).
+        A name shared by more than one actor cannot be used by name-based prefab
+        references.
     """
     scale: float
     """Uniform scale baked into all link and skin shapes when the prefab is
@@ -1414,6 +1491,25 @@ class ArticulatedActorPrefab:
         self,
         value: Optional[mochi_physics.ArrayLikeReal],
     ) -> None: ...
+    @property
+    def joint_pose(self) -> Optional[mochi_physics.DynamicArrayReal]:
+        """Optional initial joint pose, one value per DoF in joint order.
+
+        Units depend on joint type: [rad] for revolute, [m] for prismatic, and a
+        rotation vector [rad] for spherical joints and the rotational part of free
+        joints. The translational part of free joints is in [m]. Translational DoFs
+        scale with the articulated effective scale
+        (:attr:`~superdex.physics.prefab.ArticulatedActorPrefab.scale` times the
+        effective prefab scale). Rotational DoFs are not scaled. Applied right after the
+        actor is created, see
+        :meth:`~superdex.physics.Actor.set_articulated_pose_from_joints`.
+
+        Note:
+            Ignored if unset or empty. Otherwise, must contain
+            :meth:`~superdex.physics.Actor.get_num_dofs` finite values.
+        """
+    @joint_pose.setter
+    def joint_pose(self, value: Optional[mochi_physics.ArrayLikeReal]) -> None: ...
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -1429,14 +1525,15 @@ class ArticulatedActorPrefab:
         links: ArrayLikeArticulatedLinkPrefab = ...,
         skin: Optional[ArticulatedSkinPrefab] = ...,
         joint_velocities: Optional[mochi_physics.ArrayLikeReal] = ...,
+        joint_pose: Optional[mochi_physics.ArrayLikeReal] = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
 
 class SoftSkinnedActorPrefab:
-    """Prefab parameters for a soft skinned actor.
+    """Prefab parameters for a soft-skinned actor.
 
-    A soft skinned actor consists of an articulated skeleton with one or more
+    A soft-skinned actor consists of an articulated skeleton with one or more
     attached soft bodies.
     """
     comment: Optional[str]
@@ -1445,22 +1542,23 @@ class SoftSkinnedActorPrefab:
     """Articulated actor parameters for the skeleton."""
     @property
     def soft_params(self) -> DynamicArraySoftActorPrefab:
-        """Soft body parameters, one per soft actor.
+        """Parameters for each nested soft actor.
 
         Note:
-            The per-soft-actor :attr:`~superdex.physics.prefab.SoftActorPrefab.rotation`
-            and :attr:`~superdex.physics.prefab.SoftActorPrefab.translation` fields are
-            ignored. Soft actor transforms are determined by the skeleton's link
-            attachments (see
+            The :attr:`~superdex.physics.prefab.SoftActorPrefab.rotation` and
+            :attr:`~superdex.physics.prefab.SoftActorPrefab.translation` fields for each
+            nested soft actor are ignored. Nested soft actor transforms are determined
+            by the skeleton's link attachments (see
             :attr:`~superdex.physics.prefab.SoftSkinnedActorPrefab.soft_attach_links`).
 
         Note:
-            Each per-soft-actor :attr:`~superdex.physics.prefab.SoftActorPrefab.scale`
-            must be uniform (three equal, strictly positive, finite values). Non-uniform
-            soft shape scale is not supported for soft-skinned prefabs.
+            Each nested soft actor's
+            :attr:`~superdex.physics.prefab.SoftActorPrefab.scale` must be uniform
+            (three equal, strictly positive, finite values). Non-uniform soft shape
+            scale is not supported for soft-skinned prefabs.
 
         Note:
-            If a per-soft-actor
+            If a nested soft actor's
             :attr:`~superdex.physics.prefab.SoftActorPrefab.flow_file` is set, that
             entry's :attr:`~superdex.physics.prefab.SoftActorPrefab.scale` must be (1,
             1, 1).
@@ -1481,7 +1579,7 @@ class SoftSkinnedActorPrefab:
     def soft_params(self, value: ArrayLikeSoftActorPrefab) -> None: ...
     @property
     def soft_attach_links(self) -> mochi_physics.DynamicArrayString:
-        """Local link names to attach each soft actor to. Empty or one entry per
+        """Local link names to attach each nested soft actor to. Empty or one entry per
         :attr:`~superdex.physics.prefab.SoftSkinnedActorPrefab.soft_params` element.
 
         Note:
@@ -1512,6 +1610,8 @@ class SoftSkinnedActorPrefab:
         has_inertia: bool = ...,
         has_stress: bool = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ActorLists:
     """Lists of actors grouped by type."""
@@ -1534,7 +1634,7 @@ class ActorLists:
     def soft(self, value: ArrayLikeSoftActorPrefab) -> None: ...
     @property
     def soft_skinned(self) -> DynamicArraySoftSkinnedActorPrefab:
-        """Soft skinned actors."""
+        """Soft-skinned actors."""
     @soft_skinned.setter
     def soft_skinned(self, value: ArrayLikeSoftSkinnedActorPrefab) -> None: ...
     @overload
@@ -1548,6 +1648,8 @@ class ActorLists:
         soft: ArrayLikeSoftActorPrefab = ...,
         soft_skinned: ArrayLikeSoftSkinnedActorPrefab = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidSphericalJointConstraintPrefab(
     mochi_physics.RigidSphericalJointConstraintParams
@@ -1586,6 +1688,8 @@ class RigidSphericalJointConstraintPrefab(
         actor_name_a: str = ...,
         actor_name_b: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPrismaticJointConstraintPrefab(
     mochi_physics.RigidPrismaticJointConstraintParams
@@ -1625,6 +1729,8 @@ class RigidPrismaticJointConstraintPrefab(
         actor_name_a: str = ...,
         actor_name_b: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class DeformableNodeToDeformableNodeConstraintPrefab(
     mochi_physics.DeformableNodeToDeformableNodeConstraintParams
@@ -1664,6 +1770,8 @@ class DeformableNodeToDeformableNodeConstraintPrefab(
         actor_name_a: str = ...,
         actor_name_b: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class DeformableNodeToRigidConstraintPrefab(
     mochi_physics.DeformableNodeToRigidConstraintParams
@@ -1704,6 +1812,8 @@ class DeformableNodeToRigidConstraintPrefab(
         rigid_actor_name: str = ...,
         deformable_actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class JointRotationRangeConstraintPrefab(
     mochi_physics.JointRotationRangeConstraintParams
@@ -1745,6 +1855,8 @@ class JointRotationRangeConstraintPrefab(
         actor_name_a: str = ...,
         actor_name_b: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPivotPositionConstraintPrefab(
     mochi_physics.RigidPivotPositionConstraintParams
@@ -1779,6 +1891,8 @@ class RigidPivotPositionConstraintPrefab(
         actor: mochi_physics.ActorHandle = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPivotToRigidTargetConstraintPrefab(
     mochi_physics.RigidPivotToRigidTargetConstraintParams
@@ -1813,6 +1927,8 @@ class RigidPivotToRigidTargetConstraintPrefab(
         actor: mochi_physics.ActorHandle = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPivotRotationConstraintPrefab(
     mochi_physics.RigidPivotRotationConstraintParams
@@ -1847,6 +1963,8 @@ class RigidPivotRotationConstraintPrefab(
         actor: mochi_physics.ActorHandle = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class DeformableNodePositionConstraintPrefab(
     mochi_physics.DeformableNodePositionConstraintParams
@@ -1881,6 +1999,8 @@ class DeformableNodePositionConstraintPrefab(
         actor: mochi_physics.ActorHandle = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class JointRotationTrackingConstraintPrefab(
     mochi_physics.JointRotationTrackingConstraintParams
@@ -1918,6 +2038,8 @@ class JointRotationTrackingConstraintPrefab(
         actor_name_a: str = ...,
         actor_name_b: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ArticulatedSingleDofTargetConstraintPrefab(
     mochi_physics.ArticulatedSingleDofTargetConstraintParams
@@ -1953,6 +2075,8 @@ class ArticulatedSingleDofTargetConstraintPrefab(
         target_value: float = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class Articulated3dRotationTargetConstraintPrefab(
     mochi_physics.Articulated3dRotationTargetConstraintParams
@@ -1987,6 +2111,8 @@ class Articulated3dRotationTargetConstraintPrefab(
         target: mochi_physics.QuaternionLike = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ArticulatedSingleDofRangeConstraintPrefab(
     mochi_physics.ArticulatedSingleDofRangeConstraintParams
@@ -2023,6 +2149,8 @@ class ArticulatedSingleDofRangeConstraintPrefab(
         max_value: float = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class Articulated3dRotationRangeConstraintPrefab(
     mochi_physics.Articulated3dRotationRangeConstraintParams
@@ -2058,6 +2186,8 @@ class Articulated3dRotationRangeConstraintPrefab(
         max_values: mochi_physics.Real3Like = ...,
         actor_name: str = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ConstraintLists:
     """Lists of constraints grouped by type."""
@@ -2215,6 +2345,8 @@ class ConstraintLists:
         deformable_node_to_rigid: ArrayLikeDeformableNodeToRigidConstraintPrefab = ...,
         deformable_node_to_deformable_node: ArrayLikeDeformableNodeToDeformableNodeConstraintPrefab = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class PoseControllerPrefab:
     """Prefab parameters for an articulated pose controller."""
@@ -2269,9 +2401,11 @@ class PoseControllerPrefab:
         link_rot_tracking: mochi_physics.ArrayLikePoseTrackingParams = ...,
         joint_tracking: mochi_physics.ArrayLikePoseTrackingParams = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class PrefabReference:
-    """Reference to another prefab file (scene or actor) for prefab nesting."""
+    """Reference to another prefab (scene or actor) for prefab nesting."""
     comment: Optional[str]
     """Optional serialized comment."""
     name: str
@@ -2280,14 +2414,34 @@ class PrefabReference:
 
     Note:
         Name-reference ambiguity is evaluated per nested subtree. A nested prefab's
-        own references (from its constraints, pose controllers, and contact filters)
-        resolve within its own instance first, so a name reused across independent
-        sibling instances is not ambiguous for each instance's internal references.
-        It becomes ambiguous only for a reference written at the enclosing (parent)
-        scope or above.
+        own name-based references resolve within its own instance first, so a name
+        reused across independent sibling instances is not ambiguous for each
+        instance's internal references. It becomes ambiguous only for a reference
+        written at the enclosing (parent) scope or above.
     """
     path: str
-    """File path of the nested prefab."""
+    """Path to the nested prefab file.
+
+    If non-empty, :func:`~superdex.physics.prefab.load_nested_prefabs` reloads the
+    prefab from this path on every call.
+    :func:`~superdex.physics.prefab.ensure_fully_loaded` loads it from this path
+    only if the reference does not already contain a loaded prefab. If empty, both
+    functions require the reference to already contain a loaded prefab; they keep
+    that prefab and load all prefabs nested within it.
+
+    Note:
+        A reference created with the Python constructor needs a non-empty path
+        before loading because the constructor cannot accept a loaded prefab. C++
+        callers may instead assign a loaded prefab directly and leave this path
+        empty.
+
+    Warning:
+        The loaded prefab is not serialized. After deserialization, an empty-path
+        reference has no loaded prefab and is rejected by
+        :func:`~superdex.physics.prefab.load_nested_prefabs` and
+        :func:`~superdex.physics.prefab.ensure_fully_loaded`. Set a non-empty path
+        before saving if the reference must remain loadable after deserialization.
+    """
     scale: float
     """Uniform scale of the nested prefab, relative to the parent prefab.
 
@@ -2340,6 +2494,8 @@ class PrefabReference:
         rotation: mochi_physics.QuaternionLike = ...,
         translation: mochi_physics.Real3Like = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ActorContactEntry:
     """Used by :class:`~superdex.physics.prefab.ContactFilter` to enable or disable
@@ -2424,6 +2580,60 @@ class ActorContactEntry:
         enable: bool = ...,
         actors: mochi_physics.ArrayLikeString = ...,
         include_nested_actors: bool = ...,
+    ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
+
+class ContactPairParamsOverrideEntry:
+    """Overrides selected contact parameters for an unordered actor pair.
+
+    See Also:
+        :meth:`~superdex.physics.Scene.set_contact_pair_params_override`,
+        :class:`~superdex.physics.ContactPairParamsOverride`
+    """
+    @property
+    def actors(self) -> mochi_physics.DynamicArrayString:
+        """Identifies two actors by name or hierarchy path.
+
+        If the actor is in this prefab, reference it by name, e.g., "myActor". If the
+        actor is in a nested prefab, reference it by hierarchy path, e.g.,
+        "myPrefab/myActor".
+
+        Note:
+            Each referenced name must identify exactly one existing actor. Actor names
+            need not be unique, but referencing a name shared by more than one actor, or
+            a name that matches no actor, is invalid and rejected at
+            :func:`~superdex.physics.prefab.add_to_scene`.
+
+        Note:
+            Both referenced actors must have contact parameters.
+
+        Note:
+            Parent actor names identify only the parent. Name nested actors explicitly
+            to override their contact pairs.
+
+        Note:
+            If both names identify the same actor, the entry applies to that actor's
+            self-pair.
+
+        Warning:
+            Must contain exactly 2 elements.
+        """
+    @actors.setter
+    def actors(self, value: mochi_physics.ArrayLikeString) -> None: ...
+    params_override: mochi_physics.ContactPairParamsOverride
+    """Partial contact parameter override for the actor pair.
+
+    Note:
+        At least one field must be present.
+    """
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(
+        self,
+        actors: mochi_physics.ArrayLikeString = ...,
+        params_override: mochi_physics.ContactPairParamsOverride = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
@@ -2523,7 +2733,8 @@ class ContactFilter:
         Exporting may emit a canonical representation whose contact-filter category
         differs from the original JSON. For example, self-contact may be emitted as
         :attr:`actor_contact_symmetric` because the forward and reverse resolved
-        actor pair are the same.
+        actor pair are the same. Entry order and duplicate, redundant, or overridden
+        entries from the source prefab are not preserved.
 
     Warning:
         Scene export does not record explicit settings that enable contact between
@@ -2637,6 +2848,22 @@ class ScenePrefab:
     """Global scene parameters (top-level prefab only)."""
     contact_filter: Optional[ContactFilter]
     """Contact filter settings for selective contact filtering."""
+    @property
+    def contact_pair_params_overrides(
+        self,
+    ) -> Optional[DynamicArrayContactPairParamsOverrideEntry]:
+        """Optional actor-pair contact parameter overrides.
+
+        Entries are applied in array order after all actors in their prefab have been
+        created. A later entry for the same unordered actor pair replaces the earlier
+        override rather than merging with it. Nested child prefab entries are applied
+        before parent entries.
+        """
+    @contact_pair_params_overrides.setter
+    def contact_pair_params_overrides(
+        self,
+        value: Optional[ArrayLikeContactPairParamsOverrideEntry],
+    ) -> None: ...
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -2649,7 +2876,10 @@ class ScenePrefab:
         prefabs: ArrayLikePrefabReference = ...,
         scene: Optional[SceneParams] = ...,
         contact_filter: Optional[ContactFilter] = ...,
+        contact_pair_params_overrides: Optional[ArrayLikeContactPairParamsOverrideEntry] = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class PrefabParams:
     """Parameters for instantiating a :class:`~superdex.physics.prefab.ScenePrefab`
@@ -2676,6 +2906,9 @@ class PrefabParams:
     - Mesh geometry (link / actor shapes are loaded at the cumulative scale)
     - Joint and link translations, cycle joint anchors
     - Prismatic joint position limits (Real3, in meters)
+    - Soft actor :attr:`~superdex.physics.prefab.SoftActorPrefab.node_displacements`
+      and translational DoFs of
+      :attr:`~superdex.physics.prefab.ArticulatedActorPrefab.joint_pose`
     - Constraint geometric target and limit distances [m], including rigid prismatic
       joint limits, world-space position targets, rigid actor-local pivot/joint
       positions in
@@ -2709,6 +2942,7 @@ class PrefabParams:
     - density (intrinsic material property; mass/density are mutually exclusive in
       the prefab API, so no double-application)
     - linearVelocity / angularVelocity / jointVelocities
+    - Contact-pair parameter overrides, whose authored values are preserved
     - Constraint stiffness/damping coefficients and saturation thresholds inherited
       from :class:`~superdex.physics.ConstraintParams`. These parameters define the
       constraint's response, not just geometry: different goals (preserving material
@@ -2803,8 +3037,8 @@ class AddToSceneResult:
 
         Note:
             Contains only top-level actors. Articulated actors' nested link actors and
-            soft-skinned actors' nested link and soft sub-actors are created but not
-            listed here. Reach them via
+            soft-skinned actors' nested link actors and nested soft actors are created
+            but not listed here. Reach them via
             :meth:`~superdex.physics.Actor.get_nested_link_actors` and
             :meth:`~superdex.physics.Actor.get_nested_soft_actors`.
 
@@ -2852,11 +3086,11 @@ class AddToSceneResult:
             order.
 
         Note:
-            For a single prefab (no nested prefabs) whose actors have no nested link or
-            soft sub-actors, the result is 1-to-1 with the prefab's actors of that type
-            (same size, same order). Nested link/soft sub-actors are not listed, and
-            soft-skinned actors are reported under :class:`ARTICULATED
-            <superdex.physics.ActorType>`.
+            For a single prefab (no nested prefabs) whose actors have no nested link
+            actors or nested soft actors, the result is 1-to-1 with the prefab's actors
+            of that type (same size, same order). Nested link actors and nested soft
+            actors are not listed, and soft-skinned actors are reported under
+            :class:`ARTICULATED <superdex.physics.ActorType>`.
         """
     @overload
     def filter(
@@ -2879,6 +3113,69 @@ class AddToSceneResult:
             For a single prefab (no nested prefabs), the result will be 1-to-1 with the
             constraint list in the prefab (same size, same order).
         """
+
+class ExportParams:
+    """Options for :func:`~superdex.physics.prefab.export_scene` and
+    :func:`~superdex.physics.prefab.export_actor`.
+    """
+    @property
+    def exclude_actors(self) -> mochi_physics.DynamicArrayActorHandle:
+        """Handles of actors that :func:`~superdex.physics.prefab.export_scene` should
+        not
+        export.
+
+        Excluding an articulated actor also excludes all of its nested link actors.
+        Excluding a soft-skinned actor also excludes all of its nested link actors and
+        nested soft actors. Any contact filter or contact-pair parameter override
+        entries that reference excluded actors are dropped.
+
+        Note:
+            Nested link and nested soft actor handles are rejected. Pass the top-level
+            articulated or soft-skinned actor handle instead.
+
+        Note:
+            Ignored by :func:`~superdex.physics.prefab.export_actor`.
+        """
+    @exclude_actors.setter
+    def exclude_actors(self, value: mochi_physics.ArrayLikeActorHandle) -> None: ...
+    export_current_pose: bool
+    """Whether to export the current pose of soft and articulated actors.
+
+    When true, the current elastic displacements of soft actors (including nested
+    soft actors of soft-skinned actors) are written to
+    :attr:`~superdex.physics.prefab.SoftActorPrefab.node_displacements`, and the
+    current joint pose of articulated actors (including soft-skinned skeletons) is
+    written to :attr:`~superdex.physics.prefab.ArticulatedActorPrefab.joint_pose`.
+    Adding the exported prefab to a scene then restores that pose. Actors exactly at
+    rest omit these fields.
+
+    Note:
+        When false (the default), soft displacement and articulated joint pose
+        fields are omitted. Actor transforms are exported regardless of this option.
+
+    Note:
+        Displacements of ROM soft actors are never exported.
+
+    Note:
+        Velocities (soft nodal and articulated joint) are never exported.
+
+    Note:
+        A prefab with exported soft displacements cannot be added to a scene with
+        ``mochi::experimental::RomParams``. Set this to false to export a prefab for
+        that use.
+
+    Warning:
+        This documentation references the following C++ API, which is not available
+        in Python: ``mochi::experimental::RomParams``.
+    """
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(
+        self,
+        exclude_actors: mochi_physics.ArrayLikeActorHandle = ...,
+        export_current_pose: bool = ...,
+    ) -> None: ...
 
 def load_from_file(prefab_path: str, root_path: str) -> ScenePrefab:
     """Fully load a :class:`~superdex.physics.prefab.ScenePrefab` from a file,
@@ -2996,8 +3293,8 @@ def add_to_scene(
 
     Creates the prefab's actors, constraints, and controllers, applies any scene
     settings enabled by
-    :attr:`~superdex.physics.prefab.PrefabParams.apply_scene_settings`, and applies
-    contact filter entries.
+    :attr:`~superdex.physics.prefab.PrefabParams.apply_scene_settings`, contact
+    filter entries, and contact-pair parameter overrides.
 
     Args:
         prefab (ScenePrefab): The fully loaded
@@ -3255,12 +3552,21 @@ def load_nested_prefabs(prefab: ScenePrefab, root_path: str) -> None:
         nested content for you.
 
     Note:
-        If called a second time, the nested prefabs will be reloaded. If your
-        intention is to avoid redundant loads, then use
-        :func:`~superdex.physics.prefab.ensure_fully_loaded` instead.
+        A reference with a non-empty path is reloaded from its file on every call. A
+        reference with an empty path must already contain a loaded prefab; this
+        function keeps that prefab and loads all prefabs nested within it. See
+        :attr:`~superdex.physics.prefab.PrefabReference.path` for when a path is
+        required. Use :func:`~superdex.physics.prefab.ensure_fully_loaded` to avoid
+        reloading prefabs that are already loaded.
 
     Note:
         A prefab must not reference itself, directly or indirectly.
+
+    Warning:
+        If this function returns an error, the input prefab may remain partially
+        loaded. A reference with a non-empty path keeps its previously loaded prefab
+        if its file or any prefab nested within it fails to load; if it had no
+        loaded prefab, it remains unloaded.
 
     See Also:
         :func:`~superdex.physics.prefab.ensure_fully_loaded`,
@@ -3340,13 +3646,31 @@ def ensure_fully_loaded(prefab: ScenePrefab, root_path: str) -> None:
     Note:
         A prefab must not reference itself, directly or indirectly.
 
+    Note:
+        If a reference already contains a loaded prefab, this function does not
+        reload its file, even when its path is non-empty; it still loads any missing
+        nested prefabs. A reference with neither a path nor a loaded prefab is
+        invalid. See :attr:`~superdex.physics.prefab.PrefabReference.path` for when
+        a path is required.
+
+    Warning:
+        If this function returns an error, the input prefab may remain partially
+        loaded. A reference that was unloaded when the call began remains unloaded
+        if its file or any prefab nested within it fails to load.
+
     See Also:
         :func:`~superdex.physics.prefab.load_nested_prefabs`,
         :func:`~superdex.physics.prefab.load_shapes`,
         :func:`~superdex.physics.prefab.add_to_scene`
     """
 
-def export_scene(scene: mochi_physics.Scene, export_name: str, output_dir: str) -> None:
+@overload
+def export_scene(
+    scene: mochi_physics.Scene,
+    export_name: str,
+    output_dir: str,
+    params: ExportParams,
+) -> None:
     """Export a :class:`~superdex.physics.Scene` to a folder containing a prefab file
     and all generated mesh files.
 
@@ -3357,6 +3681,9 @@ def export_scene(scene: mochi_physics.Scene, export_name: str, output_dir: str) 
         output_dir (str): Directory where the export folder will be created. The
             subdirectories ``<outputDir>/<exportName>`` and
             ``<outputDir>/<exportName>/generated_assets`` are created automatically.
+        params (ExportParams): Export options, see
+            :class:`~superdex.physics.prefab.ExportParams`. Can optionally be
+            omitted in Python.
 
     Raises:
         :class:`~superdex.physics.Error`: If an error occurs.
@@ -3370,14 +3697,20 @@ def export_scene(scene: mochi_physics.Scene, export_name: str, output_dir: str) 
         ones receive a numeric suffix (e.g. "box", "box1"), so an exported name may
         differ from the runtime name.
 
+    Note:
+        Scene export reconstructs supported creation and configuration data from
+        effective runtime state. It is not a lossless or structure-preserving round
+        trip of any prefab used to create the scene.
+
     Warning:
         Currently exports only rigid, soft, articulated, and soft-skinned actors.
         Constraints, pose controllers, shell, rod actors, and implicit (non-mesh)
         shapes are NOT exported.
 
     Warning:
-        For articulated actors, current joint pose and joint velocities are NOT
-        exported.
+        Velocities are NOT exported. Soft actor displacements and articulated joint
+        poses are exported only when
+        :attr:`~superdex.physics.prefab.ExportParams.export_current_pose` is true.
 
     Warning:
         Scene export does not record explicit settings that enable contact between
@@ -3388,73 +3721,39 @@ def export_scene(scene: mochi_physics.Scene, export_name: str, output_dir: str) 
         exported prefab or re-enable the pair after adding the prefab to a scene.
 
     See Also:
-        :func:`~superdex.physics.prefab.export_scene_excluding`,
+        :class:`~superdex.physics.prefab.ExportParams`,
         :func:`~superdex.physics.prefab.export_actor`
     """
 
-def export_scene_excluding(
-    scene: mochi_physics.Scene,
-    export_name: str,
-    output_dir: str,
-    exclude_actors: mochi_physics.ArrayLikeActorHandle,
-) -> None:
-    """Export a :class:`~superdex.physics.Scene` to a folder containing a prefab file
-    and all generated mesh files, omitting a caller-provided set of actors.
+@overload
+def export_scene(scene: mochi_physics.Scene, export_name: str, output_dir: str) -> None:
+    """Overload of :func:`~superdex.physics.prefab.export_scene` that uses default
+    :class:`~superdex.physics.prefab.ExportParams`.
 
     Args:
         scene (Scene): The :class:`~superdex.physics.Scene` to export.
-        export_name (str): Name for the exported prefab. Used both for the export
-            subdirectory and for the prefab filename (``<exportName>.mochi_scene``).
-        output_dir (str): Directory where the export folder will be created. The
-            subdirectories ``<outputDir>/<exportName>`` and
-            ``<outputDir>/<exportName>/generated_assets`` are created automatically.
-        exclude_actors (ArrayLikeActorHandle): Handles of actors that should not be
-            exported. Excluding an articulated actor also excludes all of its nested
-            link actors. Excluding a soft-skinned actor also excludes all of its
-            nested link and soft sub-actors. Any contact filter entries that
-            reference excluded actors are dropped.
+        export_name (str): Name for the exported prefab.
+        output_dir (str): Directory where the export folder will be created.
 
     Raises:
         :class:`~superdex.physics.Error`: If an error occurs.
 
-    Note:
-        Generated mesh files (.mochi.h5) are written under generated_assets/ and
-        referenced from the prefab using "./generated_assets/" paths.
-
-    Note:
-        Exported actor names are made unique: when two actors share a name, later
-        ones receive a numeric suffix (e.g. "box", "box1"), so an exported name may
-        differ from the runtime name.
-
-    Warning:
-        Currently exports only rigid, soft, articulated, and soft-skinned actors.
-        Constraints, pose controllers, shell, rod actors, and implicit (non-mesh)
-        shapes are NOT exported.
-
-    Warning:
-        For articulated actors, current joint pose and joint velocities are NOT
-        exported.
-
-    Warning:
-        Scene export does not record explicit settings that enable contact between
-        actor pairs. If such a setting enables contact between adjacent links of an
-        articulated or soft-skinned actor, adding the exported prefab to a scene
-        applies automatic adjacent-link filtering and disables contact for that pair
-        again. To preserve this behavior, add an equivalent enabling entry to the
-        exported prefab or re-enable the pair after adding the prefab to a scene.
-
     See Also:
-        :func:`~superdex.physics.prefab.export_scene`,
-        :func:`~superdex.physics.prefab.export_actor`
+        :func:`~superdex.physics.prefab.export_scene`
     """
 
-def export_actor(actor: mochi_physics.Actor, export_name: str, output_dir: str) -> None:
+@overload
+def export_actor(
+    actor: mochi_physics.Actor,
+    export_name: str,
+    output_dir: str,
+    params: ExportParams,
+) -> None:
     """Export a single actor to a prefab file under
     ``outputDir/exportName/<exportName>.mochi_scene``.
 
     Extracts creation parameters from the actor and writes the prefab plus any
-    generated mesh assets to disk. Only supported for standalone rigid actors, soft
-    actors and articulated actors.
+    generated mesh assets to disk.
 
     Args:
         actor (Actor): The actor to export. Must not be None.
@@ -3463,39 +3762,58 @@ def export_actor(actor: mochi_physics.Actor, export_name: str, output_dir: str) 
         output_dir (str): Parent directory for the export. The subdirectories
             ``<outputDir>/<exportName>`` and
             ``<outputDir>/<exportName>/generated_assets`` are created automatically.
+        params (ExportParams): Export options, see
+            :class:`~superdex.physics.prefab.ExportParams`. Can optionally be
+            omitted in Python.
 
     Raises:
         :class:`~superdex.physics.Error`: If an error occurs.
 
     Note:
-        Uses the same prefab export path as
-        :func:`~superdex.physics.prefab.export_scene`. In addition to the
-        soft-skinned restriction above, any limitations documented in
-        :func:`~superdex.physics.prefab.export_scene` also apply here.
+        Any limitations documented in :func:`~superdex.physics.prefab.export_scene`
+        also apply here.
 
     Note:
-        When exporting an articulated actor, pass the top-level articulated actor
-        (the one returned by
-        :meth:`~superdex.physics.Scene.create_articulated_actor` or by
-        :meth:`~superdex.physics.Actor.get_articulated_actor` on a nested link), not
-        a nested actor.
+        When exporting an articulated actor, pass the articulated actor itself (the
+        one returned by :meth:`~superdex.physics.Scene.create_articulated_actor` or
+        by :meth:`~superdex.physics.Actor.get_articulated_actor` on a nested link),
+        not a nested actor.
 
     Note:
         Generated mesh files (.mochi.h5) are written under generated_assets/ and
         referenced from the prefab using "./generated_assets/" paths.
 
     Warning:
-        Only supported for standalone rigid, soft, and articulated actors.
-        Soft-skinned actors are not supported here.
+        Only supported for standalone rigid actors, standalone soft actors, and
+        articulated actors. Soft-skinned actors are not supported.
 
     Warning:
-        Contact-filter settings are not exported. Adding an exported articulated
-        actor to a scene applies automatic adjacent-link filtering, even if contact
-        between adjacent links was explicitly enabled before export. To preserve
-        this behavior, add an equivalent enabling entry to the exported prefab or
-        re-enable the pair after adding the prefab to a scene.
+        Scene-level contact-filter settings and contact-pair parameter overrides are
+        not exported. Adding an exported articulated actor to a scene applies
+        automatic adjacent-link filtering, even if contact between adjacent links
+        was explicitly enabled before export. To preserve this behavior, add an
+        equivalent enabling entry to the exported prefab or re-enable the pair after
+        adding the prefab to a scene.
 
     See Also:
-        :func:`~superdex.physics.prefab.export_scene`,
-        :func:`~superdex.physics.prefab.export_scene_excluding`
+        :class:`~superdex.physics.prefab.ExportParams`,
+        :func:`~superdex.physics.prefab.export_scene`
+    """
+
+@overload
+def export_actor(actor: mochi_physics.Actor, export_name: str, output_dir: str) -> None:
+    """Overload of :func:`~superdex.physics.prefab.export_actor` that uses default
+    :class:`~superdex.physics.prefab.ExportParams`.
+
+    Args:
+        actor (Actor): The actor to export. Must not be None.
+        export_name (str): Label used for the actor's name, the export subdirectory,
+            and the prefab filename.
+        output_dir (str): Parent directory for the export.
+
+    Raises:
+        :class:`~superdex.physics.Error`: If an error occurs.
+
+    See Also:
+        :func:`~superdex.physics.prefab.export_actor`
     """

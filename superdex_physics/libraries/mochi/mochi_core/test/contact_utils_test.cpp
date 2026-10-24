@@ -25,10 +25,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <string>
 #include <type_traits>
@@ -36,6 +39,44 @@
 #include <vector>
 
 using namespace mochi;
+
+namespace {
+
+struct ExpectedCoalescedContactJac {
+  std::vector<std::vector<int>> indices;
+  std::vector<std::vector<Real3>> columns;
+};
+
+ExpectedCoalescedContactJac SortAndCoalesceContactJacForTest(ContactJac const& jac) {
+  ExpectedCoalescedContactJac expected;
+  expected.indices.resize(jac.nContacts);
+  expected.columns.resize(jac.nContacts);
+  int maxWidth = 0;
+  for (int contact = 0; contact < jac.nContacts; ++contact) {
+    auto const indices = jac.Inds(contact);
+    auto const columns = jac.Jac(contact);
+    std::map<int, Real3> summedColumns;
+    for (int column = 0; column < jac.nDoFsInternal; ++column) {
+      summedColumns[indices[column]] +=
+          Real3{columns(0, column), columns(1, column), columns(2, column)};
+    }
+    for (auto const& [dofIndex, sum] : summedColumns) {
+      expected.indices[contact].push_back(dofIndex);
+      expected.columns[contact].push_back(sum);
+    }
+    maxWidth = Max(maxWidth, isize(summedColumns));
+  }
+
+  for (int contact = 0; contact < jac.nContacts; ++contact) {
+    while (isize(expected.indices[contact]) < maxWidth) {
+      expected.indices[contact].push_back(expected.indices[contact].front());
+      expected.columns[contact].emplace_back();
+    }
+  }
+  return expected;
+}
+
+} // namespace
 
 // Helper to compare two ContactDetectionResult that should be equal
 static void ExpectEqualResults(
@@ -407,7 +448,7 @@ TEST(ContactPenalties, ConsistencyTests) {
   }
 }
 
-TEST(ContactPenalties, FadeFriction_DegenerateAlignmentUsesUnfadedFactor) {
+TEST(ContactPenalties, Friction_DegenerateNormalsKeepFullStrength) {
   ContactEvalConfig fadedConfig;
   fadedConfig.fadeFriction = true;
   fadedConfig.validCollidingNormals = true;
@@ -421,10 +462,11 @@ TEST(ContactPenalties, FadeFriction_DegenerateAlignmentUsesUnfadedFactor) {
   params.frictionFalloffVel = 0.01_r;
 
   real const distance[1] = {-0.001_r};
-  Real3 const distanceGrad[1] = {Real3{0_r, 0_r, 1_r}};
+  Real3 distanceGrad[1] = {Real3{0_r, 0_r, 1_r}};
+  bool isSdfGradUnitary = true;
   Real3 const normalColliding[1] = {Real3{0_r, 0_r, -1_r}};
   Real3 const posColliding[1] = {Real3{0_r, 0_r, 0_r}};
-  Real3 const posCollidingStageStart[1] = {Real3{0.001_r, 0_r, 0_r}};
+  Real3 posCollidingStageStart[1] = {Real3{0.001_r, 0_r, 0_r}};
 
   auto const eval = [&](ContactEvalConfig const& config) {
     double energy[1] = {};
@@ -446,7 +488,7 @@ TEST(ContactPenalties, FadeFriction_DegenerateAlignmentUsesUnfadedFactor) {
         true /* assemEnergy */,
         true /* assemForce */,
         false /* assemDForce */,
-        true /* isSdfGradUnitary */);
+        isSdfGradUnitary);
     return std::pair{energy[0], force[0]};
   };
 
@@ -462,6 +504,15 @@ TEST(ContactPenalties, FadeFriction_DegenerateAlignmentUsesUnfadedFactor) {
   auto const [invalidNormalEnergy, invalidNormalForce] = eval(fadedConfig);
   EXPECT_DOUBLE_EQ(unfadedEnergy, invalidNormalEnergy);
   EXPECT_NEAR_EQ(unfadedForce, invalidNormalForce);
+
+  // Without either normal, friction opposes the whole displacement, even along the former normal,
+  // and no penalty force acts.
+  distanceGrad[0] = Real3{};
+  isSdfGradUnitary = false;
+  posCollidingStageStart[0] = Real3{0_r, 0_r, 0.001_r};
+  auto const [zeroNormalEnergy, zeroNormalForce] = eval(fadedConfig);
+  EXPECT_DOUBLE_EQ(unfadedEnergy, zeroNormalEnergy);
+  EXPECT_NEAR_EQ((Real3{0_r, 0_r, unfadedForce[0]}), zeroNormalForce);
 }
 
 // Expect that two vectors point in the same direction +/- some angle
@@ -537,6 +588,66 @@ static void TestPointContacts(
 
   // Compare to the first set of results.
   ExpectEqualResults(outResult, result2, allowRotationAgnosticGsd);
+}
+
+// Match the batch size used by production code.
+// TODO[T289584846] - Adjust after AVX-512 turning.
+constexpr int kPointContactBatchSize =
+    Max(4, MOCHI_ARCH_ARM_NEON ? (2 * Simd<real>::kSize) : Simd<real>::kSize);
+
+template <class ShapeT, class MakePoint, class Verify>
+void TestEveryPointContactTail(ShapeT const& shape, MakePoint makePoint, Verify verify) {
+  for (int count = 1; count <= kPointContactBatchSize; ++count) {
+    DynamicArray<Real3> points;
+    points.resize_noinit(count);
+    for (int i = 0; i < count; ++i) {
+      points[i] = makePoint(i);
+    }
+
+    ContactDetectionResult result;
+    TestPointContactsImpl(points, shape, {}, TransformRT{}, result);
+    ASSERT_EQ(static_cast<size_t>(count), result.sampleIndices.size());
+    ASSERT_EQ(static_cast<size_t>(count), result.posColliding.size());
+    ASSERT_EQ(static_cast<size_t>(count), result.sdfInfo.size());
+    for (int i = 0; i < count; ++i) {
+      EXPECT_EQ(i, result.sampleIndices[i]);
+      EXPECT_NEAR_EQ(points[i], result.posColliding[i]);
+      verify(points[i], result.sdfInfo.val[i], result.sdfInfo.grad[i]);
+    }
+  }
+}
+
+TEST(MochiContact, FindPointContacts_PlaneEveryTailSize) {
+  Plane const plane{Real3{0_r, 1_r, 0_r}, 0_r};
+  TestEveryPointContactTail(
+      plane,
+      [](int i) { return Real3{static_cast<real>(i) * 0.01_r, -0.5_r, 0.25_r}; },
+      [](Real3 const&, real sdf, Real3 const& gradient) {
+        EXPECT_NEAR_EQ(-0.5_r, sdf);
+        EXPECT_NEAR_EQ((Real3{0_r, 1_r, 0_r}), gradient);
+      });
+}
+
+TEST(MochiContact, FindPointContacts_SphereEveryTailSize) {
+  Sphere const sphere{Real3{}, 2_r};
+  TestEveryPointContactTail(
+      sphere,
+      [](int i) { return Real3{1_r + static_cast<real>(i) * 0.01_r, 0_r, 0_r}; },
+      [](Real3 const& point, real sdf, Real3 const& gradient) {
+        EXPECT_NEAR_EQ(point[0] - 2_r, sdf);
+        EXPECT_NEAR_EQ((Real3{1_r, 0_r, 0_r}), gradient);
+      });
+}
+
+TEST(MochiContact, FindPointContacts_ObbEveryTailSize) {
+  Obb const box{TransformRT{}, Real3{2_r, 2_r, 2_r}};
+  TestEveryPointContactTail(
+      box,
+      [](int i) { return Real3{1_r + static_cast<real>(i) * 0.01_r, 0.2_r, 0.3_r}; },
+      [](Real3 const& point, real sdf, Real3 const& gradient) {
+        EXPECT_NEAR_EQ(point[0] - 2_r, sdf);
+        EXPECT_NEAR_EQ((Real3{1_r, 0_r, 0_r}), gradient);
+      });
 }
 
 // Used for Obb and for box-shaped meshes.
@@ -991,6 +1102,104 @@ TEST(MochiContact, FindPointContacts_GridSdf) {
       kExpectUnitNormal);
 }
 
+// A point's contact position must not depend on whether it lands in a full batch, the tail, or a
+// buffer flushed early or at the end, because friction compares it bit for bit with the position
+// from the stage-start pass, which repeats the query on a subset of the points. Distances and
+// gradients only need to agree within rounding.
+template <typename ShapeT>
+static void TestPointContactsIndependentOfBatchPosition(
+    ShapeT const& shape,
+    Real3 const& sampleCenterInCollider,
+    Real3 const& sampleHalfExtents) {
+  // Far from the origin, where rounding differences are large.
+  TransformRT const pointsFromCollider{
+      Quaternion::FromRotationVector(Real3{0.31_r, -0.58_r, 0.24_r}), Real3{0.1_r, 0.2_r, -32.1_r}};
+  ContactDetectionParams params;
+  params.tolerance = kInf;
+
+  // Enough points for several buffer and queue flushes, plus a tail.
+  constexpr int kNumPoints = 1100;
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<real> unit(-1_r, 1_r);
+  DynamicArray<Real3> points(kNumPoints);
+  for (auto& point : points) {
+    Real3 const offset{unit(rng), unit(rng), unit(rng)};
+    point = pointsFromCollider.TransformPoint(sampleCenterInCollider + offset * sampleHalfExtents);
+  }
+
+  auto query = [&](Span<Real3 const> queryPoints, ContactDetectionResult& outResult) {
+    FindPointContactsT(
+        queryPoints,
+        &shape,
+        params,
+        pointsFromCollider,
+        outResult.sampleIndices,
+        outResult.posColliding,
+        outResult.sdfInfo,
+        outResult.isSdfGradUnitary);
+  };
+
+  ContactDetectionResult all;
+  query(points, all);
+  ASSERT_EQ(all.sampleIndices.size(), points.size());
+
+  // A few ulp at the sample points' distance from the origin.
+  constexpr real kTolerance = 16_r * 32_r * std::numeric_limits<real>::epsilon();
+  int numMismatches = 0;
+  for (int i = 0; i < kNumPoints; ++i) {
+    ContactDetectionResult single;
+    query(Span<Real3 const>{&points[i], 1}, single);
+    ASSERT_EQ(single.sampleIndices.size(), size_t{1});
+    numMismatches +=
+        std::memcmp(&all.posColliding[i], &single.posColliding[0], sizeof(Real3)) != 0 ? 1 : 0;
+    EXPECT_NEAR_TOL(all.sdfInfo.val[i], single.sdfInfo.val[0], kTolerance) << "point " << i;
+    EXPECT_NEAR_TOL(all.sdfInfo.grad[i], single.sdfInfo.grad[0], kTolerance) << "point " << i;
+  }
+  EXPECT_EQ(numMismatches, 0) << numMismatches << " of " << kNumPoints << " positions differ";
+}
+
+// The flat colliders' top face is at y = 0, near z = 32 m.
+static constexpr Real3 kFarTopFaceCenter{0_r, 0_r, 32_r};
+static constexpr Real3 kFarTopFaceSampleHalfExtents{0.9_r, 0.1_r, 0.9_r};
+
+static std::shared_ptr<TriangularMesh const> CreateFarGroundMesh() {
+  return CreateTriangularMeshBox(Quaternion{}, Real3{0_r, -0.5_r, 32_r}, Real3{1_r, 0.5_r, 1_r});
+}
+
+TEST(MochiContact, FindPointContacts_PlaneIndependentOfBatchPosition) {
+  TestPointContactsIndependentOfBatchPosition(
+      Plane{Real3{0_r, 1_r, 0_r}, 0_r}, kFarTopFaceCenter, kFarTopFaceSampleHalfExtents);
+}
+
+TEST(MochiContact, FindPointContacts_SphereIndependentOfBatchPosition) {
+  TestPointContactsIndependentOfBatchPosition(
+      Sphere{Real3{0_r, -1_r, 32_r}, 1_r}, kFarTopFaceCenter, Real3{0.3_r, 0.1_r, 0.3_r});
+}
+
+TEST(MochiContact, FindPointContacts_ObbIndependentOfBatchPosition) {
+  TestPointContactsIndependentOfBatchPosition(
+      Obb{TransformRT{Quaternion::RotationY(0.37_r), Real3{0_r, -0.5_r, 32_r}},
+          Real3{1_r, 0.5_r, 1_r}},
+      kFarTopFaceCenter,
+      kFarTopFaceSampleHalfExtents);
+}
+
+TEST(MochiContact, FindPointContacts_MeshIndependentOfBatchPosition) {
+  MeshCollider collider{CreateFarGroundMesh()};
+  collider.Initialize();
+  TestPointContactsIndependentOfBatchPosition(
+      collider, kFarTopFaceCenter, kFarTopFaceSampleHalfExtents);
+}
+
+TEST(MochiContact, FindPointContacts_GridSdfIndependentOfBatchPosition) {
+  GridSdfParams params;
+  params.resolutionMode = GridSdfResolutionMode::Explicit;
+  params.resolutionDelta = {0.05_r, 0.05_r, 0.05_r};
+  GridSdf const collider(CreateFarGroundMesh(), params, test::ExpectOK{});
+  TestPointContactsIndependentOfBatchPosition(
+      collider, kFarTopFaceCenter, kFarTopFaceSampleHalfExtents);
+}
+
 TEST(MochiContact, FindPointContacts_Sphere) {
   constexpr Real3 kCenter = {1_r, 2_r, 3_r};
   constexpr real kRadius = 0.5_r;
@@ -1085,7 +1294,7 @@ TEST(MochiContact, FindPointContactsParallel) {
   auto rng = RandomGenerator(42);
   std::uniform_real_distribution<real> range(-1_r, 1_r);
   constexpr size_t kNumPoints = 999;
-  std::vector<Real3> points;
+  DynamicArray<Real3> points;
   points.reserve(kNumPoints);
   for (size_t i = 0; i < kNumPoints; ++i) {
     points.push_back(kCenter + Real3{range(rng), range(rng), range(rng)});
@@ -1127,28 +1336,24 @@ TEST(MochiContact, FindPointContactsParallel) {
 }
 
 TEST(MeshCollider, MeshCollider_Remesh) {
-  auto testMeshCollider = [&](Span<Real3 const> coords,
-                              Span<Int3 const> tris,
-                              bool enableStitching,
-                              bool expectTrue,
-                              bool disableLogging) {
-    auto logCallback = GetLogCallback();
-    if (disableLogging) {
-      SetLogCallback(nullptr);
-    }
-    auto mesh = std::make_shared<TriangularMesh const>(coords, tris);
-    MeshCollider collider{mesh};
-    bool allowRefitting = !enableStitching;
-    collider.Initialize(allowRefitting);
-    if (disableLogging) {
-      SetLogCallback(logCallback);
-    }
-    EXPECT_TRUE(IsMeshClosed(collider.GetHalfEdge()) == expectTrue);
-  };
+  auto testMeshCollider =
+      [&](Span<Real3 const> coords, Span<Int3 const> tris, bool expectTrue, bool disableLogging) {
+        auto logCallback = GetLogCallback();
+        if (disableLogging) {
+          SetLogCallback(nullptr);
+        }
+        auto mesh = std::make_shared<TriangularMesh const>(coords, tris);
+        MeshCollider collider{mesh};
+        collider.Initialize();
+        if (disableLogging) {
+          SetLogCallback(logCallback);
+        }
+        EXPECT_TRUE(IsMeshClosed(collider.GetHalfEdge()) == expectTrue);
+      };
 
   // Test a closed mesh
   auto&& [coords, tris] = test::CreateMinimalTriMeshUnitCube();
-  testMeshCollider(coords, tris, false, true, false);
+  testMeshCollider(coords, tris, true, false);
 
   // Replicate one of the vertices in the mesh
   coords.push_back(coords[0]);
@@ -1167,49 +1372,216 @@ TEST(MeshCollider, MeshCollider_Remesh) {
     }
   }
 
-  // Allow mesh stitching and validate that it's closed
-  testMeshCollider(coords, tris, true, true, false);
-
-  // Dot not allow mesh stitching and validate that it's open
-  testMeshCollider(coords, tris, false, false, true);
+  // Stitching closes the mesh
+  testMeshCollider(coords, tris, true, false);
 
   // Create a degenerate triangle; stitching won't help
   tris.push_back({0, 0, 1});
-  testMeshCollider(coords, tris, true, false, true);
+  testMeshCollider(coords, tris, false, true);
 
   // Confirm that the mesh still works after removing the degenerate triangle
   tris.pop_back();
-  testMeshCollider(coords, tris, true, true, false);
+  testMeshCollider(coords, tris, true, false);
 
   // Move the replicated vertex; stitching won't help
   coords.back()[0] += 1_r;
-  testMeshCollider(coords, tris, true, false, true);
+  testMeshCollider(coords, tris, false, true);
+}
+
+TEST(ContactJac, CoalesceColumnsByCachedMapping) {
+  int constexpr kNumContacts = 3;
+  int constexpr kSourceStride = 3;
+  int constexpr kOldWidth = 3 * kSourceStride;
+  int constexpr kNewWidth = 4;
+  int constexpr kDofOffset = 11;
+  std::array<int, kNumContacts> const sampleIndices = {1, 2, 0};
+
+  ContactJacColumnCoalescingMap mapping;
+  mapping.sourceBlockCount = 3;
+  mapping.samplesPerElement = 2;
+  mapping.elementDofOffsets = {0, 4, 7};
+  mapping.elementDofIndices = {2, 3, 5, 7, 4, 8, 9};
+  mapping.elementSourceContributionOffsets = {0, 2, 4, 6, 7, 10, 11};
+  mapping.elementSourceContributionDstColumns = {0, 2, 1, 2, 0, 3, 0, 0, 1, 2, 1};
+
+  auto initializeWideJacobian = [&](ContactJac& jac) {
+    jac.Resize(false, false, kOldWidth, kNumContacts);
+    for (int contact = 0; contact < kNumContacts; ++contact) {
+      int const elementIndex = sampleIndices[contact] / mapping.samplesPerElement;
+      auto const elementDofs = mapping.ElementDofIndices(elementIndex);
+      auto indices = jac.Inds(contact);
+      auto values = jac.Jac(contact);
+      for (int sourceBlock = 0; sourceBlock < mapping.sourceBlockCount; ++sourceBlock) {
+        auto const destinations = mapping.SourceContributionDstColumns(elementIndex, sourceBlock);
+        ASSERT_FALSE(destinations.empty());
+        for (int localEntry = 0; localEntry < kSourceStride; ++localEntry) {
+          int const sourceColumn = sourceBlock * kSourceStride + localEntry;
+          int const destination = destinations[Min(localEntry, isize(destinations) - 1)];
+          indices[sourceColumn] = elementDofs[destination] + kDofOffset;
+          if (localEntry < isize(destinations)) {
+            real const value = 100_r * contact + 10_r * sourceBlock + localEntry + 1_r;
+            for (int component = 0; component < ContactJac::kDofsPerNode; ++component) {
+              values(component, sourceColumn) = value + component;
+            }
+          } else {
+            values.Col(sourceColumn).SetZero();
+          }
+        }
+      }
+    }
+  };
+
+  ContactJac cached;
+  ContactJac repeated;
+  initializeWideJacobian(cached);
+  initializeWideJacobian(repeated);
+  auto const expected = SortAndCoalesceContactJacForTest(cached);
+  auto const* const indicesData = cached.Inds(0).data();
+  auto const* const jacData = cached.Jac(0).data();
+
+  cached.CoalesceColumnsByCachedMapping(mapping, sampleIndices, kDofOffset);
+  repeated.CoalesceColumnsByCachedMapping(mapping, sampleIndices, kDofOffset);
+
+  EXPECT_EQ(kNewWidth, cached.nDoFsInternal);
+  EXPECT_EQ(kNewWidth, cached.nDoFsState);
+  EXPECT_EQ(indicesData, cached.Inds(0).data());
+  EXPECT_EQ(jacData, cached.Jac(0).data());
+  EXPECT_FALSE(cached.groupsInitialized);
+  for (int contact = 0; contact < kNumContacts; ++contact) {
+    EXPECT_SPAN_EQ(MakeConstSpan(expected.indices[contact]), cached.Inds(contact));
+    EXPECT_SPAN_EQ(cached.Inds(contact), repeated.Inds(contact));
+    for (int column = 0; column < kNewWidth; ++column) {
+      Real3 const cachedColumn = {
+          cached.Jac(contact)(0, column),
+          cached.Jac(contact)(1, column),
+          cached.Jac(contact)(2, column),
+      };
+      EXPECT_NEAR_EQ(expected.columns[contact][column], cachedColumn);
+      for (int component = 0; component < ContactJac::kDofsPerNode; ++component) {
+        EXPECT_EQ(cached.Jac(contact)(component, column), repeated.Jac(contact)(component, column));
+      }
+    }
+  }
+
+  std::array<int, kNewWidth> const paddedElementIndices = {15, 19, 20, 15};
+  EXPECT_SPAN_EQ(MakeConstSpan(paddedElementIndices), cached.Inds(1));
+  Real3 const paddedColumn = {
+      cached.Jac(1)(0, kNewWidth - 1),
+      cached.Jac(1)(1, kNewWidth - 1),
+      cached.Jac(1)(2, kNewWidth - 1),
+  };
+  EXPECT_EQ(Real3{}, paddedColumn);
+
+  // The same map must also work when the query omits the wider second element, reducing the source
+  // stride from three to two.
+  int constexpr kLowStride = 2;
+  std::array<int, 2> const lowStrideSampleIndices = {0, 1};
+  ContactJac lowStrideCached;
+  auto initializeLowStrideJacobian = [&](ContactJac& jac) {
+    jac.Resize(false, false, mapping.sourceBlockCount * kLowStride, isize(lowStrideSampleIndices));
+    for (int contact = 0; contact < isize(lowStrideSampleIndices); ++contact) {
+      auto indices = jac.Inds(contact);
+      auto values = jac.Jac(contact);
+      auto const elementDofs = mapping.ElementDofIndices(0);
+      for (int sourceBlock = 0; sourceBlock < mapping.sourceBlockCount; ++sourceBlock) {
+        auto const destinations = mapping.SourceContributionDstColumns(0, sourceBlock);
+        ASSERT_EQ(kLowStride, isize(destinations));
+        for (int localEntry = 0; localEntry < kLowStride; ++localEntry) {
+          int const sourceColumn = sourceBlock * kLowStride + localEntry;
+          indices[sourceColumn] = elementDofs[destinations[localEntry]] + kDofOffset;
+          for (int component = 0; component < ContactJac::kDofsPerNode; ++component) {
+            values(component, sourceColumn) =
+                100_r * contact + 10_r * sourceBlock + localEntry + component;
+          }
+        }
+      }
+    }
+  };
+  initializeLowStrideJacobian(lowStrideCached);
+  auto const lowStrideExpected = SortAndCoalesceContactJacForTest(lowStrideCached);
+  lowStrideCached.CoalesceColumnsByCachedMapping(mapping, lowStrideSampleIndices, kDofOffset);
+  for (int contact = 0; contact < isize(lowStrideSampleIndices); ++contact) {
+    EXPECT_SPAN_EQ(
+        MakeConstSpan(lowStrideExpected.indices[contact]), lowStrideCached.Inds(contact));
+    for (int column = 0; column < lowStrideCached.nDoFsInternal; ++column) {
+      Real3 const actualColumn = {
+          lowStrideCached.Jac(contact)(0, column),
+          lowStrideCached.Jac(contact)(1, column),
+          lowStrideCached.Jac(contact)(2, column),
+      };
+      EXPECT_NEAR_EQ(lowStrideExpected.columns[contact][column], actualColumn);
+    }
+  }
+
+  cached.CompressIndices();
+  EXPECT_TRUE(cached.groupsInitialized);
+  for (int contact = 0; contact < kNumContacts; ++contact) {
+    int groupedColumns = 0;
+    for (IndexGroup const& group : cached.IndGroups(contact)) {
+      groupedColumns += group.count;
+    }
+    EXPECT_EQ(kNewWidth, groupedColumns);
+  }
+}
+
+TEST(ContactJac, CoalesceColumnsByCachedMappingWithNoContacts) {
+  ContactJacColumnCoalescingMap mapping;
+  mapping.sourceBlockCount = 3;
+  mapping.samplesPerElement = 1;
+  mapping.elementDofOffsets = {0, 1};
+  mapping.elementDofIndices = {2};
+  mapping.elementSourceContributionOffsets = {0, 1, 2, 3};
+  mapping.elementSourceContributionDstColumns = {0, 0, 0};
+
+  ContactJac jac;
+  jac.Resize(false, false, 3, 1);
+  auto const* const indicesData = jac.Inds(0).data();
+  auto const* const jacData = jac.Jac(0).data();
+  jac.Resize(false, false, 3, 0);
+
+  std::array<int, 0> const sampleIndices{};
+  jac.CoalesceColumnsByCachedMapping(mapping, sampleIndices, 0);
+
+  EXPECT_EQ(0, jac.nDoFsInternal);
+  EXPECT_EQ(0, jac.nDoFsState);
+  EXPECT_EQ(0, jac.nContacts);
+  EXPECT_FALSE(jac.groupsInitialized);
+  jac.Resize(false, false, 3, 1);
+  EXPECT_EQ(indicesData, jac.Inds(0).data());
+  EXPECT_EQ(jacData, jac.Jac(0).data());
 }
 
 TEST(ContactJac, Move) {
-  int nDoFsInternal = 3;
-  int nDoFsState = 6;
-  int nContacts = 10;
+  constexpr int kNDoFsState = 8;
+  int const nContacts = 10;
+  RowMatrix<real, RigidSize::kDAll> const jacAux(RigidSize::kDAll, kNDoFsState);
+  std::array<int, kNDoFsState> dofsAux{};
+  std::iota(dofsAux.begin(), dofsAux.end(), 0);
+  int const kInternalDofOffset = 12;
   for (bool sharedDoFs : {true, false}) {
     for (bool sharedJacs : {true, false}) {
+      // Auxiliary Jacobians require shared DoFs.
+      int const nDoFsInternal = sharedDoFs ? RigidSize::kDAll : kNDoFsState;
+      int const internalDofOffset = sharedDoFs ? kInternalDofOffset : kSentinelIndex;
       ContactJac jac0;
-      jac0.Resize(sharedDoFs, sharedJacs, nDoFsInternal, nDoFsState, nContacts);
+      jac0.Resize(sharedDoFs, sharedJacs, nDoFsInternal, nContacts);
+      if (sharedDoFs) {
+        jac0.SetJacAux(jacAux, 0, dofsAux, internalDofOffset);
+      }
       auto const* jacsData = jac0.Jac(0).data();
       auto const* indsData = jac0.Inds(0).data();
 
       jac0.CompressIndices();
       auto const* indGroupsData = jac0.IndGroups(0).data();
-
-      Matrix<real> jacAux(nDoFsInternal, nDoFsState);
-      jac0.SetJacAuxView(jacAux);
       auto const* jacAuxData = jac0.JacAux().data();
 
       auto runChecks = [&](auto const& jac) {
         EXPECT_EQ(sharedDoFs, jac.hasSharedDoFs);
         EXPECT_EQ(sharedJacs, jac.hasSharedJacs);
         EXPECT_EQ(nDoFsInternal, jac.nDoFsInternal);
-        EXPECT_EQ(nDoFsState, jac.nDoFsState);
+        EXPECT_EQ(kNDoFsState, jac.nDoFsState);
         EXPECT_EQ(nContacts, jac.nContacts);
+        EXPECT_EQ(internalDofOffset, jac.internalDofOffset);
         EXPECT_TRUE(jac.groupsInitialized);
         EXPECT_EQ(jacsData, jac.Jac(0).data()); // Data must be moved
         EXPECT_EQ(indsData, jac.Inds(0).data()); // Data must be moved
@@ -1227,4 +1599,31 @@ TEST(ContactJac, Move) {
       runChecks(jac2);
     }
   }
+}
+
+TEST(ContactJac, SetJacAux) {
+  constexpr int kNumContacts = 3;
+  constexpr int kDofOffset = 10;
+  constexpr int kInternalDofOffset = 12;
+  std::array<int, 8> const dofsAux{0, 1, 2, 5, 6, 7, 8, 9};
+  RowMatrix<real, RigidSize::kDAll> const jacAux(RigidSize::kDAll, isize(dofsAux));
+  ContactJac jac;
+  jac.Resize(true, false, RigidSize::kDAll, kNumContacts);
+  auto const* const jacsData = jac.Jac(0).data();
+
+  jac.SetJacAux(jacAux, kDofOffset, dofsAux, kInternalDofOffset);
+
+  std::array<int, 8> const expectedInds{10, 11, 12, 15, 16, 17, 18, 19};
+  EXPECT_SPAN_EQ(MakeConstSpan(expectedInds), jac.Inds(0));
+  EXPECT_EQ(RigidSize::kDAll, jac.nDoFsInternal);
+  EXPECT_EQ(isize(dofsAux), jac.nDoFsState);
+  EXPECT_EQ(kInternalDofOffset, jac.internalDofOffset);
+  EXPECT_EQ(jacAux.data(), jac.JacAux().data());
+  EXPECT_EQ(jacsData, jac.Jac(0).data()); // The rigid Jacobian blocks are kept
+
+  // Resizing removes the auxiliary Jacobian.
+  jac.Resize(true, false, RigidSize::kDAll, kNumContacts);
+  EXPECT_TRUE(jac.JacAux().empty());
+  EXPECT_EQ(kSentinelIndex, jac.internalDofOffset);
+  EXPECT_EQ(RigidSize::kDAll, jac.nDoFsState);
 }

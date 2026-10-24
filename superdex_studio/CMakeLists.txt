@@ -13,8 +13,9 @@
 # limitations under the License.
 
 # superdex_studio is a Filament-based editor app. Its sources live under src/. Following the Buck
-# build (superdex_studio/BUCK), it is split into a static library (superdex_studio_static) holding
-# all non-main sources and a thin executable (superdex_studio) that links it. See below.
+# build (superdex_studio/BUCK), it is split into the mesh-processing library
+# (superdex_studio_processing, src/meshing/), a static library (superdex_studio_static) holding the
+# other non-main sources, and a thin executable (superdex_studio) that links them. See below.
 
 #-----------------------------------------------------------------------------
 # imguizmo (transform gizmo)
@@ -47,6 +48,63 @@ if (NOT TARGET imguizmo)
 endif ()
 
 #-----------------------------------------------------------------------------
+# superdex_studio_processing – the Model Editor's mesh-processing stack
+#-----------------------------------------------------------------------------
+
+# Mirrors the Buck target of the same name: everything under src/meshing/, which needs no window,
+# GL context or file dialog, so a stack can be processed without the GUI. Unlike the app's glob
+# below it keeps /internal/ paths, as Buck does, so both build the same sources.
+file(GLOB_RECURSE _studio_processing_srcs
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/meshing/*.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/meshing/*.h"
+)
+
+add_library(superdex_studio_processing STATIC ${_studio_processing_srcs})
+
+target_include_directories(superdex_studio_processing PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+target_link_libraries(superdex_studio_processing
+    PUBLIC
+        mochi_core
+        mochi_physics
+        mochi_renderer
+        superdex_robotics
+        mochi_mesh
+        picojson
+        simple_reflection
+        imguios_fonts
+)
+
+# The same Dear ImGui build as the imguios variant superdex_studio_static links below.
+if (APPLE)
+    target_link_libraries(superdex_studio_processing PUBLIC imgui_metal)
+else ()
+    target_link_libraries(superdex_studio_processing PUBLIC imgui)
+endif ()
+
+target_compile_definitions(superdex_studio_processing
+    PRIVATE
+        FILAMENT_DISABLE_MATOPT=0
+        IMGUI_DEFINE_MATH_OPERATORS
+        MOCHI_USE_REFLECTION=1
+)
+
+if (MSVC)
+    # See superdex_studio_static below.
+    target_compile_options(superdex_studio_processing PRIVATE
+        "/FI${SUPERDEX_MOCHI_SOURCE_DIR}/mochi_renderer/include/mochi_renderer/windows_compat.h")
+endif ()
+
+mochi_set_compiler_options(superdex_studio_processing)
+mochi_set_output_directories(superdex_studio_processing)
+
+if (MOCHI_BUILD_SHARED)
+    set_target_properties(superdex_studio_processing PROPERTIES
+        POSITION_INDEPENDENT_CODE ${MOCHI_BUILD_SHARED}
+    )
+endif ()
+
+#-----------------------------------------------------------------------------
 # superdex_studio_static – static library containing all non-main sources
 #-----------------------------------------------------------------------------
 
@@ -56,6 +114,7 @@ file(GLOB_RECURSE _studio_static_srcs
     "${CMAKE_CURRENT_SOURCE_DIR}/src/*.h"
 )
 list(FILTER _studio_static_srcs EXCLUDE REGEX "/internal/")
+list(FILTER _studio_static_srcs EXCLUDE REGEX "/src/meshing/")
 # Exclude the entry point – matches Buck's exclude = ["app/main.cpp"]
 list(FILTER _studio_static_srcs EXCLUDE REGEX "/app/main\\.cpp$")
 
@@ -74,6 +133,7 @@ target_include_directories(superdex_studio_static SYSTEM PUBLIC "${CMAKE_CURRENT
 # PUBLIC so that consumers (the superdex_studio executable) inherit its link dependencies.
 target_link_libraries(superdex_studio_static
     PUBLIC
+        superdex_studio_processing
         mochi_core
         mochi_physics
         mochi_renderer
@@ -185,3 +245,4 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/assets"
     DESTINATION . COMPONENT superdex_studio)
 
 unset(_studio_static_srcs)
+unset(_studio_processing_srcs)

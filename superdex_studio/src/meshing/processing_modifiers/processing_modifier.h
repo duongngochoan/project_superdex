@@ -154,6 +154,9 @@ class MeshProcessingModifier {
   void RefreshAutoExportPath(std::string const& sourceFilePath) {
     ActiveMethod().RefreshAutoExportPath(sourceFilePath);
   }
+  void OverrideExportPath(std::string const& path) {
+    ActiveMethod().OverrideExportPath(path);
+  }
   std::optional<mochi::Real3> PreferredDisplayColor() const {
     return ActiveMethod().PreferredDisplayColor();
   }

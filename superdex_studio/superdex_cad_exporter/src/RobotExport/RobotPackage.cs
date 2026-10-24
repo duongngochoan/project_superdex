@@ -23,6 +23,7 @@ THE SOFTWARE.
 
 using System.IO;
 
+using CADRobotExporter.Export;
 using CADRobotExporter.UI;
 
 namespace CADRobotExporter.RobotExport

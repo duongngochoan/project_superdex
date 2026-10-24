@@ -29,16 +29,15 @@ inline void TransformSRT::WarnIfRotationNotNormalized() const {
   // MOCHI_ASSERT_VERBOSE because we don't want it to be fatal, especially in external code.
 #if MOCHI_ASSERT_VERBOSE_ENABLED && MOCHI_LOG_ENABLED
   auto norm = Norm(_rotation);
-  if (!NearEqual(norm, 1_r, kQuaternionTol))
-    MOCHI_UNLIKELY {
-      MOCHI_LOG_WARNING(
-          "TransformSRT expects a unit length quaternion, but got [%g, %g, %g, %g] (magnitude %g).",
-          _rotation.data[0],
-          _rotation.data[1],
-          _rotation.data[2],
-          _rotation.data[3],
-          norm);
-    }
+  if (!NearEqual(norm, 1_r, kQuaternionTol)) MOCHI_UNLIKELY {
+    MOCHI_LOG_WARNING(
+        "TransformSRT expects a unit length quaternion, but got [%g, %g, %g, %g] (magnitude %g).",
+        _rotation.data[0],
+        _rotation.data[1],
+        _rotation.data[2],
+        _rotation.data[3],
+        norm);
+  }
 #endif
 }
 

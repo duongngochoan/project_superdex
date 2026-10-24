@@ -50,7 +50,8 @@ ImFont* dbg::GetTerminalFont() {
 
 // Draws the scrolling log output. Caller is responsible for pushing the desired terminal font
 // before invoking (BuildTerminalPanel does so for the whole panel).
-static void BuildLogOutput(LogView& logView, float reservedFooterHeight) {
+static void
+BuildLogOutput(LogView& logView, TerminalPanelState& terminal, float reservedFooterHeight) {
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
   MOCHI_DEFER(ImGui::PopStyleVar(2));
@@ -69,6 +70,11 @@ static void BuildLogOutput(LogView& logView, float reservedFooterHeight) {
     if (ImGui::MenuItem("Clear")) {
       logView.Clear();
     }
+    ImGui::Separator();
+    ImGui::MenuItem(
+        "Bring to Foreground on Error/Warning",
+        nullptr,
+        &terminal.bringToForegroundOnErrorOrWarning);
   }
 
   // The store is bounded (see LogView::kMaxEntries), so simply render every retained entry.
@@ -144,7 +150,7 @@ void dbg::BuildTerminalPanel(UiState& state) {
   // Reserve space at the bottom for the single command input row.
   float const footerHeight = ImGui::GetFrameHeightWithSpacing();
 
-  BuildLogOutput(state.logView, footerHeight);
+  BuildLogOutput(state.logView, state.terminal, footerHeight);
 
   std::string const prompt = state.client ? state.client->GetCommandPrompt() : std::string{};
   std::string const promptText = prompt + "> ";

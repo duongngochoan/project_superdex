@@ -16,7 +16,7 @@
 
 #include "meshing/processing_modifiers/remesh_params_ui.h"
 
-#include <imguios/imguios.h>
+#include <imgui.h>
 
 #include <algorithm>
 

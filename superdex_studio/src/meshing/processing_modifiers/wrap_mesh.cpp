@@ -18,7 +18,7 @@
 
 #include "meshing/processing_modifiers/remesh_params_ui.h"
 
-#include <imguios/imguios.h>
+#include <imgui.h>
 
 #include <mochi_mesh/step_mesh_stages.h> // CloseMesh / MeshClosureParams / MeshClosureMode
 #include <mochi_mesh/surface_remeshing.h> // RemeshSurface / SurfaceRemeshingParams

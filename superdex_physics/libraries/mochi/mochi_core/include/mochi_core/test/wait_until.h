@@ -34,7 +34,11 @@ namespace mochi::test {
  */
 template <typename Predicate>
 bool WaitUntil(Predicate&& pred, float timeoutSec = 60.0f, bool failOnTimeout = true) {
-  auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<float>(timeoutSec);
+  // The explicit deadline type keeps it in clock ticks. A float time point would round it to about
+  // 0.27 s after a month of uptime.
+  auto const timeout = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<float>(timeoutSec));
+  std::chrono::steady_clock::time_point const deadline = std::chrono::steady_clock::now() + timeout;
   while (std::chrono::steady_clock::now() < deadline) {
     if (pred()) {
       return true;

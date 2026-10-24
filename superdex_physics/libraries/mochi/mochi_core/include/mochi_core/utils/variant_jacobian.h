@@ -164,10 +164,9 @@ class VariantJacobian {
     MOCHI_ASSERT(
         std::holds_alternative<MatrixBlockDiag>(_value),
         "This overload can only be used for block diagonal jacobians");
-    if (input.NumNonZeros() == 0)
-      MOCHI_UNLIKELY {
-        return;
-      }
+    if (input.NumNonZeros() == 0) MOCHI_UNLIKELY {
+      return;
+    }
     auto const& J = std::get<MatrixBlockDiag>(_value);
     constexpr int kMinFlopsPerTask = 500000; // 50 μs @ 10 GFLOPs
     auto const numFlopsPerBlockRow =
@@ -180,9 +179,13 @@ class VariantJacobian {
         minBlockRowsPerTask,
         INT_MAX,
         [&](int brBegin, int brEnd) {
+          int maxNumBlockCols = 0;
+          for (int br = brBegin; br < brEnd; ++br) {
+            maxNumBlockCols = Max(maxNumBlockCols, isize(input.Indices(br)));
+          }
           // Use stack memory if there are <= 100 non-zero blocks per row.
           MOCHI_FILO_STACK_ALLOCATOR(tmpAlloc, 3 * 3 * 100 * sizeof(real));
-          DynamicArray<real> buffer(3 * input.MaxNnzPerRow(), &tmpAlloc);
+          DynamicArray<real> buffer(3 * 3 * maxNumBlockCols, &tmpAlloc);
           for (int br = brBegin; br < brEnd; ++br) {
             MOCHI_ASSERT_VERBOSE(output.Values(br).NumBlocks() == input.Values(br).NumBlocks());
             auto indices = input.Indices(br);

@@ -39,7 +39,7 @@ class BotAsset : public Asset, public IAssetReferencer {
   bool RendersThumbnail() const override;
   void StageThumbnailScene(mochi_renderer::Scene& scene) override;
   bool IsSavable() const override;
-  bool Save() const override;
+  bool Save() override;
   void ShowAssetTileTooltipItems() const override;
   std::unique_ptr<AssetEditor> CreateEditor(SuperDexStudio* studio) override;
 

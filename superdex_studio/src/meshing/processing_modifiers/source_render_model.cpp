@@ -16,11 +16,9 @@
 
 #include "meshing/processing_modifiers/source_render_model.h"
 
-#include "app/app.h" // AssetType, AssetManager, SuperDexStudio
 #include "meshing/processing_modifiers/processing_mesh_utils.h" // LoadRenderMesh
-#include "ui/imgui_widgets.h" // ImGui::AssetSlot
 
-#include <imguios/imguios.h>
+#include <imgui.h>
 
 #include <mochi_core/utils/dynamic_string.h>
 
@@ -94,16 +92,10 @@ class RenderFromFileMethod : public ReflectedMethod<RenderFileSourceProps> {
     return {"path"};
   }
   void ShowParams(ModifierGuiContext const& gui) override {
-    if (gui.studio == nullptr || gui.assetManager == nullptr) {
+    if (!gui.host) {
       return;
     }
-    ImGui::AssetSlot(
-        "##rendersocket",
-        _props.path,
-        *gui.assetManager,
-        gui.studio,
-        AssetType::RenderModel,
-        /*acceptDragDropPayload=*/true);
+    gui.host->ModelSlot("##rendersocket", _props.path, ModelSlotType::RenderModel);
     gui.tooltip(
         "Drop a Render Model here (e.g. an .obj/.glb in the _render folder). This slot is "
         "independent of the editor's own Model Viewer slots.");

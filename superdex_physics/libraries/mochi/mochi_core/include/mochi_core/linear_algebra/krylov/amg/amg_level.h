@@ -20,6 +20,7 @@
 #include <mochi_core/linear_algebra/krylov/amg/coarsening.h>
 #include <mochi_core/linear_algebra/sparse_matrix.h>
 #include <mochi_core/linear_algebra/utils/matrix_concepts.h>
+#include <mochi_core/mochi_platform.h>
 #include <mochi_core/utils/graph.h>
 #include <mochi_core/utils/graph_views.h>
 #include <mochi_core/utils/simd.h>
@@ -76,7 +77,10 @@ class TransferOperator {
                 auto const rowValues = Op.Values(r);
                 int const numValues = isize(rowValues);
                 int j = 0;
-                V4 result[2] = {}; // Initializes to zero.
+                V4 result[2] MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
+                for (int k = 0; k < 2; ++k) {
+                  result[k] = SimdZero<V4>();
+                }
                 // Batches of 2 blocks to reduce overhead due to latency of FMA instructions.
                 for (; j + 2 <= numValues; j += 2) {
                   result[0] += rowValues[j + 0] *

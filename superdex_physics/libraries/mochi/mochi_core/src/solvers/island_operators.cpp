@@ -173,8 +173,9 @@ static BlockSparseMatrix<T, kBlockSize> AddMixedBlockSparsity(
 
   // Temporary vectors for the values in the rows [1, ..., kBlockSize - 1] within a block row.
   std::array<DynamicArray<T>, kBlockSize - 1> tmpValues;
+  int const maxNnzPerRow = A.ComputeMaxNnzPerRow() + B.ComputeMaxNnzPerRow(); // Conservative
   for (auto& vals : tmpValues) {
-    vals.reserve(A.MaxNnzPerRow() + B.MaxNnzPerRow()); // Conservative
+    vals.reserve(maxNnzPerRow);
   }
 
   // Process one block row at a time. The output sparsity pattern will be the union of the sparsity
@@ -412,6 +413,7 @@ static void AppendActorToGlobalBlockSparseMatrix(
     int actorBlockRowOffset,
     BlockSparseMatrixView<T const, kBlockSize> A,
     BlockSparseMatrixView<T const, kBlockSize> C,
+    int cMaxNnzPerRow,
     DynamicArray<int>& outPointers,
     DynamicArray<int>& outIndices,
     DynamicArray<T>& outValues) {
@@ -442,8 +444,9 @@ static void AppendActorToGlobalBlockSparseMatrix(
 
   // Temporary vectors for the values in the rows [1, ..., kBlockSize - 1] within a block row.
   std::array<std::vector<T>, kBlockSize - 1> tmpValues;
+  int const maxNnzPerRow = A.ComputeMaxNnzPerRow() + cMaxNnzPerRow; // Conservative
   for (auto& vals : tmpValues) {
-    vals.reserve(A.MaxNnzPerRow() + C.MaxNnzPerRow()); // Conservative
+    vals.reserve(maxNnzPerRow);
   }
 
   // Process one block row at a time. The output sparsity pattern will be the union of the actor
@@ -583,7 +586,9 @@ SparseMatrix<T> IslandOperators<T>::FullSparseMatrix() const {
   // If there are multiple interaction matrices, then condense them down to one.
   SparseMatrix<T> combinedInteractionMatrix{}; // Temporary owner.
   SparseMatrixView<T const> combinedInteractionMatrixView; // As const view.
-  int iInter = 0;
+  bool const useSingleInteractionView = isize(interactionMatrixViews) == 1 &&
+      std::get<0>(interactionMatrixViews[0]) == 0 && std::get<1>(interactionMatrixViews[0]) == 0;
+  int iInter = useSingleInteractionView ? 1 : 0;
   if (isize(interactionMatrixViews) > 1) {
     combinedInteractionMatrix.Reset(
         AddMixedSparsity<T>(interactionMatrixViews[0], interactionMatrixViews[1]));
@@ -594,7 +599,9 @@ SparseMatrix<T> IslandOperators<T>::FullSparseMatrix() const {
         AddMixedSparsity<T>(
             {0, 0, AsConstView(combinedInteractionMatrix)}, interactionMatrixViews[iInter]));
   }
-  combinedInteractionMatrixView.Reset(combinedInteractionMatrix);
+  combinedInteractionMatrixView.Reset(
+      useSingleInteractionView ? AsConstView(std::get<2>(interactionMatrixViews[0]))
+                               : AsConstView(combinedInteractionMatrix));
 
   // Get a conservative count for the total number of non-zero values
   int conservativeNnz = combinedInteractionMatrixView.NumNonZeros();
@@ -684,7 +691,9 @@ BlockSparseMatrix<T, kBlockSize> IslandOperators<T>::FullBlockSparseMatrix() con
 
   BlockSparseMatrix<T, kBlockSize> condensedInteractionMatrix; // Temporary owner.
   BlockSparseMatrixView<T const, kBlockSize> condensedInteractionMatrixView; // As block sparse view
-  int iInter = 0;
+  bool const useSingleInteractionView = isize(interactionMatrixViews) == 1 &&
+      std::get<0>(interactionMatrixViews[0]) == 0 && std::get<1>(interactionMatrixViews[0]) == 0;
+  int iInter = useSingleInteractionView ? 1 : 0;
   if (isize(interactionMatrixViews) > 1) {
     condensedInteractionMatrix =
         AddMixedBlockSparsity<T, kBlockSize>(interactionMatrixViews[0], interactionMatrixViews[1]);
@@ -695,7 +704,9 @@ BlockSparseMatrix<T, kBlockSize> IslandOperators<T>::FullBlockSparseMatrix() con
         AddMixedBlockSparsity<T, kBlockSize>(
             {0, 0, AsConstView(condensedInteractionMatrix)}, interactionMatrixViews[iInter]));
   }
-  condensedInteractionMatrixView.Reset(condensedInteractionMatrix);
+  condensedInteractionMatrixView.Reset(
+      useSingleInteractionView ? AsConstView(std::get<2>(interactionMatrixViews[0]))
+                               : AsConstView(condensedInteractionMatrix));
 
   // Allocate storage for the global BlockSparseMatrix. It may be more than necessary (optimizing
   // for speed).
@@ -715,6 +726,7 @@ BlockSparseMatrix<T, kBlockSize> IslandOperators<T>::FullBlockSparseMatrix() con
       pointers.capacity(), indices.capacity(), values.capacity()};
 
   // Append rows to the global block sparse matrix, one actor at a time.
+  int const interactionMaxNnzPerRow = condensedInteractionMatrixView.ComputeMaxNnzPerRow();
   pointers.push_back(0);
   for (auto const& [actorOffset, anyMat] : this->_actorMatrices) {
     static_assert(
@@ -727,13 +739,20 @@ BlockSparseMatrix<T, kBlockSize> IslandOperators<T>::FullBlockSparseMatrix() con
     auto* dense = std::get_if<MatrixView<T const>>(&anyMat);
     if (bsp) {
       AppendActorToGlobalBlockSparseMatrix<kBlockSize>(
-          actorBlockRowOffset, *bsp, condensedInteractionMatrixView, pointers, indices, values);
+          actorBlockRowOffset,
+          *bsp,
+          condensedInteractionMatrixView,
+          interactionMaxNnzPerRow,
+          pointers,
+          indices,
+          values);
     } else if (sp) {
       BlockViewStructure<kBlockSize> blockedStructure = BlockedStructure<kBlockSize>(*sp);
       AppendActorToGlobalBlockSparseMatrix<kBlockSize>(
           actorBlockRowOffset,
           blockedStructure.ConstView(sp->Values().data()),
           condensedInteractionMatrixView,
+          interactionMaxNnzPerRow,
           pointers,
           indices,
           values);
@@ -743,6 +762,7 @@ BlockSparseMatrix<T, kBlockSize> IslandOperators<T>::FullBlockSparseMatrix() con
           actorBlockRowOffset,
           ToBlockSparseMatrix<kBlockSize>(*dense),
           condensedInteractionMatrixView,
+          interactionMaxNnzPerRow,
           pointers,
           indices,
           values);

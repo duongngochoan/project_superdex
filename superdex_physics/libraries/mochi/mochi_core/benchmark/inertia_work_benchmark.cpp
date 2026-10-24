@@ -18,7 +18,6 @@
 
 #include <mochi_core/element_operations/fem_inertia.h>
 #include <mochi_core/elements/tetrahedral/finite_element.h>
-#include <mochi_core/elements/tetrahedral/simplex_quadrature.h>
 #include <mochi_core/geometry/tetrahedral_mesh.h>
 #include <mochi_core/utils/batch_config.h>
 #include <mochi_core/utils/batch_types.h>
@@ -33,13 +32,11 @@ namespace mochi_benchmark {
 
 static constexpr int kBatchSize = kDefaultFemBatchSize;
 static constexpr int kNumElements = 1024;
-// Soft actors always integrate inertia with 4-point (high) volume quadrature.
-static constexpr int kNumQuadPoints = 4;
 static constexpr real kDensity = 1000_r;
 static constexpr real kDt = 0.01_r;
 static constexpr real kInvDtSqr = 1_r / Sqr(kDt);
 
-using ElementT = tetrahedral::Pk3DElement<1, kNumQuadPoints>;
+using ElementT = tetrahedral::Pk3DElement<1, 1>;
 static constexpr int kDim = ElementT::kSpaceDim * ElementT::kNumDofs;
 
 enum class InertiaWorkMode { Objective, Residual, All };
@@ -55,11 +52,7 @@ static void BenchmarkInertiaWork(benchmark::State& state, InertiaWorkMode mode) 
   DynamicArray<ElementT> elements;
   elements.reserve(kNumElements);
   for (int i = 0; i < kNumElements; ++i) {
-    elements.emplace_back(
-        0,
-        mesh.GetNodeCoordinates(),
-        mesh.GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature4);
+    elements.emplace_back(0, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity());
   }
 
   NdArray<NdArray<real, kDim>, kBatchSize> displacements{};

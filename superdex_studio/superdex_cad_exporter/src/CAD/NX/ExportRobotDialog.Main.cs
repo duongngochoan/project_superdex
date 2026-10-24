@@ -12,6 +12,7 @@ using NXOpen.Features;
 using NXOpen.UF;
 using NXRobotExporter.CAD.NX;
 using CADRobotExporter.CAD.NX;
+using CADRobotExporter.Export;
 using CADRobotExporter.Import;
 using CADRobotExporter.RobotDescription;
 using CADRobotExporter.RobotExport;
@@ -770,7 +771,7 @@ public partial class ExportRobotDialog
             treeControlTendonRouting.SetIsDropAllowedHandler(new NXOpen.BlockStyler.Tree.IsDropAllowedCallback(RoutingIsDropAllowedCallback));
             treeControlTendonRouting.SetOnDropHandler(new NXOpen.BlockStyler.Tree.OnDropCallback(RoutingOnDropCallback));
 
-            theDialog.TopBlock.Label = "Robot Configuration Exporter " + CADRobotExporter.Versioning.VersionString.Get();
+            theDialog.TopBlock.Label = "SuperDex CAD Exporter " + CADRobotExporter.Versioning.VersionString.Get() + " - Setup";
 
             // Initialize the tree manager
             treeManager = new NXTreeManager(treeControlKinematicTree);
@@ -891,8 +892,8 @@ public partial class ExportRobotDialog
 
         if (AssemblyExportForm.Instance != null)
         {
-            AssemblyExportForm.Instance.WindowState = FormWindowState.Normal;
-            AssemblyExportForm.Instance.Focus();
+            AssemblyExportForm.Instance.WindowState = System.Windows.WindowState.Normal;
+            AssemblyExportForm.Instance.Activate();
             return 1;
         }
 
@@ -2916,28 +2917,25 @@ public partial class ExportRobotDialog
 
                 // Own the form to the NX main window so it hides/restores with NX
                 IntPtr nxHwnd = CADRobotExporter.Utilities.NativeWindowWrapper.GetHostMainWindowHandle();
-                if (nxHwnd != IntPtr.Zero)
-                {
-                    exportForm.Show(new CADRobotExporter.Utilities.NativeWindowWrapper(nxHwnd));
-                }
-                else
-                {
-                    exportForm.Show();
-                }
+                CADRobotExporter.Utilities.WpfWindowOwner.OwnTo(exportForm, nxHwnd);
+                exportForm.Show();
+
                 // HACK: NX steals focus back after the BlockStyler callback returns,
                 // so use a short timer to reclaim focus once NX is done.
+                bool exportFormClosed = false;
+                exportForm.Closed += (s, ev) => exportFormClosed = true;
                 var focusTimer = new System.Windows.Forms.Timer { Interval = 200 };
                 focusTimer.Tick += (s, ev) =>
                 {
                     focusTimer.Stop();
                     focusTimer.Dispose();
-                    if (!exportForm.IsDisposed)
+                    if (!exportFormClosed)
                     {
                         exportForm.Activate();
                     }
                 };
                 focusTimer.Start();
-                exportForm.FormClosed += new FormClosedEventHandler(OnAssemblyExportFormClosed);
+                exportForm.Closed += OnAssemblyExportFormClosed;
             }
         }
     }
@@ -2945,8 +2943,13 @@ public partial class ExportRobotDialog
     private void OnAssemblyExportFormClosed(object sender, EventArgs e)
     {
         componentToLinkCache = null;
-        // reload everything since form may have changed some properties
-        LoadExistingConfiguration();
+
+        if (nxBridge != null && nxBridge.IsDocumentValid)
+        {
+            // reload everything since form may have changed some properties
+            LoadExistingConfiguration();
+        }
+
         EnableAllControls(true);
         UpdateKinematicTabUI();
         UpdateTendonTabUI();
@@ -2978,7 +2981,7 @@ public partial class ExportRobotDialog
             var childLinkNode = BuildLinkNodeFromNXLinkNode(childNXNode);
             if (childLinkNode != null)
             {
-                linkNode.Nodes.Add(childLinkNode);
+                linkNode.AddChildNode(childLinkNode);
             }
         }
 

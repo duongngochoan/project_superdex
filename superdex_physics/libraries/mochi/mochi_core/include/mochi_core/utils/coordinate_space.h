@@ -161,6 +161,39 @@ MOCHI_ENUM_END()
 
 namespace mochi {
 
+namespace details {
+
+/**
+ * @brief Extract the semantic direction for one numeric coordinate axis.
+ *
+ * @param[in] axes @ref CoordinateSpaceAxes value.
+ * @param[in] axisIndex 0 for X, 1 for Y, 2 for Z.
+ *
+ * @return The @ref CoordinateSpaceAxes direction (e.g. Right) of that axis, as an integer.
+ */
+[[nodiscard]] constexpr int GetAxisDirection(CoordinateSpaceAxes axes, int axisIndex) {
+  return static_cast<int>((static_cast<uint16_t>(axes) >> (3 * axisIndex)) & 0x7);
+}
+
+// The unit vector, in the coordinates of @p axes, that points in direction @p semantic.
+[[nodiscard]] inline Real3 GetSemanticAxis(CoordinateSpaceAxes axes, CoordinateSpaceAxes semantic) {
+  int const wanted = static_cast<int>(semantic);
+  Real3 axis{};
+  [[maybe_unused]] int matches = 0;
+  for (int i = 0; i < 3; ++i) {
+    int const direction = GetAxisDirection(axes, i);
+    // Opposite directions are adjacent, so >> 1 identifies their shared axis pair.
+    if ((direction >> 1) == (wanted >> 1)) {
+      axis[i] = direction == wanted ? 1_r : -1_r;
+      ++matches;
+    }
+  }
+  MOCHI_ASSERT_VERBOSE(matches == 1, "CoordinateSpaceAxes must name three orthogonal directions.");
+  return axis;
+}
+
+} // namespace details
+
 /** @brief Coordinate-axis convention and linear unit scale. */
 struct CoordinateSpace {
   CoordinateSpaceAxes axes = CoordinateSpaceAxes::Default;
@@ -179,13 +212,19 @@ struct CoordinateSpace {
   void Validate(Error& error) const;
 
   /** @brief Return the unit vector pointing right, in this space's own coordinates. */
-  [[nodiscard]] Real3 GetRight() const;
+  [[nodiscard]] Real3 GetRight() const {
+    return details::GetSemanticAxis(axes, CoordinateSpaceAxes::Right);
+  }
 
   /** @brief Return the unit vector pointing up, in this space's own coordinates. */
-  [[nodiscard]] Real3 GetUp() const;
+  [[nodiscard]] Real3 GetUp() const {
+    return details::GetSemanticAxis(axes, CoordinateSpaceAxes::Up);
+  }
 
   /** @brief Return the unit vector pointing forward, in this space's own coordinates. */
-  [[nodiscard]] Real3 GetForward() const;
+  [[nodiscard]] Real3 GetForward() const {
+    return details::GetSemanticAxis(axes, CoordinateSpaceAxes::Forward);
+  }
 
   /** @brief Return the default coordinate space convention for Mochi. */
   [[nodiscard]] static CoordinateSpace Default() {

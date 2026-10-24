@@ -28,6 +28,7 @@
 #if MOCHI_USE_OCCT
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepMesh_Deflection.hxx>
 #include <BRepMesh_ShapeTool.hxx>
 #include <BRep_Tool.hxx>
 #include <IMeshData_Curve.hxx>
@@ -39,6 +40,7 @@
 #include <IMeshTools_Parameters.hxx>
 #include <Poly_Triangulation.hxx>
 #include <TopLoc_Location.hxx>
+#include <TopoDS_Face.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Pnt2d.hxx>
 #include <gp_Vec.hxx>
@@ -261,11 +263,12 @@ bool MarkDomain(CDT& cdt, IsotropicFaceMesher::Wires const& wires, double scaleU
 } // namespace
 
 IsotropicFaceMesher::IsotropicFaceMesher(
-    double targetEdgeLength,
+    FaceSizingField const& sizing,
     bool gradedInterior,
     Handle(IMeshTools_MeshAlgo) fallbackAlgo,
     FaceMeshFallbackStats* stats)
-    : _targetEdgeLength(targetEdgeLength),
+    : _sizing(&sizing),
+      _targetEdgeLength(sizing.Defaults().targetEdgeLength),
       _gradedInterior(gradedInterior),
       _fallbackAlgo(std::move(fallbackAlgo)),
       _stats(stats) {}
@@ -569,6 +572,31 @@ void IsotropicFaceMesher::Perform(
     IMeshData::IFaceHandle const& dFace,
     IMeshTools_Parameters const& parameters,
     Message_ProgressRange const& range) {
+  TopoDS_Face const& face = dFace->GetFace();
+  _targetEdgeLength = _sizing->At(face).targetEdgeLength;
+  _gradedInterior = _gradedInterior || _sizing->BordersFinerFace(face);
+
+  FaceSizing const* const faceSizing = _sizing->Find(face);
+  if (faceSizing == nullptr) {
+    Mesh(dFace, parameters, range);
+    return;
+  }
+  // Interior values follow BRepMesh_IncrementalMesh's defaults, which MeshShape relies on.
+  IMeshTools_Parameters faceParameters = parameters;
+  faceParameters.Angle = faceSizing->angularDeflection;
+  faceParameters.AngleInterior = 2.0 * faceSizing->angularDeflection;
+  faceParameters.Deflection = faceSizing->linearDeflection;
+  faceParameters.DeflectionInterior = faceSizing->linearDeflection;
+  // The model healer stored this face's deflection from the global parameters, and the fallback
+  // mesher reads that stored value.
+  BRepMesh_Deflection::ComputeDeflection(dFace, faceParameters);
+  Mesh(dFace, faceParameters, range);
+}
+
+void IsotropicFaceMesher::Mesh(
+    IMeshData::IFaceHandle const& dFace,
+    IMeshTools_Parameters const& parameters,
+    Message_ProgressRange const& range) {
   Handle(BRepAdaptor_Surface) const& surface = dFace->GetSurface();
 
   // --- Step 1: Extract boundary wires ---
@@ -832,7 +860,7 @@ void IsotropicFaceMesher::Perform(
     }
   }
 
-  Standard_Integer const numTriangles = static_cast<Standard_Integer>(validTriangles.size());
+  auto const numTriangles = static_cast<Standard_Integer>(validTriangles.size());
   if (numTriangles == 0) {
     // All slivers - degenerate face (e.g. hairline boolean artifact). Fall back.
     FallBack(dFace, parameters, range);
@@ -840,7 +868,7 @@ void IsotropicFaceMesher::Perform(
   }
 
   Handle(Poly_Triangulation) triangulation = new Poly_Triangulation();
-  Standard_Integer const numNodes = static_cast<Standard_Integer>(nodes3d.size());
+  auto const numNodes = static_cast<Standard_Integer>(nodes3d.size());
   triangulation->ResizeNodes(numNodes, false);
   triangulation->AddUVNodes();
   triangulation->ResizeTriangles(numTriangles, false);

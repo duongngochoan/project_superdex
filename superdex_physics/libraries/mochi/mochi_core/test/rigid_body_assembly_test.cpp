@@ -203,11 +203,16 @@ static void TestConsistencyMixed(
       tolHess);
 }
 
-TEST(RigidBodyAssembly, RigidBodyExternal) {
+TEST(RigidBodyAssembly, RigidBodyConstantForces) {
   // Initialize other data needed by the assembler
   TransformRT stageStartPos;
   SetPose(
       kPoseValsRef, stageStartPos); // Must be the same as the test pose for the consistency test.
+  RigidBodyInertia const inertia(
+      Vec4r{},
+      1_r,
+      VMatrix3x3r{Vec4r{1_r, 0_r, 0_r}, Vec4r{0_r, 1_r, 0_r}, Vec4r{0_r, 0_r, 1_r}},
+      2_r);
   std::array<int, kNumDofs> dofs = {0, 1, 2, 3, 4, 5};
   Span<int const> dofsSpan = MakeConstSpan(dofs);
   std::array<real, kNumDofs> forces = {-0.7_r, 1.3_r, 0.5_r, 1.0_r, -0.6_r, -0.4_r};
@@ -218,9 +223,16 @@ TEST(RigidBodyAssembly, RigidBodyExternal) {
                        double* energy,
                        RigidGradient* gradient,
                        RigidHessian* /* hessian */) {
+    AddRigidBodyGravity(
+        pose, stageStartPos, inertia, Real3{0.3_r, -9.8_r, 1.7_r}, energy, gradient);
     AddRigidBodyExternalForces(pose, stageStartPos, dofsSpan, forcesSpan, energy, gradient);
   };
   TestConsistency(assembler, 1e-3_r, 1_r);
+
+  // The energies are relative to the stage start, up to rounding in the torque term.
+  double energy = 0.0;
+  assembler(stageStartPos, &energy, nullptr, nullptr);
+  EXPECT_NEAR(0.0, energy, 1e-6);
 }
 
 TEST(MultiBody, RigidBodyInertiaFromMerit) {

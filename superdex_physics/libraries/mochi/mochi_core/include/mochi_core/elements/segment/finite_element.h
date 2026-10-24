@@ -32,8 +32,11 @@ class Pk1DElement final {
  public:
   static constexpr int kPolyOrder = kPolyOrder_;
   static constexpr int kNumQuadPoints = kNumQuadPoints_;
+  static constexpr int kSpaceDim = 3;
+  static constexpr int kSpaceDimParam = 1;
   using Basis = BasisSegment<kPolyOrder>;
   using BasisEvaluated = BasisFunctionsEvaluatedSegment<kPolyOrder, kNumQuadPoints>;
+  static constexpr int kNumDofs = Basis::kNumDofs;
 
   /**
    * @brief Construct a Lagrange segment element.
@@ -44,64 +47,47 @@ class Pk1DElement final {
    * @note Connectivity is inferred from the order of the nodal coordinates.
    */
   Pk1DElement(int elementIndex, Span<Real3 const> coordinates)
-      : elementIndex(elementIndex), coordinates(coordinates), connectivity{isize(coordinates)} {
-    // Construct the array containing the physical coordinates
-    // corresponding to the coordinates of each degree of freedom
-    InterpolateInteriorNodes();
-
-    // Tabulate the isoparametric map and its derivative at the quad points
-    QuadratureEvaluateMap();
+      : elementIndex(elementIndex), connectivity{isize(coordinates)} {
+    QuadratureEvaluateMap(InterpolateInteriorNodes(coordinates, Nodes()));
   }
 
  private:
-  /** @brief Evaluate basis and derivatives at quadrature points. */
-  void QuadratureEvaluateMap() {
+  /** @brief Tabulate the isoparametric map and the quadrature weights at the quad points. */
+  void QuadratureEvaluateMap(NdArray<real, kNumDofs, kSpaceDim> const& nodesCrdsPhys) {
     for (int q = 0; q < kNumQuadPoints; ++q) {
       // Here we are using an isoparametric map
       mapEvaluated[q] = {};
-      dMapEvaluated[q] = {};
+      Real3 tangent = {};
       for (int f = 0; f < kNumDofs; ++f) {
         // Get the map of the quadrature point
         mapEvaluated[q] += kBasisEvaluatedParametric.kBasisEvaluated[q][f] * nodesCrdsPhys[f];
 
-        // Get the tangent map at the quadrature point
-        // effectively here we have the induced basis from the mapping
-        // the matrix is a space_dim x param_dim so in each column
-        // we have an induced base
-        for (int i = 0; i < kSpaceDim; ++i) {
-          // Specialized for parametric dimension = 1
-          dMapEvaluated[q][i][0] +=
-              nodesCrdsPhys[f][i] * kBasisEvaluatedParametric.kDBasisEvaluated[q][f][0];
-        }
+        // Get the tangent map at the quadrature point, which for parametric dimension 1 is a
+        // single vector
+        tangent += kBasisEvaluatedParametric.kDBasisEvaluated[q][f][0] * nodesCrdsPhys[f];
       }
 
-      // Get Jacobian determinant of the mapping.
-      // For 1D elements embedded in 3D, this is the norm of the tangent vector
-      Real3 tangent = {};
-      for (int i = 0; i < kSpaceDim; ++i) {
-        tangent[i] = dMapEvaluated[q][i][0];
-      }
-      dMapEvaluatedDet[q] = Norm(tangent);
-
-      // Compute quadrature weight
-      quadWeights[q] = kQuadrature.weights[q] * dMapEvaluatedDet[q];
+      // Compute quadrature weight. The Jacobian determinant of the mapping of a 1D element
+      // embedded in 3D is the norm of the tangent vector.
+      quadWeights[q] = kQuadrature.weights[q] * Norm(tangent);
     }
   }
 
   /** @brief Compute nodal positions in physical space. */
-  void InterpolateInteriorNodes() {
+  static NdArray<real, kNumDofs, kSpaceDim> InterpolateInteriorNodes(
+      Span<Real3 const> coordinates,
+      Int2 nodes) {
+    NdArray<real, kNumDofs, kSpaceDim> nodesCrdsPhys;
     constexpr int kNumVertex = 2;
     for (int i = 0; i < kNumVertex; ++i) {
-      nodesCrdsPhys[i] = coordinates[Nodes()[i]];
+      nodesCrdsPhys[i] = coordinates[nodes[i]];
     }
     // TODO: Interpolate interior nodes if implementing higher order elements
     static_assert(kPolyOrder == 1, "Higher order polynomials not yet implemented");
+    return nodesCrdsPhys;
   }
 
  public:
-  static constexpr int kSpaceDim = 3;
-  static constexpr int kSpaceDimParam = 1;
-  static constexpr int kNumDofs = Basis::kNumDofs;
   static constexpr int kNumNodes = 2;
   static constexpr SegmentQuadrature<kNumQuadPoints> kQuadrature = {};
   static constexpr BasisEvaluated kBasisEvaluatedParametric = {};
@@ -115,8 +101,8 @@ class Pk1DElement final {
   inline auto const& GetBaseElement() const {
     return *this;
   }
-  inline constexpr Int2 Nodes() const {
-    return Int2{elementIndex, (elementIndex + 1) % isize(coordinates)};
+  inline Int2 Nodes() const {
+    return connectivity[elementIndex];
   }
   inline constexpr Int2 LocalNodes() const {
     return Int2{0, 1};
@@ -138,23 +124,10 @@ class Pk1DElement final {
 
   // Set by constructor
   int const elementIndex;
-  Span<Real3 const> const coordinates;
   SegmentConnectivity const connectivity;
-
-  // The nodal position in physical space of interior nodes.
-  NdArray<real, kNumDofs, kSpaceDim> nodesCrdsPhys;
 
   // The array of mapped quadrature points into physical space
   NdArray<real, kNumQuadPoints, kSpaceDim> mapEvaluated;
-
-  // The array of the tangent map from parametric to physical
-  // evaluated at the quadrature points
-  NdArray<real, kNumQuadPoints, kSpaceDim, kSpaceDimParam> dMapEvaluated;
-
-  // The array of the determinant of the tangent map from
-  // parametric to physical evaluated at the quadrature points
-  // (for 1D elements, this is the length of the tangent vector)
-  NdArray<real, kNumQuadPoints> dMapEvaluatedDet;
 
   // The quadrature weights for arc length integration
   NdArray<real, kNumQuadPoints> quadWeights = {};

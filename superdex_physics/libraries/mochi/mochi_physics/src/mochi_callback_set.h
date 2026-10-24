@@ -55,8 +55,7 @@ class CallbackSetBase<RetT(ParamTs...)> {
   using function_type = std::function<func_sig>;
 
   static_assert(
-      ((std::is_lvalue_reference<ParamTs>::value &&
-        std::is_const<std::remove_reference_t<ParamTs>>::value) &&
+      ((std::is_lvalue_reference_v<ParamTs> && std::is_const_v<std::remove_reference_t<ParamTs>>) &&
        ...),
       "CallbackSet parameters must be const lvalue references.");
 
@@ -356,7 +355,7 @@ class CallbackSetBase<RetT(ParamTs...)> {
       // Fire callbacks
       for (auto& callback : callbacksToCall) {
         if (callback->isRegistered) {
-          if constexpr (std::is_void<RetT>::value) {
+          if constexpr (std::is_void_v<RetT>) {
             callback->callback(param...);
             pred();
           } else {

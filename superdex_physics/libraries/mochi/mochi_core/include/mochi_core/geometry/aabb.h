@@ -92,6 +92,7 @@ struct SReflectTypeTraits<mochi::Aabb> {
           *ti, "min", offsetof(mochi::Aabb, _min), SReflect::GetTypeInfo<mochi::Real3>());
       SReflect::detail::AddField(
           *ti, "max", offsetof(mochi::Aabb, _max), SReflect::GetTypeInfo<mochi::Real3>());
+      SReflect::FinalizeStruct(ti);
       return ti;
     }();
     return *s_typeInfo;

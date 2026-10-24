@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
@@ -9,7 +9,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
-using System.Windows.Forms;
+using System.Windows;
+using System.Windows.Controls;
 
 using Meshing;
 
@@ -18,10 +19,17 @@ using SolidWorks.Interop.swconst;
 
 using CADRobotExporter.RobotExport;
 using CADRobotExporter.CAD;
+using CADRobotExporter.Export;
+using CADRobotExporter.UI.ViewModels;
+using CADRobotExporter.UI.Views;
+
+using MessageBox = System.Windows.Forms.MessageBox;
+using MessageBoxButtons = System.Windows.Forms.MessageBoxButtons;
+using MessageBoxIcon = System.Windows.Forms.MessageBoxIcon;
 
 namespace CADRobotExporter.UI
 {
-    public partial class MeshSaveForm : Form
+    public class MeshSaveForm : Window
     {
         public ModelDoc2 ActiveSWModel;
         public SldWorks SWApp = null;
@@ -29,66 +37,190 @@ namespace CADRobotExporter.UI
 
         public static string DefaultCoordSysName = "-- default --";
 
+        private readonly MeshingColumnView meshing;
+        private readonly ComboBox comboBoxCoordinateSystem;
+        private readonly CheckBox checkBoxGlb;
+        private readonly CheckBox checkBoxStl;
+        private readonly CheckBox checkBoxObj;
+        private readonly CheckBox checkBoxStep;
+        private readonly CheckBox checkBoxAlwaysOverwrite;
+        private readonly Button buttonSave;
+
         public MeshSaveForm(SldWorks iSldWorksApp, string solidworksSaveAsString)
         {
-            InitializeComponent();
+            // without this Tab, Enter and mnemonics are swallowed before they reach the window.
+            System.Windows.Forms.Integration.ElementHost.EnableModelessKeyboardInterop(this);
+            Theme.FluentTheme.Apply(this);
+
+            Title = "SuperDex Mesh Exporter";
+            Width = 560;
+            SizeToContent = SizeToContent.Height;
+            ResizeMode = ResizeMode.NoResize;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            ShowInTaskbar = false;
+            Background = (System.Windows.Media.Brush)Resources["LayerFill"];
 
             SWApp = iSldWorksApp;
             ActiveSWModel = (ModelDoc2)SWApp.ActiveDoc;
 
+            meshing = new MeshingColumnView(false);
+            meshing.SettingChanged += (s, e) => meshing.ApplyEnableState(true, true);
+
+            checkBoxGlb = MakeFormatCheckBox("GLB");
+            checkBoxStl = MakeFormatCheckBox("STL");
+            checkBoxObj = MakeFormatCheckBox("OBJ");
+            checkBoxStep = MakeFormatCheckBox("STEP");
+            checkBoxStep.ToolTip = "Retains the temporary STEP file";
+
+            checkBoxAlwaysOverwrite = new CheckBox
+            {
+                Content = "Always overwrite existing",
+                Margin = new Thickness(0, 10, 0, 0),
+            };
+
+            comboBoxCoordinateSystem = new ComboBox { Margin = new Thickness(0, 6, 0, 0) };
+
+            buttonSave = new Button
+            {
+                Content = "Save",
+                IsDefault = true,
+                MinWidth = 110,
+                IsEnabled = false,
+                Style = (Style)Resources[Theme.FluentTheme.AccentButtonKey],
+            };
             buttonSave.Click += ButtonSave_Click;
+
+            Button buttonCancel = new Button
+            {
+                Content = "Cancel",
+                IsCancel = true,
+                MinWidth = 110,
+                Margin = new Thickness(8, 0, 0, 0),
+            };
             buttonCancel.Click += ButtonCancel_Click;
 
-            checkBoxGlb.CheckedChanged += CheckBox_CheckedChanged;
-            checkBoxObj.CheckedChanged += CheckBox_CheckedChanged;
-            checkBoxStl.CheckedChanged += CheckBox_CheckedChanged;
-            checkBoxStep.CheckedChanged += CheckBox_CheckedChanged;
+            StackPanel root = new StackPanel { Margin = new Thickness(12) };
+            root.Children.Add(BuildFormatGroup());
+            root.Children.Add(BuildMeshingGroup());
+            root.Children.Add(BuildCoordinateSystemPanel());
 
-            comboBoxBackend.SelectedIndex = 0; // Isotropic
-            comboBoxEdgeSampling.SelectedIndex = 0; // Adaptive
-            comboBoxBackend.SelectedIndexChanged += MesherSettingChanged;
-            numericUpDownTargetEdgeLength.ValueChanged += MesherSettingChanged;
-            UpdateMesherControlEnabledState();
+            StackPanel buttons = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 14, 0, 0),
+            };
+            buttons.Children.Add(buttonSave);
+            buttons.Children.Add(buttonCancel);
+            root.Children.Add(buttons);
 
+            Content = root;
+
+            meshing.ApplyEnableState(true, true);
             AddCoordinateSystems();
             MeshFilename = ExtractFilePathWithoutExtension(solidworksSaveAsString);
         }
 
-        private void MesherSettingChanged(object sender, EventArgs e)
+        private CheckBox MakeFormatCheckBox(string caption)
         {
-            UpdateMesherControlEnabledState();
-        }
-
-        /// <summary>
-        /// Delabella ignores the sizing controls, and the bounding-box fraction only applies while
-        /// no absolute edge length is set, so both are greyed out rather than left to mislead.
-        /// </summary>
-        private void UpdateMesherControlEnabledState()
-        {
-            bool isotropic = comboBoxBackend.SelectedIndex != 1;
-
-            comboBoxEdgeSampling.Enabled = isotropic;
-            numericUpDownTargetEdgeLength.Enabled = isotropic;
-            numericUpDownEdgeLengthFraction.Enabled =
-                isotropic && numericUpDownTargetEdgeLength.Value == 0M;
-        }
-
-        private void CheckBox_CheckedChanged(object sender, EventArgs e)
-        {
-            buttonSave.Enabled = (checkBoxGlb.Checked || checkBoxObj.Checked || checkBoxStl.Checked
-                || checkBoxStep.Checked);
-        }
-
-        private void ButtonSave_Click(object sender, EventArgs e)
-        {
-            if (SaveMesh())
+            CheckBox box = new CheckBox
             {
-                MessageBox.Show("Export complete");
+                Content = caption,
+                Margin = new Thickness(0, 0, 20, 0),
+            };
+            box.Checked += CheckBox_CheckedChanged;
+            box.Unchecked += CheckBox_CheckedChanged;
+            return box;
+        }
+
+        private UIElement BuildFormatGroup()
+        {
+            StackPanel formats = new StackPanel { Orientation = Orientation.Horizontal };
+            formats.Children.Add(checkBoxGlb);
+            formats.Children.Add(checkBoxStl);
+            formats.Children.Add(checkBoxObj);
+            formats.Children.Add(checkBoxStep);
+
+            StackPanel body = new StackPanel();
+            body.Children.Add(formats);
+            body.Children.Add(checkBoxAlwaysOverwrite);
+
+            return new GroupBox
+            {
+                Header = "Export Format",
+                Padding = new Thickness(10),
+                Content = body,
+            };
+        }
+
+        private UIElement BuildMeshingGroup()
+        {
+            Grid grid = new Grid();
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            AddMeshingRow(grid, 0, "Linear Deflection (mm)", meshing.LinearDeflection);
+            AddMeshingRow(grid, 1, "Angular Deflection (rad)", meshing.AngularDeflection);
+            AddMeshingRow(grid, 2, "Scale (multiplier)", meshing.Scale);
+            AddMeshingRow(grid, 3, "Mesher", meshing.Backend);
+            AddMeshingRow(grid, 4, "Edge Sampling", meshing.EdgeSampling);
+            AddMeshingRow(grid, 5, "Edge Length mm (0=auto)", meshing.TargetEdgeLength);
+            AddMeshingRow(grid, 6, "Edge Length Fraction", meshing.EdgeLengthFraction);
+
+            return new GroupBox
+            {
+                Header = "Meshing Options",
+                Padding = new Thickness(10),
+                Margin = new Thickness(0, 10, 0, 0),
+                Content = grid,
+            };
+        }
+
+        private static void AddMeshingRow(Grid grid, int row, string caption, UIElement editor)
+        {
+            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            TextBlock label = new TextBlock
+            {
+                Text = caption,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 12, 0),
+            };
+            Grid.SetRow(label, row);
+            Grid.SetColumn(label, 0);
+            grid.Children.Add(label);
+
+            Grid.SetRow(editor, row);
+            Grid.SetColumn(editor, 1);
+            grid.Children.Add(editor);
+        }
+
+        private UIElement BuildCoordinateSystemPanel()
+        {
+            StackPanel panel = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
+            panel.Children.Add(new TextBlock { Text = "Output Coordinate System" });
+            panel.Children.Add(comboBoxCoordinateSystem);
+            return panel;
+        }
+
+        private void CheckBox_CheckedChanged(object sender, RoutedEventArgs e)
+        {
+            buttonSave.IsEnabled = checkBoxGlb.IsChecked == true
+                || checkBoxObj.IsChecked == true
+                || checkBoxStl.IsChecked == true
+                || checkBoxStep.IsChecked == true;
+        }
+
+        private void ButtonSave_Click(object sender, RoutedEventArgs e)
+        {
+            if (SaveMesh(out List<string> writtenPaths))
+            {
+                ExportCompleteDialog.ShowMeshExportComplete(writtenPaths, owner: this);
             }
             Close();
         }
 
-        private void ButtonCancel_Click(object sender, EventArgs e)
+        private void ButtonCancel_Click(object sender, RoutedEventArgs e)
         {
             Close();
         }
@@ -113,8 +245,9 @@ namespace CADRobotExporter.UI
             }
         }
 
-        private bool SaveMesh()
+        private bool SaveMesh(out List<string> writtenPaths)
         {
+            writtenPaths = new List<string>();
             int modelType = ActiveSWModel.GetType();
             bool isPart = modelType == (int)swDocumentTypes_e.swDocPART;
 
@@ -150,11 +283,11 @@ namespace CADRobotExporter.UI
 
                 switch (result)
                 {
-                    case DialogResult.Cancel:
+                    case System.Windows.Forms.DialogResult.Cancel:
                         return false;
-                    case DialogResult.Yes:
+                    case System.Windows.Forms.DialogResult.Yes:
                         break;
-                    case DialogResult.No:
+                    case System.Windows.Forms.DialogResult.No:
                         ActiveSWModel.ClearSelection2(true);
                         break;
                     default:
@@ -162,27 +295,27 @@ namespace CADRobotExporter.UI
                 }
             }
 
-            string coordSysName = comboBoxCoordinateSystem.Text;
+            string coordSysName = comboBoxCoordinateSystem.SelectedItem as string;
 
             List<MeshFormat> exportFormats = new List<MeshFormat>();
 
-            if (checkBoxStl.Checked)
+            if (checkBoxStl.IsChecked == true)
             {
                 exportFormats.Add(MeshFormat.stlOpenCascade);
             }
-            if (checkBoxObj.Checked)
+            if (checkBoxObj.IsChecked == true)
             {
                 exportFormats.Add(MeshFormat.objOpenCascade);
             }
-            if (checkBoxGlb.Checked)
+            if (checkBoxGlb.IsChecked == true)
             {
                 exportFormats.Add(MeshFormat.glbOpenCascade);
             }
 
-            float linearDeflection = (float)numericUpDownLinearDeflection.Value;
-            float angularDeflection = (float)numericUpDownAngularDeflection.Value;
-            float scale = (float)numericUpDownScale.Value;
-            bool overwrite = checkBoxAlwaysOverwrite.Checked;
+            float linearDeflection = (float)meshing.LinearDeflection.Value;
+            float angularDeflection = (float)meshing.AngularDeflection.Value;
+            float scale = (float)meshing.Scale.Value;
+            bool overwrite = checkBoxAlwaysOverwrite.IsChecked == true;
 
             // Every requested format is written from one tessellation, so the overwrite prompts all
             // happen up front rather than between exports.
@@ -204,7 +337,7 @@ namespace CADRobotExporter.UI
             }
 
             string stepOutputPath = MeshFilename + ".stp";
-            bool keepStep = checkBoxStep.Checked
+            bool keepStep = checkBoxStep.IsChecked == true
                 && (overwrite || ConfirmOverwrite(stepOutputPath));
 
             if (outputs.Count == 0 && !keepStep)
@@ -222,14 +355,10 @@ namespace CADRobotExporter.UI
                 LinearDeflection = linearDeflection,
                 AngularDeflection = angularDeflection,
                 Scale = MeshExportOptions.ScaleFromExporterUnits(scale),
-                Backend = comboBoxBackend.SelectedIndex == 1
-                    ? MeshingBackend.Delabella
-                    : MeshingBackend.Isotropic,
-                EdgeSampling = comboBoxEdgeSampling.SelectedIndex == 1
-                    ? EdgeSampling.Uniform
-                    : EdgeSampling.Adaptive,
-                TargetEdgeLength = (double)numericUpDownTargetEdgeLength.Value,
-                TargetEdgeLengthFraction = (double)numericUpDownEdgeLengthFraction.Value,
+                Backend = MeshingSettings.BackendFromIndex(meshing.Backend.SelectedIndex),
+                EdgeSampling = MeshingSettings.EdgeSamplingFromIndex(meshing.EdgeSampling.SelectedIndex),
+                TargetEdgeLength = (double)meshing.TargetEdgeLength.Value,
+                TargetEdgeLengthFraction = (double)meshing.EdgeLengthFraction.Value,
                 AllowPartialFailure = true,
             };
 
@@ -285,6 +414,18 @@ namespace CADRobotExporter.UI
                 catch (Exception ex)
                 {
                     MessageBox.Show("Couldn't delete temporary STEP file: \n" + ex.Message);
+                }
+            }
+
+            if (exported)
+            {
+                foreach (MeshExportOutput output in outputs)
+                {
+                    writtenPaths.Add(output.Path);
+                }
+                if (keepStep)
+                {
+                    writtenPaths.Add(stepPath);
                 }
             }
 
@@ -356,14 +497,14 @@ namespace CADRobotExporter.UI
                 string message = $"{fileName} already exists.\nDo you want to replace it?";
                 string caption = "Confirm Save As";
 
-                DialogResult result = MessageBox.Show(
+                System.Windows.Forms.DialogResult result = MessageBox.Show(
                     message,
                     caption,
                     MessageBoxButtons.YesNo,
                     MessageBoxIcon.Warning
                 );
 
-                return result == DialogResult.Yes;
+                return result == System.Windows.Forms.DialogResult.Yes;
             }
 
             // File doesn't exist, OK to proceed

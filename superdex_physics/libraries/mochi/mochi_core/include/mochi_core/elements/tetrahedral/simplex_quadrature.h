@@ -111,17 +111,23 @@ constexpr auto MakeTetrahedralTraceQuadrature() {
 };
 } // namespace details
 
-static constexpr auto kTetrahedralTraceQuadrature1 =
-    details::MakeTetrahedralTraceQuadrature<triangular::TriangleQuadrature<1>>();
-static constexpr auto kTetrahedralTraceQuadrature3 =
-    details::MakeTetrahedralTraceQuadrature<triangular::TriangleQuadrature<3>>();
-static constexpr auto kTetrahedralTraceQuadrature6 =
-    details::MakeTetrahedralTraceQuadrature<triangular::TriangleQuadrature<6>>();
-static constexpr auto kTetrahedralTraceQuadrature7 =
-    details::MakeTetrahedralTraceQuadrature<triangular::TriangleQuadrature<7>>();
-static constexpr auto kTetrahedralTraceQuadrature12 =
-    details::MakeTetrahedralTraceQuadrature<triangular::TriangleQuadrature<12>>();
-static constexpr auto kTetrahedralTraceQuadrature16 =
-    details::MakeTetrahedralTraceQuadrature<triangular::TriangleQuadrature<16>>();
+/// @brief The volume quadrature of a tetrahedron with @p kNumQuadPoints points.
+template <int kNumQuadPoints>
+constexpr TetrahedralQuadrature<kNumQuadPoints> GetTetrahedralQuadrature() {
+  static_assert(
+      kNumQuadPoints == 1 || kNumQuadPoints == 4, "Unsupported number of quadrature points.");
+  if constexpr (kNumQuadPoints == 1) {
+    return kTetrahedralQuadrature1;
+  } else {
+    return kTetrahedralQuadrature4;
+  }
+}
+
+/// @brief The quadratures of the four faces of a tetrahedron, for boundary integrals, with
+/// @p kNumQuadPoints points each, for any rule `triangular::TriangleQuadrature` defines.
+template <int kNumQuadPoints>
+constexpr NdArray<TetrahedralQuadrature<kNumQuadPoints>, 4> GetTetrahedralTraceQuadratures() {
+  return details::MakeTetrahedralTraceQuadrature<triangular::TriangleQuadrature<kNumQuadPoints>>();
+}
 
 } // namespace mochi::tetrahedral

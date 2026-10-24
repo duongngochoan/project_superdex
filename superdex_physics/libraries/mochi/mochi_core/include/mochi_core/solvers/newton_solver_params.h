@@ -29,11 +29,11 @@ namespace mochi {
 // clang-format off
 struct LineSearchParams {
   LineSearchType type = NonLinearSolverParams{}.lineSearchType;           // Type of line search to use.
-  int maxIter = NonLinearSolverParams{}.lineSearchMaxIter;                // Maximum number of line search iterations. Must be >= 1, except if 'type' is 'kNone'.
+  int maxIter = NonLinearSolverParams{}.lineSearchMaxIter;                // Maximum number of line search iterations. Must be >= 1, except if 'type' is 'None'.
   real alpha = NonLinearSolverParams{}.lineSearchAlpha;                   // Step reduction factor between line search iterations.
-  real wolfe1 = NonLinearSolverParams{}.lineSearchWolfe1;                 // Wolfe first parameter. Only applies to Wolfe line search types.
+  real wolfe1 = NonLinearSolverParams{}.lineSearchWolfe1;                 // Wolfe first parameter. Only applies to Armijo, WolfeWeak, WolfeStrong, and ArmijoOrResidualNorm line search types.
   real wolfe2 = NonLinearSolverParams{}.lineSearchWolfe2;                 // Wolfe second parameter. Only applies to Wolfe line search types.
-  real maxRelIncrease = NonLinearSolverParams{}.lineSearchMaxRelIncrease; // Maximum relative increase in the merit to accept the step. Only applies to Simple line search type.
+  real maxRelIncrease = NonLinearSolverParams{}.lineSearchMaxRelIncrease; // Maximum relative increase in the merit to accept the step. An increase beyond it but within an estimate of the merit's rounding error is tested on the slope instead. Only applies to Simple line search type.
 };
 // clang-format on
 
@@ -54,9 +54,8 @@ struct NewtonSolverParams {
   real solRelTol = NonLinearSolverParams{}.relStepTol;              // Relative tolerance on solution step. See @ref NonLinearSolverParams::relStepTol.
   bool stopIfNoImprovement = NonLinearSolverParams{}.stopIfNoImprovement; // Boolean for whether to stop if there is no improvement w.r.t. the previous Newton iteration in the figure of merit monitored by the line search
 
-  // Retries and fallbacks
+  // Retries
   PsdProjectionMode psdProjMode = NonLinearSolverParams{}.psdProjMode; // PSD projection mode
-  bool gradientDescentFallback = NonLinearSolverParams{}.gradientDescentFallback; // Whether to fall back to the gradient descent direction if the Newton direction fails
   SaturationHessianParams fittedSaturationHessian = ExperimentalEvalParams{}.fittedSaturationHessian; // Per-pathway control of fitted Hessian use in force saturation terms
 
   // Explosion control

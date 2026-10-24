@@ -7,8 +7,6 @@
 
 using System;
 
-using CADRobotExporter.UI;
-
 namespace CADRobotExporter.Export
 {
     /// <summary>

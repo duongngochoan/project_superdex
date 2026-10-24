@@ -23,8 +23,10 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <functional>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #if defined(_MSC_VER) && !defined(__AVX2__)
@@ -34,41 +36,40 @@
 namespace mochi::simd_test {
 
 // Short hand
-static constexpr real kEps = kDefaultNearEqualEpsilon<real>;
+inline constexpr real kEps = kDefaultNearEqualEpsilon<real>;
 
 // Return true if (a == b) or if a and b have the same bits (in case of nan)
 template <class T>
-static bool EqualValueOrBits(T a, T b) {
+bool EqualValueOrBits(T a, T b) {
   return (a == b) || (0 == memcmp(&a, &b, sizeof(T)));
 }
 
 // Return true if NearEqual(a, b, eps) or if a and b have the same bits (in case of nan)
 template <class T>
-static bool NearEqualValueOrBits(T a, T b, T eps) {
+bool NearEqualValueOrBits(T a, T b, T eps) {
   return NearEqual(a, b, eps) || (0 == memcmp(&a, &b, sizeof(T)));
 }
 
 template <class T, class VecType>
-static void TestUnaryFunction(
+void TestUnaryFunction(
     std::function<T(T)> scalarFn,
     std::function<VecType(VecType)> vectorFn,
     std::function<bool(T, T)> compareFn,
     T min = T(-VecType::kSize),
     T max = T(VecType::kSize)) {
   ASSERT_GE(max, min);
-  T const kValues[] = {
-      T(min + 0.05 * (max - min)),
-      T(min + 0.95 * (max - min)),
-      T(min + 0.4 * (max - min)),
-      T(min + 0.6 * (max - min)),
-      T(min + 0.3 * (max - min)),
-      T(min + 0.7 * (max - min)),
-      T(min + 0.45 * (max - min)),
-      T(min + 0.55 * (max - min))};
-  auto result = vectorFn(Load<VecType>(&kValues[0]));
+  constexpr double kOriginalFractions[] = {0.05, 0.95, 0.4, 0.6, 0.3, 0.7, 0.45, 0.55};
+  std::array<T, VecType::kSize> values{};
   for (int i = 0; i < VecType::kSize; ++i) {
-    T expected = scalarFn(kValues[i]);
-    T actual = Get(result, i);
+    double const fraction = i < 8
+        ? kOriginalFractions[i]
+        : static_cast<double>(i - 7) / static_cast<double>(VecType::kSize - 7);
+    values[i] = T(min + fraction * (max - min));
+  }
+  auto result = vectorFn(Load<VecType>(values.data()));
+  for (int i = 0; i < VecType::kSize; ++i) {
+    T expected = scalarFn(values[i]);
+    T actual = result[i];
     EXPECT_TRUE(compareFn(expected, actual)) << "exepcted " << expected << ", but got " << actual;
   }
   // Also test +/- zero
@@ -77,7 +78,7 @@ static void TestUnaryFunction(
     result = vectorFn(VecType{val});
     T expected = scalarFn(val);
     for (int i = 0; i < VecType::kSize; ++i) {
-      T actual = Get(result, i);
+      T actual = result[i];
       EXPECT_TRUE(compareFn(expected, actual));
     }
   }
@@ -122,37 +123,46 @@ inline void TestSimdTrigFunction(
 }
 
 template <class T, class VecType>
-static void TestBinaryFunction(
+void TestBinaryFunction(
     std::function<T(T, T)> const& scalarFn,
     std::function<VecType(VecType, VecType)> vectorFn,
     std::function<bool(T, T)> compareFn) {
-  constexpr T kValuesA[] = {T(1), T(-2.25), T(3.5), T(-4.75), T(5.25), T(-6.5), T(7.75), T(-8)};
-  constexpr T kValuesB[] = {T(-2.25), T(3.5), T(4.75), T(-5.75), T(-6.5), T(7.25), T(8), T(-9)};
-  auto va = Load<VecType>(&kValuesA[0]);
-  auto vb = Load<VecType>(&kValuesB[0]);
+  std::array<T, VecType::kSize> valuesA{};
+  std::array<T, VecType::kSize> valuesB{};
+  for (int i = 0; i < VecType::kSize; ++i) {
+    valuesA[i] = T((i % 2 == 0 ? 1.0 : -1.0) * (i + 1.25));
+    valuesB[i] = T((i % 3 == 0 ? -1.0 : 1.0) * (i + 2.5));
+  }
+  auto va = Load<VecType>(valuesA.data());
+  auto vb = Load<VecType>(valuesB.data());
   auto result = vectorFn(va, vb);
   for (int i = 0; i < VecType::kSize; ++i) {
-    T expected = scalarFn(kValuesA[i], kValuesB[i]);
-    T actual = Get(result, i);
+    T expected = scalarFn(valuesA[i], valuesB[i]);
+    T actual = result[i];
     EXPECT_TRUE(compareFn(expected, actual));
   }
 }
 
 template <class T, class VecType>
-static void TestTernaryFunction(
+void TestTernaryFunction(
     std::function<T(T, T, T)> const& scalarFn,
     std::function<VecType(VecType, VecType, VecType)> vectorFn,
     std::function<bool(T, T)> compareFn) {
-  constexpr T kValuesA[] = {T(1), T(-2.25), T(3.5), T(-4.75), T(5.25), T(-6.5), T(7.75), T(-8)};
-  constexpr T kValuesB[] = {T(-2.25), T(3.5), T(4.75), T(-5.75), T(-6.5), T(7.25), T(8), T(-9)};
-  constexpr T kValuesC[] = {T(8), T(7.75), T(6.5), T(5.25), T(-4.75), T(-3.5), T(-2.25), T(-1)};
-  auto va = Load<VecType>(&kValuesA[0]);
-  auto vb = Load<VecType>(&kValuesB[0]);
-  auto vc = Load<VecType>(&kValuesC[0]);
+  std::array<T, VecType::kSize> valuesA{};
+  std::array<T, VecType::kSize> valuesB{};
+  std::array<T, VecType::kSize> valuesC{};
+  for (int i = 0; i < VecType::kSize; ++i) {
+    valuesA[i] = T((i % 2 == 0 ? 1.0 : -1.0) * (i + 1.25));
+    valuesB[i] = T((i % 3 == 0 ? -1.0 : 1.0) * (i + 2.5));
+    valuesC[i] = T((i % 4 < 2 ? 1.0 : -1.0) * (VecType::kSize - i + 0.75));
+  }
+  auto va = Load<VecType>(valuesA.data());
+  auto vb = Load<VecType>(valuesB.data());
+  auto vc = Load<VecType>(valuesC.data());
   auto result = vectorFn(va, vb, vc);
   for (int i = 0; i < VecType::kSize; ++i) {
-    T expected = scalarFn(kValuesA[i], kValuesB[i], kValuesC[i]);
-    T actual = Get(result, i);
+    T expected = scalarFn(valuesA[i], valuesB[i], valuesC[i]);
+    T actual = result[i];
     EXPECT_TRUE(compareFn(expected, actual));
   }
 }
@@ -348,7 +358,7 @@ static void TestTernaryFunction(
 // `requires` SFINAE check cannot detect it. Use an explicit scalar-type gate that matches the
 // original int64x2/int64x4 special-case.
 template <int N, class V>
-static void ExpectEqual(bool expect, V a, V b) {
+void ExpectEqual(bool expect, V a, V b) {
   EXPECT_EQ(expect, Equal<N>(a, b));
   if constexpr (N == 1 || !std::is_same_v<typename V::Scalar, int64_t>) {
     EXPECT_EQ(!expect, NotEqual<N>(a, b));
@@ -357,6 +367,43 @@ static void ExpectEqual(bool expect, V a, V b) {
     EXPECT_EQ(expect, (a == b));
     EXPECT_EQ(!expect, (a != b));
   }
+}
+
+// Expects store(ptr), with ptr in a buffer of 911s, to write 1, 2, ..., n to the first n
+// elements of ptr and nothing else.
+template <class V, class StoreFn>
+void ExpectStoresFirstLanes(int n, StoreFn store) {
+  using Scalar = typename V::Scalar;
+  // NOTE: A vector rather than an array on the stack, to work around an MSVC optimizer bug.
+  std::vector<Scalar> result(V::kSize + 2, Scalar(911));
+  auto expected = result;
+  for (int i = 1; i <= n; ++i) {
+    expected[i] = Scalar(i);
+  }
+  store(result.data() + 1);
+  EXPECT_EQ(expected, result);
+}
+
+template <int N, class V>
+void ExpectStoreN(V v) {
+  ExpectStoresFirstLanes<V>(N, [&](auto* ptr) { Store<N>(ptr, v); });
+}
+
+template <class V, size_t... Is>
+void ExpectStoreNForEachN(V v, std::index_sequence<Is...>) {
+  (ExpectStoreN<static_cast<int>(Is)>(v), ...);
+}
+
+// Tests Store<N> for every N, Store with a runtime count, and the full Store, on a vector v that
+// holds 1, 2, 3, ...
+template <class V>
+void TestStore(V v) {
+  Store<0>(static_cast<typename V::Scalar*>(nullptr), v);
+  ExpectStoreNForEachN(v, std::make_index_sequence<V::kSize + 1>{});
+  for (int n = 0; n <= V::kSize; ++n) {
+    ExpectStoresFirstLanes<V>(n, [&](auto* ptr) { Store(ptr, v, n); });
+  }
+  ExpectStoresFirstLanes<V>(V::kSize, [&](auto* ptr) { Store(ptr, v); });
 }
 
 // Build a list of values useful for testing functions like sin and cos.

@@ -17,7 +17,6 @@
 #pragma once
 
 #include "mochi_common_components.h"
-#include "mochi_contact.h"
 #include "mochi_discretization_components.h"
 #include "mochi_ecs.h"
 #include "mochi_ecs_utils.h"

@@ -17,8 +17,6 @@
 #include <mochi_core/element_operations/fem_stress.h>
 #include <mochi_core/elements/tetrahedral/finite_element.h>
 #include <mochi_core/elements/tetrahedral/simplex_quadrature.h>
-#include <mochi_core/elements/triangular/finite_element.h>
-#include <mochi_core/geometry/triangular_mesh.h>
 #include <mochi_core/materials/batched_kim_neo_hookean.h>
 #include <mochi_core/materials/batched_linear_elastic.h>
 #include <mochi_core/materials/batched_smith_neo_hookean.h>
@@ -37,7 +35,7 @@ using namespace mochi::fem;
 // The batched stress kernel maps a constitutive model (energy ψ, PK1 = ∂ψ/∂F, tangent = ∂²ψ/∂F²)
 // onto an element. It is validated against a constitutive-agnostic, scalar-op-free oracle:
 //   - residual is the gradient of the energy   (res ≈ ∂E/∂u, central differences)
-//   - dresidual is the gradient of the residual (dRes ≈ ∂res/∂u, central differences, tets only)
+//   - dresidual is the gradient of the residual (dRes ≈ ∂res/∂u, central differences)
 //   - rest state (zero displacement) has zero energy
 //   - PSD projection yields a symmetric positive-semi-definite dresidual.
 // Finite differences are run across several constitutives (Kim-NeoHookean, StVenant-Kirchhoff,
@@ -50,7 +48,6 @@ using namespace mochi::fem;
 // SPD assembled tangent. The constitutive models themselves are covered independently by the
 // materials tests. Each lane uses a distinct element / displacement (mixed-lane).
 
-using TriElement = triangular::Pk2DElement<1, 1>;
 using TetElement = tetrahedral::Pk3DElement<1, 1>;
 
 static constexpr real kYoungs = 100_r;
@@ -112,28 +109,28 @@ static void ExpectNearRel(real a, real b) {
 }
 
 // Runs the kernel for a per-lane displacement; fills the requested (lane-indexed) outputs.
-template <class ElementT, int kBS, class Constitutive>
+template <int kBS, class Constitutive>
 static void RunStress(
-    Span<ElementT const> elemSpan,
+    Span<TetElement const> elemSpan,
     NdArray<int, kBS> const& idx,
-    NdArray<NdArray<real, ElementT::kSpaceDim * ElementT::kNumDofs>, kBS> const& disp,
+    NdArray<NdArray<real, TetElement::kSpaceDim * TetElement::kNumDofs>, kBS> const& disp,
     bool wantE,
     bool wantR,
     bool wantD,
     bool projectPsd,
     Constitutive const& constitutive,
     NdArray<double, kBS>& energy,
-    NdArray<NdArray<real, ElementT::kSpaceDim * ElementT::kNumDofs>, kBS>& res,
+    NdArray<NdArray<real, TetElement::kSpaceDim * TetElement::kNumDofs>, kBS>& res,
     NdArray<
         NdArray<
             real,
-            (ElementT::kSpaceDim * ElementT::kNumDofs) *
-                (ElementT::kSpaceDim * ElementT::kNumDofs)>,
+            (TetElement::kSpaceDim * TetElement::kNumDofs) *
+                (TetElement::kSpaceDim * TetElement::kNumDofs)>,
         kBS>& dres,
     Span<real const> perElementExtraWeight = {}) {
-  constexpr int kDim = ElementT::kSpaceDim * ElementT::kNumDofs;
+  constexpr int kDim = TetElement::kSpaceDim * TetElement::kNumDofs;
   using V = BatchReal<kBS>;
-  fem::BatchElementVector<kBS, ElementT> dispBatch;
+  fem::BatchElementVector<kBS, TetElement> dispBatch;
   alignas(alignof(V)) real staging[V::kSize]{};
   for (int k = 0; k < kDim; ++k) {
     for (int b = 0; b < kBS; ++b) {
@@ -142,8 +139,8 @@ static void RunStress(
     dispBatch[k] = Load<V>(staging);
   }
   BatchDouble<kBS> e{0.0};
-  fem::BatchElementVector<kBS, ElementT> r{};
-  fem::BatchElementMatrix<kBS, ElementT> d{};
+  fem::BatchElementVector<kBS, TetElement> r{};
+  fem::BatchElementMatrix<kBS, TetElement> d{};
   StressWork<kBS>(
       idx,
       elemSpan,
@@ -252,12 +249,12 @@ static auto LinearElasticDResOracle(
   return dres;
 }
 
-// FD validation (res = ∂E/∂u, dRes = ∂res/∂u for tets) + rest state, for a given constitutive.
-template <class ElementT, template <class> class MeshDataT, bool kSupportsDRes, int kBS, class C>
+// FD validation (res = ∂E/∂u, dRes = ∂res/∂u) + rest state, for a given constitutive.
+template <int kBS, class C>
 static void VerifyStressFd(C const& constitutive) {
-  constexpr int kDim = ElementT::kSpaceDim * ElementT::kNumDofs;
+  constexpr int kDim = TetElement::kSpaceDim * TetElement::kNumDofs;
 
-  auto const data = MeshDataT<ElementT>::CreateMinimalCube();
+  auto const data = TestTetMeshData<TetElement>::CreateMinimalCube();
   int const numElements = isize(data.elements);
   auto const elemSpan = MakeConstSpan(data.elements);
 
@@ -279,83 +276,34 @@ static void VerifyStressFd(C const& constitutive) {
       disp[b] = MakeRandomArray<kDim>(static_cast<unsigned int>(trial * kBS + b), -0.05_r, 0.05_r);
     }
 
-    RunStress<ElementT, kBS>(
-        elemSpan,
-        idx,
-        disp,
-        false,
-        true,
-        kSupportsDRes,
-        false,
-        constitutive,
-        e0,
-        baseRes,
-        baseDRes);
+    RunStress<kBS>(
+        elemSpan, idx, disp, false, true, true, false, constitutive, e0, baseRes, baseDRes);
 
-    // Residual == d(energy)/d(disp).
+    // Residual == d(energy)/d(disp) and dresidual == d(residual)/d(disp) (raw tangent,
+    // projectPsd == false), from one pair of perturbed runs per DoF.
     NdArray<NdArray<real, kDim>, kBS> resFd{};
-    for (int i = 0; i < kDim; ++i) {
+    NdArray<NdArray<real, kDim * kDim>, kBS> dresFd{};
+    for (int j = 0; j < kDim; ++j) {
       auto dispP = disp;
       auto dispM = disp;
       for (int b = 0; b < kBS; ++b) {
-        dispP[b][i] += eps;
-        dispM[b][i] -= eps;
+        dispP[b][j] += eps;
+        dispM[b][j] -= eps;
       }
-      RunStress<ElementT, kBS>(
-          elemSpan,
-          idx,
-          dispP,
-          true,
-          false,
-          false,
-          false,
-          constitutive,
-          ep,
-          scratchRes,
-          scratchDRes);
-      RunStress<ElementT, kBS>(
-          elemSpan,
-          idx,
-          dispM,
-          true,
-          false,
-          false,
-          false,
-          constitutive,
-          em,
-          scratchRes,
-          scratchDRes);
+      RunStress<kBS>(
+          elemSpan, idx, dispP, true, true, false, false, constitutive, ep, rp, scratchDRes);
+      RunStress<kBS>(
+          elemSpan, idx, dispM, true, true, false, false, constitutive, em, rm, scratchDRes);
       for (int b = 0; b < kBS; ++b) {
-        resFd[b][i] = static_cast<real>((ep[b] - em[b]) / (2.0 * static_cast<double>(eps)));
+        resFd[b][j] = static_cast<real>((ep[b] - em[b]) / (2.0 * static_cast<double>(eps)));
+        for (int i = 0; i < kDim; ++i) {
+          dresFd[b][i * kDim + j] = (rp[b][i] - rm[b][i]) / (2_r * eps);
+        }
       }
     }
     for (int b = 0; b < kBS; ++b) {
       ExpectNearL2(baseRes[b], resFd[b], resTol);
-    }
-
-    // Dresidual == d(residual)/d(disp) (tets only; raw tangent, projectPsd == false).
-    if constexpr (kSupportsDRes) {
-      NdArray<NdArray<real, kDim * kDim>, kBS> dresFd{};
-      for (int j = 0; j < kDim; ++j) {
-        auto dispP = disp;
-        auto dispM = disp;
-        for (int b = 0; b < kBS; ++b) {
-          dispP[b][j] += eps;
-          dispM[b][j] -= eps;
-        }
-        RunStress<ElementT, kBS>(
-            elemSpan, idx, dispP, false, true, false, false, constitutive, ep, rp, scratchDRes);
-        RunStress<ElementT, kBS>(
-            elemSpan, idx, dispM, false, true, false, false, constitutive, em, rm, scratchDRes);
-        for (int b = 0; b < kBS; ++b) {
-          for (int i = 0; i < kDim; ++i) {
-            dresFd[b][i * kDim + j] = (rp[b][i] - rm[b][i]) / (2_r * eps);
-          }
-        }
-      }
-      for (int b = 0; b < kBS; ++b) {
-        ExpectNearL2(baseDRes[b], dresFd[b], dresTol);
-      }
+      ExpectNearL2(baseDRes[b], dresFd[b], dresTol);
     }
   }
 
@@ -366,7 +314,7 @@ static void VerifyStressFd(C const& constitutive) {
       idx[b] = b % numElements;
     }
     NdArray<NdArray<real, kDim>, kBS> zero{};
-    RunStress<ElementT, kBS>(
+    RunStress<kBS>(
         elemSpan, idx, zero, true, false, false, false, constitutive, e0, scratchRes, scratchDRes);
     for (int b = 0; b < kBS; ++b) {
       EXPECT_NEAR(0.0, e0[b], 1e-9);
@@ -403,7 +351,7 @@ static void VerifyOutputModesAndWeights(OutputConfig cfg) {
     NdArray<double, kBS> energy;
     NdArray<NdArray<real, kDim>, kBS> res;
     NdArray<NdArray<real, kDim * kDim>, kBS> dres;
-    RunStress<TetElement, kBS>(
+    RunStress<kBS>(
         elemSpan,
         idx,
         disp,
@@ -493,7 +441,7 @@ static void VerifyEnergyMagnitudeTet() {
   NdArray<double, kBS> energy;
   NdArray<NdArray<real, kDim>, kBS> scratchRes;
   NdArray<NdArray<real, kDim * kDim>, kBS> scratchDRes;
-  RunStress<TetElement, kBS>(
+  RunStress<kBS>(
       elemSpan,
       idx,
       disp,
@@ -530,7 +478,7 @@ static void VerifyPsdStrategy(C const& constitutive) {
   NdArray<double, kBS> energy;
   NdArray<NdArray<real, kDim>, kBS> scratchRes;
   NdArray<NdArray<real, kDim * kDim>, kBS> dres;
-  RunStress<TetElement, kBS>(
+  RunStress<kBS>(
       elemSpan, idx, disp, false, false, true, true, constitutive, energy, scratchRes, dres);
 
   for (int b = 0; b < kBS; ++b) {
@@ -559,18 +507,11 @@ static void VerifyPsdStrategy(C const& constitutive) {
   }
 }
 
-TEST(StressWork, TriFd) {
-  RunBatchSizes<1, 4, 8>([&]<int kBS>() {
-    VerifyStressFd<TriElement, TestTriMeshData, /*kSupportsDRes*/ false, kBS>(KimResponse<kBS>());
-  });
-}
-
 TEST(StressWork, TetFd) {
   RunBatchSizes<1, 4, 8>([&]<int kBS>() {
-    VerifyStressFd<TetElement, TestTetMeshData, /*kSupportsDRes*/ true, kBS>(KimResponse<kBS>());
-    VerifyStressFd<TetElement, TestTetMeshData, /*kSupportsDRes*/ true, kBS>(
-        StVenantResponse<kBS>());
-    VerifyStressFd<TetElement, TestTetMeshData, /*kSupportsDRes*/ true, kBS>(LinearResponse<kBS>());
+    VerifyStressFd<kBS>(KimResponse<kBS>());
+    VerifyStressFd<kBS>(StVenantResponse<kBS>());
+    VerifyStressFd<kBS>(LinearResponse<kBS>());
   });
 }
 

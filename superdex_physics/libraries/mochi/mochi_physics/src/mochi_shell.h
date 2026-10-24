@@ -19,6 +19,7 @@
 #include "mochi_common_components.h"
 #include "mochi_contact.h"
 #include "mochi_discretization_components.h"
+#include "mochi_discretization_functions.h"
 #include "mochi_ecs.h"
 #include "mochi_ecs_utils.h"
 #include "mochi_materials.h"
@@ -51,47 +52,45 @@ using FemInfo = CFemSurfaceDiscretizationP1Q1;
 
 /**
  * @brief Creates a batched shell assembly operator composing stress (membrane + bending), gravity,
- * and inertia into a single ElOpFnType over the 6-node bending stencil.
+ * inertia and damping into a single ElOpFnType over the 6-node bending stencil.
  *
- * @warning Inertia contributes to the objective and residual only. This operator does NOT assemble
- * the inertia dresidual. When assembling the dresidual, the caller must first initialize it with
- * the scaled mass matrix (see @ref AssembleBody). Otherwise the inertia dresidual is missing.
+ * @note Inertia and mass damping use each triangle's mass matrix in closed form; their dresidual is
+ * that matrix scaled by 1/dt² + @p massDampingScale.
  *
- * @note Gravity and inertia operate on the 3-node triangle sub-stencil (nodes 0–2, DoFs 0–8). Their
- * 9-DoF contributions are extracted from / accumulated into the 18-DoF stencil vectors. Stress
- * (membrane + bending) operates on the full 6-node stencil.
+ * @note Gravity, inertia and mass damping operate on the 3-node triangle sub-stencil (nodes 0–2,
+ * DoFs 0–8). Their 9-DoF contributions are extracted from / accumulated into the 18-DoF stencil
+ * vectors. Stress (membrane + bending) operates on the full 6-node stencil.
+ *
+ * @param[in] predTarget Predicted target u₀ + dt·v₀ of each DoF, read for the objective and
+ * residual.
  */
-template <typename TriElementLow, typename TriElementHigh>
+template <typename TriElementT>
 [[nodiscard]] ElOpFnType<ShellStencilElement> MakeBatchedBodyOp(
     Local2GlobalMap const& l2g,
-    Span<TriElementLow const> lowElements,
-    Span<TriElementHigh const> highElements,
+    Span<TriElementT const> triElements,
     bool hasGravity,
     real membraneLambda,
     real membraneMu,
     real bendingAlpha,
     real bendingBeta,
+    real membraneCollapseBarrierStiffness,
     Real3 gravity,
     real density,
-    real dtfi2,
+    Span<real const> predTarget,
     Span<real const> stageStartDispl,
-    Span<real const> stageStartVel,
     real dtStage,
     real massDampingScale,
     real stiffnessDampingFactor) {
-  static_assert(TriElementLow::kSpaceDim == ShellTriangleElement::kSpaceDim);
-  static_assert(TriElementHigh::kSpaceDim == ShellTriangleElement::kSpaceDim);
-  static_assert(TriElementLow::kNumDofs == ShellTriangleElement::kNumDofs);
-  static_assert(TriElementHigh::kNumDofs == ShellTriangleElement::kNumDofs);
-  MOCHI_ASSERT_VERBOSE(!lowElements.empty(), "Empty shell discretization.");
+  static_assert(TriElementT::kSpaceDim == ShellTriangleElement::kSpaceDim);
+  static_assert(TriElementT::kNumDofs == ShellTriangleElement::kNumDofs);
+  MOCHI_ASSERT_VERBOSE(!triElements.empty(), "Empty shell discretization.");
   MOCHI_ASSERT_VERBOSE(
-      lowElements.size() == highElements.size(),
-      "Low/high shell discretizations must have identical element counts.");
-  MOCHI_ASSERT_VERBOSE(
-      l2g.GetNumElements() == lowElements.size(),
-      "L2G element count must match low discretization.");
+      l2g.GetNumElements() == isize(triElements),
+      "L2G element count must match the discretization.");
   constexpr int kBatchSize = kDefaultFemBatchSize;
   constexpr int kStencilDofs = fem::kBendingStencilDofs;
+  real const dtfi2 = 1_r / Sqr(dtStage);
+  real const massScale = dtfi2 + massDampingScale;
 
   return [= /*All copies are inexpensive*/, &l2g](
              NdArray<int, kBatchSize> const& elemIndices,
@@ -107,18 +106,18 @@ template <typename TriElementLow, typename TriElementHigh>
     bool const hasMassDamping = massDampingScale > 0_r;
     bool const hasStiffnessDamping = stiffnessDampingFactor > 0_r;
 
-    // --- Gather displacements once for stress and mass damping ---
+    // --- Gather the stencil global nodes and the stage-start displacements once ---
     //
-    // We always gather the full 6-node bending stencil (18 DoFs) for stress; the first 9 DoFs
-    // (central triangle) double as the mass-damping stage-start. Stencil global nodes are also
-    // needed by the stress block for the shell assembly.
+    // Stress uses the global nodes of the full 6-node bending stencil. Stiffness damping reads the
+    // stage-start displacement of the full stencil (18 DoFs) for its energy and residual. The
+    // gravity energy and mass damping read that of the central triangle only (its first 9 DoFs), so
+    // at most those are gathered when stiffness damping is off.
     using V = BatchReal<kBatchSize>;
     NdArray<V, kStencilDofs> stageStartDispBatch MOCHI_NO_INIT;
     NdArray<int, fem::kBendingStencilNodes, kBatchSize> stencilGlobalNodes MOCHI_NO_INIT;
-    // Stage-start gather depth: full 18 DoFs for stiffness damping (also used as the central
-    // triangle sub-span for mass damping), otherwise just 9 DoFs for mass damping alone.
-    int const numStageStartDofs =
-        hasStiffnessDamping ? kStencilDofs : (hasMassDamping ? kTriangleDofs : 0);
+    int const numStageStartDofs = hasStiffnessDamping
+        ? kStencilDofs
+        : (((hasGravity && outEnergy) || hasMassDamping) ? kTriangleDofs : 0);
 
     for (int b = 0; b < kBatchSize; ++b) {
       int const eleIdx = elemIndices[b];
@@ -143,36 +142,37 @@ template <typename TriElementLow, typename TriElementHigh>
       }
     }
 
-    // --- Gravity and inertia on the 3-node triangle sub-stencil (DoFs 0-8) ---
-    //
-    // NOTE: Gravity has no DRes contribution. Inertia DRes is handled globally via the precomputed
-    // mass matrix. Mass damping's DRes is also handled globally.
+    // --- Gravity, inertia and mass damping on the 3-node triangle sub-stencil (DoFs 0-8) ---
     if (outEnergy || outRes) {
       // Nodes 0-2 (DoFs 0-8) of the bending stencil are the triangle vertices.
       auto const triDisp = MakeConstSpan(displ).subspan(0, kTriangleDofs);
+      auto const triStageStartDisp = MakeConstSpan(stageStartDispBatch).subspan(0, kTriangleDofs);
       Span<BatchReal<kBatchSize>> triRes =
           outRes ? MakeSpan(*outRes).subspan(0, kTriangleDofs) : Span<BatchReal<kBatchSize>>{};
 
       if (hasGravity) {
         out |= fem::GravityWork<kBatchSize>(
-            elemIndices, lowElements, triDisp, outEnergy, triRes, gravity, density);
+            elemIndices,
+            triElements,
+            triDisp,
+            triStageStartDisp,
+            outEnergy,
+            triRes,
+            gravity,
+            density);
       }
 
-      // Gather predicted target using the stride-18 padded L2G. GatherPredTarget reads only the
-      // first 3 nodes at the correct stride-18 offsets.
-      fem::BatchElementVector<kBatchSize, ShellTriangleElement> stageStartTarget;
-      fem::GatherPredTarget<
-          kBatchSize,
-          ShellTriangleElement,
-          /*kGatherVelocity*/ true,
-          fem::kSpaceDim3,
-          kStencilDofs>(
-          indicesFlat, elemIndices, stageStartDispl, stageStartVel, dtStage, stageStartTarget);
+      // Gather the predicted target with the stride-18 padded L2G. GatherBatchElementVector reads
+      // only the first 3 nodes at the stride-18 offsets.
+      fem::BatchElementVector<kBatchSize, ShellTriangleElement> predTargetBatch MOCHI_NO_INIT;
+      fem::
+          GatherBatchElementVector<kBatchSize, ShellTriangleElement, fem::kSpaceDim3, kStencilDofs>(
+              indicesFlat, elemIndices, predTarget, predTargetBatch);
       out |= fem::InertiaWork<kBatchSize>(
           elemIndices,
-          highElements,
+          triElements,
           triDisp,
-          MakeConstSpan(stageStartTarget),
+          MakeConstSpan(predTargetBatch),
           outEnergy,
           triRes,
           density,
@@ -183,9 +183,9 @@ template <typename TriElementLow, typename TriElementHigh>
         // stage-start displacement above.
         out |= fem::InertiaWork<kBatchSize>(
             elemIndices,
-            highElements,
+            triElements,
             triDisp,
-            MakeConstSpan(stageStartDispBatch).subspan(0, kTriangleDofs),
+            triStageStartDisp,
             outEnergy,
             triRes,
             density,
@@ -194,7 +194,7 @@ template <typename TriElementLow, typename TriElementHigh>
     }
 
     // --- Stress (membrane + bending) on the full 6-node stencil ---
-    Span<Real3 const> meshNodes = lowElements[0].coordinates;
+    Span<Real3 const> meshNodes = triElements[0].coordinates;
     out |= fem::ShellWork<kBatchSize>(
         stencilGlobalNodes,
         meshNodes,
@@ -206,31 +206,36 @@ template <typename TriElementLow, typename TriElementHigh>
         membraneMu,
         bendingAlpha,
         bendingBeta,
+        membraneCollapseBarrierStiffness,
         projectPsd,
         stiffnessDampingFactor,
         hasStiffnessDamping ? &stageStartDispBatch : nullptr);
+
+    // --- Inertia and mass-damping dresidual on the 3-node triangle sub-stencil ---
+    if (outDRes) {
+      out |= fem::AddMassToDRes<kBatchSize, ShellStencilElement>(
+          elemIndices, triElements, density * massScale, *outDRes);
+    }
 
     return out;
   };
 }
 
 // Assemble just the volume term into CActorSnle.
-MOCHI_API void AssembleBody(
+void AssembleBody(
     AssemblyParams const& params, // external parameter
     ecs::Included<TagShellActor>,
     ecs::CtxGlobal<CSceneGravity const> sceneGravity,
     ecs::OptionalTag<TagUseGravity> hasGravityTag,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CFemSurfaceDiscretizationP1Q1 const& femLowVolDisc,
-    CFemSurfaceDiscretizationP1Q3 const& femHighVolDisc,
+    CFemSurfaceDiscretizationP1Q1 const& femSurfDisc,
     CRootTransform const& rootTransform,
     CShellMaterialParams const& materialParams,
     CTimeIntegratorState const& intState,
     CDisplacementSlice<real, TimeStep::Current> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart> const& stageStartDispl,
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
-    CMassMatrix const& massMatrix,
     CExternalForces const& externalForces,
     CActorSnle& outActorSnle);
 
@@ -242,8 +247,9 @@ MOCHI_API void AssembleBody(
  * world coordinates).
  * @param[in] worldFromLocal Rigid transform from the actor's local frame to world.
  * @param[in] displacements Current displacement DoFs in the actor's local frame.
- * @param[in,out] outObj Objective accumulator. If non-null, `dot(displacement, force)` (in local
- * coordinates) is subtracted from it.
+ * @param[in] stageStartDisplacements Stage-start displacement DoFs in the actor's local frame.
+ * @param[in,out] outObj Objective accumulator. If non-null, `dot(displacement -
+ * stageStartDisplacement, force)` (in local coordinates) is subtracted from it.
  * @param[in,out] outRes Residual accumulator. If non-null, the local-frame force is subtracted
  * from the residual entries at the affected DoFs.
  *
@@ -254,6 +260,7 @@ void AddExternalForces(
     CExternalForces const& externalForces,
     TransformRT const& worldFromLocal,
     ColumnVectorView<real const> displacements,
+    ColumnVectorView<real const> stageStartDisplacements,
     double* outObj,
     ColumnVectorView<real>* outRes);
 
@@ -265,6 +272,22 @@ void EntityIncrementStep(
     CVelocitySlice<real, TimeStep::Current>& currVel,
     CDisplacementSlice<real, TimeStep::Previous>& prevDispl,
     CVelocitySlice<real, TimeStep::Previous>& prevVel);
+
+/*
+ * Reconstructs the begin-of-step @ref TimeStep::Previous state from the integration history if
+ * history is present and the integration method allows, otherwise it estimates the state from
+ * constant velocity.
+ */
+void EntityReconstructPreviousStep(
+    ecs::Included<TagShellActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CDisplacementSlice<real, TimeStep::Current> const& currDispl,
+    CVelocitySlice<real, TimeStep::Current> const& currVel,
+    CIntegrationDisplacementSlices const& intDispls,
+    CIntegrationVelocitySlices<DisplacementLayer::Default> const& intVels,
+    CDisplacementSlice<real, TimeStep::Previous>& outPrevDispl,
+    CVelocitySlice<real, TimeStep::Previous>& outPrevVel);
 
 void EntityPreFirstStage(
     ecs::Included<TagShellActor>,
@@ -337,6 +360,7 @@ void AssembleAsyncContact(
     AssemblyParams const& params, // external parameter
     entt::entity e,
     ecs::Included<TagShellActor, TagUseContact>,
+    ecs::Excluded<TagUseDeformableContactSkin>,
     ecs::OptionalTag<TagQueryActiveContacts> queryActiveContacts,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     CTimeIntegratorState const& intState,
@@ -346,34 +370,31 @@ void AssembleAsyncContact(
     CContactNodalBasedStructure const& contactNbs,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CRootTransform const& rootTransform,
     CDeformablePointAsyncCollisionsResponse& outResponse,
     CActorSnle& outActorSnle);
 
-// Update CBoundingVolume<TimeStep::Current>.localShape based on the deformation of the shell. kStep
-// defines the data to be used in the update, not the component storing the result. There's no
-// CBoundingVolume<TimeStep::StageStart>, as it's not needed. We do bound checks in stage-start
-// collision detection, but we can use CBoundingVolume<TimeStep::Current> for this.
+// Update CBoundingVolume.localShape based on the deformation of the shell. kStep selects the
+// displacement state used to compute the bounds.
 template <TimeStep kStep>
 void UpdateBounds(
     ecs::Included<TagShellActor>,
+    ecs::Excluded<TagUseDeformableContactSkin>,
     CTriangularMesh const& meshComponent,
     CFinalDisplacementRef<kStep> const& solComponent,
     CPointCloudColliderParams const* pointCloudColliderParams,
-    CBoundingVolume<TimeStep::Current>& outBounds) {
+    CBoundingVolume& outBounds) {
   static_assert(kStep == TimeStep::Current || kStep == TimeStep::StageStart);
   MOCHI_PROFILE_SCOPE();
-  auto const& sol = solComponent.value;
-  auto nodeCoordinates = meshComponent.mesh->GetNodeCoordinates();
-  auto nodeDisplacements = Unflatten<Real3 const>(sol.GetConstSpan());
-  Obb bounds = GetObb(CalcAabbWithDisplacements(nodeCoordinates, nodeDisplacements));
-  // NOTE: Contact padding will be automatically added elsewhere if shell-actors become first-class
-  // colliders without separate contact collision detection and parameters.
+
+  auto const nodeDisplacements = Unflatten<Real3 const>(solComponent.value.GetConstSpan());
+  Aabb bounds =
+      CalcAabbWithDisplacements(meshComponent.mesh->GetNodeCoordinates(), nodeDisplacements);
   if (pointCloudColliderParams) {
-    bounds = ExpandShape(bounds, pointCloudColliderParams->radius);
+    bounds = GetAabb(ExpandShape(GetObb(bounds), pointCloudColliderParams->radius));
   }
-  outBounds.localShape = bounds;
+  outBounds.localShape = GetObb(bounds);
 }
 
 void InitializeOnce(entt::registry& reg);
@@ -382,13 +403,15 @@ void InitializeOnce(entt::registry& reg);
 [[nodiscard]] real GetActorMass(entt::registry const& reg, entt::entity actor);
 
 // Validate ShellMaterialParams for physical admissibility:
-//  - All seven fields finite.
-//  - membraneMu > 0 and membraneLambda > -membraneMu (2D plane-strain bulk-modulus positivity).
+//  - All fields finite.
+//  - membraneMu > 0 and membraneLambda > -membraneMu (positive 2D bulk modulus
+//    membraneLambda + membraneMu).
 //  - bendingBeta > 0 and bendingAlpha > -bendingBeta / 2 (analogous bound for bending
 //    coefficients).
 //  - density > 0.
 //  - massDampingCoefficient >= 0.
 //  - stiffnessDampingCoefficient >= 0.
+//  - membraneCollapseBarrierScale >= 0.
 void ValidateShellMaterialParams(experimental::ShellMaterialParams const& params, Error& error);
 
 } // namespace mochi::shell

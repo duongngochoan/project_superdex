@@ -156,11 +156,24 @@ static Actor* CreateSoftCube(
     Scene* scene,
     real scale,
     Real3 position,
-    RotationAxis90 rotationAxis = RotationAxis90::None) {
-  auto shape = CreateCubeShape(scene, scale);
+    RotationAxis90 rotationAxis = RotationAxis90::None,
+    bool useContactSkin = false) {
+  ShapeHandle shape;
+  if (useContactSkin) {
+    ModelData model = test::CreateUnitCubeContactSkinModel();
+    for (auto* mesh : {&*model.mesh, &*model.contactSkinMesh}) {
+      for (real& coordinate : mesh->coordinates) {
+        coordinate *= scale;
+      }
+    }
+    shape = scene->GetContext()->CreateModelShape(model, ErrorAssert{});
+  } else {
+    shape = CreateCubeShape(scene, scale);
+  }
   SoftActorParams caparams;
   caparams.name = "SoftCube";
   caparams.shape = shape;
+  caparams.useContactSkin = useContactSkin;
   caparams.worldFromLocal = GetCubeRotatedTransform(rotationAxis, scale, position);
   // Hard code contact and material params in case the default change in a way that would affect
   // this test.
@@ -453,6 +466,8 @@ static void TestQuery(
     case QueryType::SurfaceNodeNormals:
     case QueryType::VisualNodePositions:
     case QueryType::VisualNodeNormals:
+    case QueryType::ContactSkinNodePositions:
+    case QueryType::ContactSkinNodeNormals:
     case QueryType::ElasticEnergy:
       computeImmediately = true;
       break;
@@ -1113,6 +1128,18 @@ TEST_P(NodeContactForcesTest, DynamicSoft_on_StaticRigid) {
   TestNodeContactForces(_scene, bodyA, bodyB);
 }
 
+TEST_P(NodeContactForcesTest, DynamicSoftContactSkin_on_StaticRigid) {
+  // Same as DynamicSoft_on_StaticRigid, but with skinned async contact assembly, which stores
+  // forces in collider space rather than colliding space.
+  auto params = GetParam();
+  Actor* bodyA = CreateSoftCube(
+      _scene, 0.1_r, Real3{-1_r, 0.001_r, 0_r}, params.topRotation, /*useContactSkin=*/true);
+  Actor* bodyB = CreateSoftCube(
+      _scene, 0.11_r, Real3{-1_r, 0.001_r, 0_r}, params.bottomRotation, /*useContactSkin=*/true);
+  CreateStaticGroundPlane(_scene, -1);
+  TestNodeContactForces(_scene, bodyA, bodyB);
+}
+
 TEST_P(NodeContactForcesTest, DynamicRigid_on_StaticRigid) {
   // Check that QueryType::NodeContactForces gives the same total force as QueryType::ContactPoints.
   // Rigid object on the ground.
@@ -1299,13 +1326,10 @@ TEST_IF_F(MOCHI_HDF5_AND_INTERNAL, ActorQueryTest, ElementsGradients) {
   }
 }
 
-// TODO[T143757849] Add unit tests for the following:
-//    QueryType::VisualNodePositions (rigid actors)
-//    QueryType::VisualNodeNormals
-
 // Test that visual node position and normal queries work for shell actors with a visual mesh
-// embedding.
-TEST_F(ActorQueryTest, ShellVisualNodePositionsAndNormals) {
+// embedding, and for static rigid actors, which report the visual mesh's reference coordinates.
+// TODO: Test visual node position and normal queries on dynamic rigid actors.
+TEST_F(ActorQueryTest, VisualNodePositionsAndNormals) {
   // Sim mesh: a square made of 2 triangles with 4 nodes.
   //   node 0: (0, 0, 0)
   //   node 1: (1, 0, 0)
@@ -1373,6 +1397,222 @@ TEST_F(ActorQueryTest, ShellVisualNodePositionsAndNormals) {
 
   ShapeHandle shape = _mochiContext->CreateModelShape(modelData, test::ExpectOK{});
 
+  MeshDataView shapeVisualMesh = _mochiContext->GetShapeVisualMesh(shape, test::ExpectOK{});
+  EXPECT_EQ(4, shapeVisualMesh.GetNumNodes());
+  EXPECT_SPAN_EQ(MakeConstSpan(visCoords), shapeVisualMesh.coordinates);
+  EXPECT_SPAN_EQ(MakeConstSpan(visConn), shapeVisualMesh.connectivity);
+
+  ShellActorParams shellParams;
+  shellParams.shape = shape;
+  shellParams.material.density = 1_r;
+  shellParams.layer = kDefaultLayer;
+
+  RigidActorParams staticParams;
+  staticParams.shape = shape;
+  staticParams.isStatic = true;
+  staticParams.colliderType = ColliderType::None;
+  // The results are in the local frame, so the pose must not change them.
+  staticParams.worldFromLocal = TransformRT{Real3{1_r, 2_r, 3_r}};
+
+  Real3 constexpr kExpected0{0_r, 0_r, 0_r};
+  Real3 constexpr kExpected1{0.5_r, 0_r, 0_r};
+  Real3 constexpr kExpected2{2_r / 3_r, 1_r / 3_r, 0_r};
+  Real3 constexpr kExpected3{0_r, 1_r, 0_r};
+
+  for (Actor* actor :
+       {CreateShellActor(_scene, shellParams, test::ExpectOK{}),
+        _scene->CreateRigidActor(staticParams, test::ExpectOK{})}) {
+    MOCHI_DEFER(_scene->DestroyActor(actor));
+
+    auto const actorVisualMesh = actor->GetVisualMesh();
+    EXPECT_EQ(4, actorVisualMesh.GetNumNodes());
+    EXPECT_SPAN_EQ(MakeConstSpan(visCoords), actorVisualMesh.coordinates);
+    EXPECT_SPAN_EQ(MakeConstSpan(visConn), actorVisualMesh.connectivity);
+
+    auto positionsQuery =
+        actor->RegisterQueryAndCompute(QueryType::VisualNodePositions, test::ExpectOK{});
+    {
+      MOCHI_DEFER(actor->CancelQuery(positionsQuery));
+      auto visPositions =
+          Unflatten<Real3 const>(actor->GetVisualMeshNodePositionsLocal(test::ExpectOK{}));
+      ASSERT_EQ(4, isize(visPositions));
+
+      // Verify: at the reference configuration, visual positions should match
+      // the barycentric interpolation of the sim mesh positions.
+      EXPECT_NEAR_EQ(visPositions[0], kExpected0);
+      EXPECT_NEAR_EQ(visPositions[1], kExpected1);
+      EXPECT_NEAR_EQ(visPositions[2], kExpected2);
+      EXPECT_NEAR_EQ(visPositions[3], kExpected3);
+    }
+
+    auto normalsQuery =
+        actor->RegisterQueryAndCompute(QueryType::VisualNodeNormals, test::ExpectOK{});
+    MOCHI_DEFER(actor->CancelQuery(normalsQuery));
+
+    auto visNormals =
+        Unflatten<Real3 const>(actor->GetVisualMeshNodeNormalsLocal(test::ExpectOK{}));
+    ASSERT_EQ(4, isize(visNormals));
+    Real3 constexpr kExpectedReferencedNormal{0_r, 0_r, 1_r};
+    EXPECT_NEAR_EQ(visNormals[0], Real3{});
+    EXPECT_NEAR_EQ(visNormals[1], kExpectedReferencedNormal);
+    EXPECT_NEAR_EQ(visNormals[2], kExpectedReferencedNormal);
+    EXPECT_NEAR_EQ(visNormals[3], kExpectedReferencedNormal);
+  }
+}
+
+// Shell whose unit-square physics mesh embeds a 3-node, 1-triangle contact skin.
+static Actor* CreateSkinnedShell(Scene* scene, Real3 const& position) {
+  ModelData modelData;
+  modelData.mesh.emplace();
+  modelData.mesh->nodesPerElement = 3;
+  modelData.mesh->coordinates = {0_r, 0_r, 0_r, 1_r, 0_r, 0_r, 1_r, 1_r, 0_r, 0_r, 1_r, 0_r};
+  modelData.mesh->connectivity = {0, 1, 2, 0, 2, 3};
+  modelData.contactSkinMesh.emplace();
+  modelData.contactSkinMesh->nodesPerElement = 3;
+  modelData.contactSkinMesh->coordinates = {0.5_r, 0_r, 0_r, 0.5_r, 0.5_r, 0_r, 0_r, 1_r, 0_r};
+  modelData.contactSkinMesh->connectivity = {0, 1, 2};
+  modelData.contactSkinMesh->skinning.emplace();
+  modelData.contactSkinMesh->skinning->weightsPerNode = 2;
+  modelData.contactSkinMesh->skinning->indices = {0, 1, 0, 2, 3, 0};
+  modelData.contactSkinMesh->skinning->weights = {0.5_r, 0.5_r, 0.5_r, 0.5_r, 1_r, 0_r};
+
+  ShellActorParams params;
+  params.shape = scene->GetContext()->CreateModelShape(modelData, ErrorAssert{});
+  params.material.density = 1_r;
+  params.layer = kDefaultLayer;
+  params.worldFromLocal.SetTranslation(position);
+  return CreateShellActor(scene, params, ErrorAssert{});
+}
+
+using ContactSkinGetter = Span<real const> (Actor::*)(Error&) const;
+
+static void ExpectContactSkinResults(
+    ContactSkinGetter getter,
+    int numSkinNodes,
+    bool expectResults,
+    Actor const* actor) {
+  Error error;
+  auto const values = (actor->*getter)(error);
+  if (expectResults) {
+    EXPECT_OK(error);
+    EXPECT_EQ(kSpaceDim3 * numSkinNodes, isize(values));
+  } else {
+    EXPECT_NOT_OK(error);
+  }
+}
+
+static void ExpectSkinnedShellContactSkinResults(
+    ContactSkinGetter getter,
+    bool expectResults,
+    Actor const* actor) {
+  ExpectContactSkinResults(getter, 3, expectResults, actor);
+}
+
+static Actor* CreateSkinnedSoftCube(Scene* scene, real scale, Real3 position) {
+  return CreateSoftCube(scene, scale, position, RotationAxis90::None, /*useContactSkin=*/true);
+}
+
+static void ExpectSkinnedSoftContactSkinResults(
+    ContactSkinGetter getter,
+    bool expectResults,
+    Actor const* actor) {
+  ExpectContactSkinResults(
+      getter, isize(test::CreateMinimalTriMeshUnitCube().first), expectResults, actor);
+}
+
+TEST_F(ActorQueryTest, ContactSkinNodePositions_Shell) {
+  TestQuery(
+      _scene,
+      CreateSkinnedShell(_scene, Real3{-10_r, 0_r, 0_r}),
+      CreateSkinnedShell(_scene, Real3{10_r, 0_r, 0_r}),
+      QueryType::ContactSkinNodePositions,
+      [](bool expectResults, Actor const* a) {
+        ExpectSkinnedShellContactSkinResults(
+            &Actor::GetContactSkinMeshNodePositionsLocal, expectResults, a);
+      });
+}
+
+TEST_F(ActorQueryTest, ContactSkinNodeNormals_Shell) {
+  TestQuery(
+      _scene,
+      CreateSkinnedShell(_scene, Real3{-10_r, 0_r, 0_r}),
+      CreateSkinnedShell(_scene, Real3{10_r, 0_r, 0_r}),
+      QueryType::ContactSkinNodeNormals,
+      [](bool expectResults, Actor const* a) {
+        ExpectSkinnedShellContactSkinResults(
+            &Actor::GetContactSkinMeshNodeNormalsLocal, expectResults, a);
+      });
+}
+
+TEST_F(ActorQueryTest, ContactSkinNodePositions_Soft) {
+  TestQuery(
+      _scene,
+      CreateSkinnedSoftCube(_scene, 1_r, Real3{-10_r, 0_r, 0_r}),
+      CreateSkinnedSoftCube(_scene, 2_r, Real3{10_r, 0_r, 0_r}),
+      QueryType::ContactSkinNodePositions,
+      [](bool expectResults, Actor const* a) {
+        ExpectSkinnedSoftContactSkinResults(
+            &Actor::GetContactSkinMeshNodePositionsLocal, expectResults, a);
+      });
+}
+
+TEST_F(ActorQueryTest, ContactSkinNodeNormals_Soft) {
+  TestQuery(
+      _scene,
+      CreateSkinnedSoftCube(_scene, 1_r, Real3{-10_r, 0_r, 0_r}),
+      CreateSkinnedSoftCube(_scene, 2_r, Real3{10_r, 0_r, 0_r}),
+      QueryType::ContactSkinNodeNormals,
+      [](bool expectResults, Actor const* a) {
+        ExpectSkinnedSoftContactSkinResults(
+            &Actor::GetContactSkinMeshNodeNormalsLocal, expectResults, a);
+      });
+}
+
+// Cancelling a contact skin query releases only its own NodePositions prerequisite ref.
+TEST_F(ActorQueryTest, ContactSkinQueryPreservesUserNodePositionsQuery) {
+  Actor* const actor = CreateSkinnedShell(_scene, Real3{});
+  QueryHandle const nodePositions =
+      actor->RegisterQueryAndCompute(QueryType::NodePositions, test::ExpectOK{});
+  actor->CancelQuery(
+      actor->RegisterQueryAndCompute(QueryType::ContactSkinNodePositions, test::ExpectOK{}));
+  _scene->Step(0.001_r);
+  EXPECT_FALSE(actor->GetNodePositionsLocal(test::ExpectOK{}).empty());
+  actor->CancelQuery(nodePositions);
+}
+
+// Test that contact skin node position and normal queries work for shell actors whose shape has a
+// linearly embedded contact skin.
+TEST_F(ActorQueryTest, ShellContactSkinNodePositionsAndNormals) {
+  // Sim mesh: a square made of 2 triangles with 4 nodes.
+  DynamicArray<real> const simCoords = {0_r, 0_r, 0_r, 1_r, 0_r, 0_r, 1_r, 1_r, 0_r, 0_r, 1_r, 0_r};
+  DynamicArray<int> const simConn = {0, 1, 2, 0, 2, 3};
+
+  // Contact skin: 3 nodes, 1 triangle.
+  //   skin 0: midpoint of sim nodes 0 and 1
+  //   skin 1: centroid of sim nodes 0, 1, 2
+  //   skin 2: exactly sim node 3
+  DynamicArray<real> const skinCoords = {0.5_r, 0_r, 0_r, 2_r / 3_r, 1_r / 3_r, 0_r, 0_r, 1_r, 0_r};
+  DynamicArray<int> const skinConn = {0, 1, 2};
+  int const weightsPerNode = 3;
+  DynamicArray<int> const skinIndices = {0, 1, 0, 0, 1, 2, 3, 0, 0};
+  DynamicArray<real> const skinWeights = {
+      0.5_r, 0.5_r, 0_r, 1_r / 3_r, 1_r / 3_r, 1_r / 3_r, 1_r, 0_r, 0_r};
+
+  ModelData modelData;
+  modelData.mesh.emplace();
+  modelData.mesh->nodesPerElement = 3;
+  modelData.mesh->coordinates = simCoords;
+  modelData.mesh->connectivity = simConn;
+  modelData.contactSkinMesh.emplace();
+  modelData.contactSkinMesh->nodesPerElement = 3;
+  modelData.contactSkinMesh->coordinates = skinCoords;
+  modelData.contactSkinMesh->connectivity = skinConn;
+  modelData.contactSkinMesh->skinning.emplace();
+  modelData.contactSkinMesh->skinning->weightsPerNode = weightsPerNode;
+  modelData.contactSkinMesh->skinning->indices = skinIndices;
+  modelData.contactSkinMesh->skinning->weights = skinWeights;
+  ShapeHandle const shape = _mochiContext->CreateModelShape(modelData, test::ExpectOK{});
+
   ShellActorParams params;
   params.shape = shape;
   params.material.density = 1_r;
@@ -1380,48 +1620,71 @@ TEST_F(ActorQueryTest, ShellVisualNodePositionsAndNormals) {
   auto* actor = CreateShellActor(_scene, params, test::ExpectOK{});
   MOCHI_DEFER(_scene->DestroyActor(actor));
 
-  auto const actorVisualMesh = actor->GetVisualMesh();
-  EXPECT_EQ(4, actorVisualMesh.GetNumNodes());
-  EXPECT_SPAN_EQ(MakeConstSpan(visCoords), actorVisualMesh.coordinates);
-  EXPECT_SPAN_EQ(MakeConstSpan(visConn), actorVisualMesh.connectivity);
+  MeshDataView const actorSkin = actor->GetContactSkinMesh();
+  EXPECT_SPAN_EQ(MakeConstSpan(skinCoords), actorSkin.coordinates);
+  EXPECT_SPAN_EQ(MakeConstSpan(skinConn), actorSkin.connectivity);
+  ASSERT_TRUE(actorSkin.skinning.has_value());
+  EXPECT_EQ(weightsPerNode, actorSkin.skinning->weightsPerNode);
+  EXPECT_SPAN_EQ(MakeConstSpan(skinIndices), actorSkin.skinning->indices);
+  EXPECT_SPAN_EQ(MakeConstSpan(skinWeights), actorSkin.skinning->weights);
 
-  MeshDataView shapeVisualMesh = _mochiContext->GetShapeVisualMesh(shape, test::ExpectOK{});
-  EXPECT_EQ(4, shapeVisualMesh.GetNumNodes());
-  EXPECT_SPAN_EQ(MakeConstSpan(visCoords), shapeVisualMesh.coordinates);
-  EXPECT_SPAN_EQ(MakeConstSpan(visConn), shapeVisualMesh.connectivity);
-
-  Real3 constexpr kExpected0{0_r, 0_r, 0_r};
-  Real3 constexpr kExpected1{0.5_r, 0_r, 0_r};
-  Real3 constexpr kExpected2{2_r / 3_r, 1_r / 3_r, 0_r};
-  Real3 constexpr kExpected3{0_r, 1_r, 0_r};
-
-  auto positionsQuery =
-      actor->RegisterQueryAndCompute(QueryType::VisualNodePositions, test::ExpectOK{});
-  {
-    MOCHI_DEFER(actor->CancelQuery(positionsQuery));
-    auto visPositions =
-        Unflatten<Real3 const>(actor->GetVisualMeshNodePositionsLocal(test::ExpectOK{}));
-    ASSERT_EQ(4, isize(visPositions));
-
-    // Verify: at the reference configuration, visual positions should match
-    // the barycentric interpolation of the sim mesh positions.
-    EXPECT_NEAR_EQ(visPositions[0], kExpected0);
-    EXPECT_NEAR_EQ(visPositions[1], kExpected1);
-    EXPECT_NEAR_EQ(visPositions[2], kExpected2);
-    EXPECT_NEAR_EQ(visPositions[3], kExpected3);
-  }
-
-  auto normalsQuery =
-      actor->RegisterQueryAndCompute(QueryType::VisualNodeNormals, test::ExpectOK{});
+  auto const positionsQuery =
+      actor->RegisterQueryAndCompute(QueryType::ContactSkinNodePositions, test::ExpectOK{});
+  MOCHI_DEFER(actor->CancelQuery(positionsQuery));
+  auto const normalsQuery =
+      actor->RegisterQueryAndCompute(QueryType::ContactSkinNodeNormals, test::ExpectOK{});
   MOCHI_DEFER(actor->CancelQuery(normalsQuery));
 
-  auto visNormals = Unflatten<Real3 const>(actor->GetVisualMeshNodeNormalsLocal(test::ExpectOK{}));
-  ASSERT_EQ(4, isize(visNormals));
-  Real3 constexpr kExpectedReferencedNormal{0_r, 0_r, 1_r};
-  EXPECT_NEAR_EQ(visNormals[0], Real3{});
-  EXPECT_NEAR_EQ(visNormals[1], kExpectedReferencedNormal);
-  EXPECT_NEAR_EQ(visNormals[2], kExpectedReferencedNormal);
-  EXPECT_NEAR_EQ(visNormals[3], kExpectedReferencedNormal);
+  auto const referencePositions =
+      Unflatten<Real3 const>(actor->GetContactSkinMeshNodePositionsLocal(test::ExpectOK{}));
+  auto const expectedReferencePositions = Unflatten<Real3 const>(MakeConstSpan(skinCoords));
+  ASSERT_EQ(isize(expectedReferencePositions), isize(referencePositions));
+  for (int i = 0; i < isize(referencePositions); ++i) {
+    EXPECT_NEAR_EQ(expectedReferencePositions[i], referencePositions[i]);
+  }
+  for (Real3 const& normal :
+       Unflatten<Real3 const>(actor->GetContactSkinMeshNodeNormalsLocal(test::ExpectOK{}))) {
+    EXPECT_NEAR_EQ((Real3{0_r, 0_r, 1_r}), normal);
+  }
+
+  // Displace sim node i by (0, 0, 0.3 * i).
+  DynamicArray<real> const displacedSimCoords = {
+      0_r, 0_r, 0_r, 1_r, 0_r, 0.3_r, 1_r, 1_r, 0.6_r, 0_r, 1_r, 0.9_r};
+  actor->SetNodePositionsLocal(MakeConstSpan(displacedSimCoords), test::ExpectOK{});
+  _scene->Step(0_r);
+
+  std::array<Real3, 3> const expectedPositions = {
+      Real3{0.5_r, 0_r, 0.15_r}, Real3{2_r / 3_r, 1_r / 3_r, 0.3_r}, Real3{0_r, 1_r, 0.9_r}};
+  auto const displacedPositions =
+      Unflatten<Real3 const>(actor->GetContactSkinMeshNodePositionsLocal(test::ExpectOK{}));
+  ASSERT_EQ(isize(expectedPositions), isize(displacedPositions));
+  for (int i = 0; i < isize(displacedPositions); ++i) {
+    EXPECT_NEAR_EQ(expectedPositions[i], displacedPositions[i]);
+  }
+  Real3 const expectedNormal = Normalize(Cross(
+      expectedPositions[1] - expectedPositions[0], expectedPositions[2] - expectedPositions[0]));
+  for (Real3 const& normal :
+       Unflatten<Real3 const>(actor->GetContactSkinMeshNodeNormalsLocal(test::ExpectOK{}))) {
+    EXPECT_NEAR_EQ(expectedNormal, normal);
+  }
+}
+
+TEST_F(ActorQueryTest, ContactSkinQueriesRequireContactSkin) {
+  DynamicArray<real> const simCoords = {0_r, 0_r, 0_r, 1_r, 0_r, 0_r, 1_r, 1_r, 0_r};
+  DynamicArray<int> const simConn = {0, 1, 2};
+  ShellActorParams shellParams;
+  shellParams.shape = _mochiContext->CreateTriMeshShape(
+      MakeConstSpan(simCoords), MakeConstSpan(simConn), test::ExpectOK{});
+  shellParams.material.density = 1_r;
+
+  for (Actor const* actor :
+       {CreateRigidCube(_scene, 1_r, Real3{}),
+        CreateSoftCube(_scene, 1_r, Real3{}),
+        CreateShellActor(_scene, shellParams, test::ExpectOK{})}) {
+    EXPECT_EQ(MeshDataView{}, actor->GetContactSkinMesh());
+    EXPECT_FALSE(actor->IsQuerySupported(QueryType::ContactSkinNodePositions));
+    EXPECT_FALSE(actor->IsQuerySupported(QueryType::ContactSkinNodeNormals));
+  }
 }
 
 // Test fixture which creates an empty mochi::Scene
@@ -1538,6 +1801,18 @@ TEST_F(ActorQueryTest, GetPointsDistanceToSurface) {
       kBoxExpectedDistances);
   // Sphere
   RunTest(CreateStaticSphere(_scene, 1_r, kPosition), kSpherePoints, kSphereExpectedDistances);
+  // Sphere inscribed in a box mesh: same center and radius as the sphere above
+  Real3 constexpr kHalfExtents = {3_r, 2_r, 1_r};
+  auto [coordinates, connectivity] = test::CreateMinimalTetMeshUnitCube(2_r * kHalfExtents);
+  RigidActorParams const boxParams{
+      .shape = _mochiContext->CreateTetMeshShape(
+          Flatten(MakeSpan(coordinates)), Flatten(MakeSpan(connectivity)), test::ExpectOK{}),
+      .worldFromLocal = TransformRT{kPosition - kHalfExtents},
+      .colliderType = ColliderType::Sphere};
+  RunTest(
+      _scene->CreateRigidActor(boxParams, test::ExpectOK{}),
+      kSpherePoints,
+      kSphereExpectedDistances);
   // Plane
   RunTest(CreateStaticGroundPlane(_scene, kHeight), kPlanePoints, kPlaneExpectedDistances);
 }

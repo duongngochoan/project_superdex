@@ -39,16 +39,37 @@ static_assert(
 
 static constexpr real kFdStep = 1e-5_r;
 
-// Verifies that the batched SIMD sampler @ref DenseGrid3D::TrilinearSampleBatch produces results
-// equivalent to the per-point @ref DenseGrid3D::TrilinearSample and
-// @ref DenseGrid3D::TrilinearSampleGradient APIs when given the same points. Also checks that
+using RealVec = Simd<real>;
+using RealVec3 = NdArray<RealVec, 3>;
+
+// Samples the value at a single point by broadcasting it to every lane.
+template <GridExtrapolation kMode>
+static real SampleValue(DenseGrid3D<real> const& grid, Real3 const& point) {
+  RealVec value MOCHI_NO_INIT;
+  grid.template TrilinearSampleBatch<RealVec::kSize, kMode>(BroadcastEach<RealVec>(point), &value);
+  return value[0];
+}
+
+// Samples the gradient at a single point by broadcasting it to every lane.
+template <GridExtrapolation kMode>
+static Real3 SampleGradient(DenseGrid3D<real> const& grid, Real3 const& point) {
+  RealVec3 grad MOCHI_NO_INIT;
+  grid.template TrilinearSampleBatch<
+      RealVec::kSize,
+      kMode,
+      /*kComputeValues*/ false,
+      /*kComputeGradients*/ true>(BroadcastEach<RealVec>(point), nullptr, &grad);
+  return Real3{grad[0][0], grad[1][0], grad[2][0]};
+}
+
+// Verifies that each lane of a batch of distinct points sampled with
+// @ref DenseGrid3D::TrilinearSampleBatch matches sampling that point alone. Also checks that
 // sampling the value and gradient simultaneously matches sampling them separately.
 template <GridExtrapolation kMode>
 static void TestTrilinearSampleBatchEquivalence(
     DenseGrid3D<real> const& grid,
     Span<Real3 const> samplePoints) {
-  constexpr int kBatchSize = Simd<real>::kSize;
-  constexpr auto kSamplerOptions = TrilinearSamplerOptions<kMode>{};
+  constexpr int kBatchSize = RealVec::kSize;
   constexpr bool kIsGradientSupported = (kMode != GridExtrapolation::LowerBound);
 
   MOCHI_ASSERT_VERBOSE(!samplePoints.empty(), "Need at least one sample point.");
@@ -59,38 +80,27 @@ static void TestTrilinearSampleBatchEquivalence(
   for (int i = 0; i < kBatchSize; ++i) {
     batchPoints[i] = samplePoints[i % isize(samplePoints)];
   }
-
-  // Reference results from the per-point APIs.
-  std::array<real, kBatchSize> refValues MOCHI_NO_INIT;
-  grid.TrilinearSample(MakeConstSpan(batchPoints), MakeSpan(refValues), kSamplerOptions);
-
-  // Pack the points into transposed SIMD form (matching the sampler's internal vectorization).
-  NdArray<Simd<real, kBatchSize>, 3> simdPoints;
+  RealVec3 simdPoints;
   LoadTransposed(&batchPoints[0][0], simdPoints[0], simdPoints[1], simdPoints[2]);
 
-  // Value-only batched sampling matches TrilinearSample.
-  Simd<real, kBatchSize> batchValues;
+  RealVec batchValues;
   grid.template TrilinearSampleBatch<kBatchSize, kMode>(simdPoints, &batchValues);
   for (int i = 0; i < kBatchSize; ++i) {
-    EXPECT_NEAR_EQ(refValues[i], Get(batchValues, i));
+    EXPECT_NEAR_EQ(SampleValue<kMode>(grid, batchPoints[i]), batchValues[i]);
   }
 
   if constexpr (kIsGradientSupported) {
-    std::array<Real3, kBatchSize> refGradients MOCHI_NO_INIT;
-    grid.TrilinearSampleGradient(
-        MakeConstSpan(batchPoints), MakeSpan(refGradients), kSamplerOptions);
-
-    // Gradient-only batched sampling matches TrilinearSampleGradient.
-    NdArray<Simd<real, kBatchSize>, 3> batchGradients;
+    // Optimized emulated SIMD can round broadcast and distinct-lane gradients differently.
+    constexpr real kGradientComparisonTolerance = 4e-6_r;
+    RealVec3 batchGradients;
     grid.template TrilinearSampleBatch<
         kBatchSize,
         kMode,
         /*kComputeValues*/ false,
         /*kComputeGradients*/ true>(simdPoints, nullptr, &batchGradients);
 
-    // Sampling the value and gradient simultaneously matches sampling them separately.
-    Simd<real, kBatchSize> bothValues;
-    NdArray<Simd<real, kBatchSize>, 3> bothGradients;
+    RealVec bothValues;
+    RealVec3 bothGradients;
     grid.template TrilinearSampleBatch<
         kBatchSize,
         kMode,
@@ -98,13 +108,12 @@ static void TestTrilinearSampleBatchEquivalence(
         /*kComputeGradients*/ true>(simdPoints, &bothValues, &bothGradients);
 
     for (int i = 0; i < kBatchSize; ++i) {
-      Real3 const batchGrad{
-          Get(batchGradients[0], i), Get(batchGradients[1], i), Get(batchGradients[2], i)};
-      Real3 const bothGrad{
-          Get(bothGradients[0], i), Get(bothGradients[1], i), Get(bothGradients[2], i)};
-      EXPECT_NEAR_EQ(refGradients[i], batchGrad);
-      EXPECT_NEAR_EQ(refValues[i], Get(bothValues, i));
-      EXPECT_NEAR_EQ(refGradients[i], bothGrad);
+      Real3 const refGrad = SampleGradient<kMode>(grid, batchPoints[i]);
+      Real3 const batchGrad{batchGradients[0][i], batchGradients[1][i], batchGradients[2][i]};
+      Real3 const bothGrad{bothGradients[0][i], bothGradients[1][i], bothGradients[2][i]};
+      EXPECT_NEAR_TOL(refGrad, batchGrad, kGradientComparisonTolerance);
+      EXPECT_NEAR_EQ(batchValues[i], bothValues[i]);
+      EXPECT_NEAR_TOL(refGrad, bothGrad, kGradientComparisonTolerance);
     }
   }
 }
@@ -118,70 +127,56 @@ static void TestSignedDistanceScalarField(
     bool expectAccurateGradientDirection,
     bool expectConsistentGradient) {
   constexpr bool kIsGradientSupported = (kMode != GridExtrapolation::LowerBound);
-  constexpr auto kSamplerOptions = TrilinearSamplerOptions<kMode>{};
 
-  // Test various number of points to exercise all codepaths.
-  for (int numPoints : {1, 2, 3, 4, 5, 6, 7, 8, isize(samplePoints)}) {
-    if (numPoints > isize(samplePoints)) {
-      continue;
-    }
-    DynamicArray<real> sd(numPoints);
-    [[maybe_unused]] DynamicArray<Real3> grad(numPoints);
-    grid.TrilinearSample(samplePoints.subspan(0, numPoints), MakeSpan(sd), kSamplerOptions);
-    if constexpr (kIsGradientSupported) {
-      grid.TrilinearSampleGradient(
-          samplePoints.subspan(0, numPoints), MakeSpan(grad), kSamplerOptions);
-    }
+  for (Real3 const& point : samplePoints) {
+    bool const isInteriorPoint = grid.Contains(point);
+    real const sd = SampleValue<kMode>(grid, point);
 
-    for (int i = 0; i < numPoints; ++i) {
-      bool const isInteriorPoint = grid.Contains(samplePoints[i]);
+    real trueSd = 0_r;
+    Real3 trueGrad = {};
+    fn(point, trueSd, trueGrad);
 
-      real trueSd = 0_r;
-      Real3 trueGrad = {};
-      fn(samplePoints[i], trueSd, trueGrad);
-
-      // Check distance.
-      if (isInteriorPoint) {
-        EXPECT_NEAR_TOL(trueSd, sd[i], absTol);
+    // Check distance.
+    if (isInteriorPoint) {
+      EXPECT_NEAR_TOL(trueSd, sd, absTol);
+    } else {
+      if constexpr (kMode == GridExtrapolation::Clamp) {
+        EXPECT_LE(sd, trueSd + absTol);
+      } else if constexpr (kMode == GridExtrapolation::LowerBound) {
+        EXPECT_LE(sd, trueSd + absTol);
       } else {
-        if constexpr (kMode == GridExtrapolation::Clamp) {
-          EXPECT_LE(sd[i], trueSd + absTol);
-        } else if constexpr (kMode == GridExtrapolation::LowerBound) {
-          EXPECT_LE(sd[i], trueSd + absTol);
-        } else {
-          EXPECT_EQ(GridExtrapolation::UpperBound, kMode);
-          EXPECT_GE(sd[i], trueSd - absTol);
-        }
+        EXPECT_EQ(GridExtrapolation::UpperBound, kMode);
+        EXPECT_GE(sd, trueSd - absTol);
+      }
+    }
+
+    // Check gradient.
+    if constexpr (kIsGradientSupported) {
+      Real3 const grad = SampleGradient<kMode>(grid, point);
+      if (expectAccurateGradientDirection && isInteriorPoint) {
+        // Check the computed closest point matches the true closest point. Only for interior
+        // points (the gradient of exterior points is an approximation of the true gradient).
+        Real3 trueClosestPt = point - trueSd * trueGrad;
+        Real3 closestPt = point - sd * grad;
+        EXPECT_LE(Norm(trueClosestPt - closestPt), absTol);
       }
 
-      // Check gradient.
-      if constexpr (kIsGradientSupported) {
-        if (expectAccurateGradientDirection && isInteriorPoint) {
-          // Check the computed closest point matches the true closest point. Only for interior
-          // points (the gradient of exterior points is an approximation of the true gradient).
-          Real3 trueClosestPt = samplePoints[i] - trueSd * trueGrad;
-          Real3 closestPt = samplePoints[i] - sd[i] * grad[i];
-          EXPECT_LE(Norm(trueClosestPt - closestPt), absTol);
-        }
-
-        if (expectConsistentGradient) {
-          // Check the computed gradient is consistent with the computed distance.
-          for (int axis = 0; axis < 3; ++axis) {
-            Real3 pointPlus = samplePoints[i];
-            pointPlus[axis] += kFdStep;
-            real distPlus = 0_r;
-            grid.TrilinearSample(
-                MakeSingletonSpan(pointPlus), MakeSingletonSpan(distPlus), kSamplerOptions);
-            real const fdGrad = (distPlus - sd[i]) / kFdStep;
-            EXPECT_NEAR_RTOL(fdGrad, grad[i][axis], 1e-2_r);
-          }
+      if (expectConsistentGradient) {
+        // Check the computed gradient is consistent with the computed distance.
+        for (int axis = 0; axis < 3; ++axis) {
+          Real3 pointPlus = point;
+          pointPlus[axis] += kFdStep;
+          real const fdGrad = (SampleValue<kMode>(grid, pointPlus) - sd) / kFdStep;
+          EXPECT_NEAR_RTOL(fdGrad, grad[axis], 1e-2_r);
         }
       }
     }
   }
 
-  // Verify the batched SIMD sampler agrees with the per-point APIs on the same data.
-  TestTrilinearSampleBatchEquivalence<kMode>(grid, samplePoints);
+  for (int base = 0; base < isize(samplePoints); base += RealVec::kSize) {
+    TestTrilinearSampleBatchEquivalence<kMode>(
+        grid, samplePoints.subspan(base, Min(RealVec::kSize, isize(samplePoints) - base)));
+  }
 }
 
 // Create a DenseGridField which approximates a function

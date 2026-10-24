@@ -32,8 +32,8 @@ template <typename Scalar, krylov::Direction kMajorDir>
 void ConvertCsrToBsr(
     int blockSize,
     int nBlockRows,
-    int maxNNZBlockPerRow,
-    int* d_csrRowPtr,
+    int maxNnzPerRow,
+    int const* d_bsrRowPtr,
     Scalar const* d_csrVal,
     Scalar* d_bsrVal);
 
@@ -106,7 +106,12 @@ class CudaBsrMatrix {
     //--- Convert the CSR storage of values into CUDA BSR-format
     CudaVector<NonConstScalar> csrVal(AsConstView(A.Values()));
     details::ConvertCsrToBsr<NonConstScalar, kBlockStorage>(
-        kBlockSize, _mb, A.MaxNnzPerRow(), _bsrRowPtr.data(), csrVal.data(), _bsrValues.data());
+        kBlockSize,
+        _mb,
+        A.ComputeMaxNnzPerRow(),
+        _bsrRowPtr.data(),
+        csrVal.data(),
+        _bsrValues.data());
     _bsrDescr = mochi::details::CreateCudaBsrMatDescriptor();
   }
 

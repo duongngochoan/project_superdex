@@ -15,7 +15,6 @@
  */
 
 #include <mochi_core/elements/tetrahedral/basis_functions.h>
-#include <mochi_core/elements/tetrahedral/basis_functions_evaluated.h>
 #include <mochi_core/elements/tetrahedral/finite_element.h>
 #include <mochi_core/elements/tetrahedral/finite_element_trace.h>
 #include <mochi_core/elements/tetrahedral/simplex_quadrature.h>
@@ -300,33 +299,17 @@ TEST(Tetrahedral, SimplexQuadrature) {
   static_assert(NearEqual(0.16666667_r, kQuad.weights[0]));
 }
 
-TEST(Tetrahedral, BasisFunctionsEvaluated) {
-  constexpr int kPolyOrder = 1;
-  constexpr int kNumQuadPoints = 1;
-  auto b = tetrahedral::BasisFunctionsEvaluated<kPolyOrder, kNumQuadPoints>(
-      tetrahedral::kTetrahedralQuadrature1);
+TEST(Tetrahedral, EvaluateBasis) {
+  using Element = tetrahedral::Pk3DElement<1>;
 
-  // constats
-  static_assert(1 == b.kPolyOrder);
-  static_assert(3 == b.kSpaceDim);
-  static_assert(4 == b.kNumDofs);
-  static_assert(1 == b.kNumQuadPoints);
+  // kBasisEvaluated
+  static_assert(NearEqual(Real4{0.25_r, 0.25_r, 0.25_r, 0.25_r}, Element::kBasisEvaluated[0]));
 
-  // basisEvaluated
-  static_assert(2 == b.basisEvaluated.num_dims);
-  static_assert(1 == b.basisEvaluated.dims[0]);
-  static_assert(4 == b.basisEvaluated.dims[1]);
-  assert(NearEqual(NdArray<real, 1, 4>{Real4{0.25_r, 0.25_r, 0.25_r, 0.25_r}}, b.basisEvaluated));
-
-  // dBasisEvaluated
-  static_assert(3 == b.dBasisEvaluated.num_dims);
-  static_assert(1 == b.dBasisEvaluated.dims[0]);
-  static_assert(4 == b.dBasisEvaluated.dims[1]);
-  static_assert(3 == b.dBasisEvaluated.dims[2]);
-  assert((Real3{-1_r, -1_r, -1_r} == b.dBasisEvaluated[0][0]));
-  assert((Real3{+1_r, +0_r, +0_r} == b.dBasisEvaluated[0][1]));
-  assert((Real3{+0_r, +1_r, +0_r} == b.dBasisEvaluated[0][2]));
-  assert((Real3{+0_r, +0_r, +1_r} == b.dBasisEvaluated[0][3]));
+  // kDBasisEvaluatedParametric
+  static_assert(Real3{-1_r, -1_r, -1_r} == Element::kDBasisEvaluatedParametric[0][0]);
+  static_assert(Real3{+1_r, +0_r, +0_r} == Element::kDBasisEvaluatedParametric[0][1]);
+  static_assert(Real3{+0_r, +1_r, +0_r} == Element::kDBasisEvaluatedParametric[0][2]);
+  static_assert(Real3{+0_r, +0_r, +1_r} == Element::kDBasisEvaluatedParametric[0][3]);
 }
 
 /**
@@ -398,30 +381,10 @@ TEST(Tetrahedral, Pk3DElement) {
         {Real3{0.5_r, 0.5_r, 0.5_r}}};
     EXPECT_TRUE(NearEqual(expectedMapEvaluated[e], elem.mapEvaluated));
 
-    // dMapEvaluated
-    NdArray<real, 1, 3, 3> const expectedDmapEvaluated[] = {
-        {Matrix3x3r{Real3{0_r, 1_r, 0_r}, Real3{0_r, 0_r, -1_r}, Real3{-1_r, -1_r, -1_r}}},
-        {Matrix3x3r{Real3{0_r, -1_r, 0_r}, Real3{0_r, 0_r, -1_r}, Real3{1_r, 1_r, 1_r}}},
-        {Matrix3x3r{Real3{0_r, 0_r, -1_r}, Real3{-1_r, -1_r, -1_r}, Real3{0_r, 1_r, 0_r}}},
-        {Matrix3x3r{Real3{0_r, 1_r, 0_r}, Real3{0_r, 0_r, 1_r}, Real3{1_r, 1_r, 1_r}}},
-        {Matrix3x3r{Real3{0_r, 1_r, 1_r}, Real3{-1_r, 0_r, -1_r}, Real3{-1_r, -1_r, 0_r}}}};
-    EXPECT_TRUE(NearEqual(expectedDmapEvaluated[e], elem.dMapEvaluated));
-
-    // dMapEvaluatedInv
-    NdArray<real, 1, 3, 3> const expectedDmapEvaludatedInv[] = {
-        {Matrix3x3r{Real3{-1_r, 1_r, -1_r}, Real3{1_r, 0_r, 0_r}, Real3{0_r, -1_r, 0_r}}},
-        {Matrix3x3r{Real3{1_r, 1_r, 1_r}, Real3{-1_r, 0_r, 0_r}, Real3{0_r, -1_r, 0_r}}},
-        {Matrix3x3r{Real3{1_r, -1_r, -1_r}, Real3{0_r, 0_r, 1_r}, Real3{-1_r, 0_r, 0_r}}},
-        {Matrix3x3r{Real3{-1_r, -1_r, 1_r}, Real3{1_r, 0_r, 0_r}, Real3{0_r, 1_r, 0_r}}},
-        {Matrix3x3r{
-            Real3{-0.5_r, -0.5_r, -0.5_r},
-            Real3{0.5_r, 0.5_r, -0.5_r},
-            Real3{0.5_r, -0.5_r, 0.5_r}}}};
-    EXPECT_TRUE(NearEqual(expectedDmapEvaludatedInv[e], elem.dMapEvaluatedInv));
-
-    // dMapEvaluatedDet
-    NdArray<real, 1> const expectedDmapEvaluatedDet[] = {{1_r}, {1_r}, {1_r}, {1_r}, {2_r}};
-    EXPECT_TRUE(NearEqual(expectedDmapEvaluatedDet[e], elem.dMapEvaluatedDet));
+    // quadWeights: the reference weight 1/6 times the Jacobian determinant {1, 1, 1, 1, 2}
+    NdArray<real, 1> const expectedQuadWeights[] = {
+        {1_r / 6_r}, {1_r / 6_r}, {1_r / 6_r}, {1_r / 6_r}, {1_r / 3_r}};
+    EXPECT_TRUE(NearEqual(expectedQuadWeights[e], elem.quadWeights));
 
     // kDBasisEvaluated
     NdArray<real, 1, 4, 3> expected_dbasis_evaluated[] = {
@@ -541,8 +504,7 @@ TEST(Tetrahedral, LocalToGlobalMap) {
   Test the correct evaluation of basis functions over a tetrahedron.
 */
 template <int kQuadDegreeTrace>
-void TestPk3DElementTrace(
-    NdArray<tetrahedral::TetrahedralQuadrature<kQuadDegreeTrace>, 4> const& quadrature) {
+void TestPk3DElementTrace() {
   constexpr Real4 kExactArea = Real4{1_r / 2_r, 1_r / 2_r, 1_r / 2_r, 1.732050807568877_r / 2_r};
   constexpr int kNumFaces = 4;
   constexpr int kPolyOrder = 1;
@@ -556,17 +518,13 @@ void TestPk3DElementTrace(
   TetrahedralMesh mesh = test::CreateMinimalTetMeshSingleTet();
 
   // Create the volume element
-  auto element = ElementT{
-      0,
-      mesh.GetNodeCoordinates(),
-      mesh.GetElementConnectivity(),
-      tetrahedral::kTetrahedralQuadrature1};
+  auto element = ElementT{0, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity()};
 
   // Create the four element traces over the base element
   std::vector<ElementTraceT> elementTraces;
   elementTraces.reserve(kNumFaces);
   for (int f = 0; f < kNumFaces; ++f) {
-    elementTraces.emplace_back(element, f, quadrature[f]);
+    elementTraces.emplace_back(element, f);
   }
 
   // Compute the area for the face
@@ -579,7 +537,7 @@ void TestPk3DElementTrace(
 
   // Check that all areas for faces are correct
   for (int f = 0; f < kNumFaces; ++f) {
-    EXPECT_NEAR(areas[f], kExactArea[f], 1.e-6_r);
+    EXPECT_NEAR(areas[f], kExactArea[f], MOCHI_USE_DOUBLE_PRECISION ? 1.e-12_r : 1.e-6_r);
   }
 
   // Check that the basis functions are evaluated coorectly
@@ -589,7 +547,7 @@ void TestPk3DElementTrace(
       for (int i = 1; i < elementTraces[f].kNumDofs; ++i) {
         EXPECT_NEAR(
             elementTraces[f].basisEvaluated[q][i],
-            elementTraces[f].quadrature.points[q][(i - 1)],
+            ElementTraceT::kQuadratures[f].points[q][(i - 1)],
             1.e-6_r);
       }
     }
@@ -616,12 +574,12 @@ void TestPk3DElementTrace(
   EXPECT_NEAR(volume, volume_bulk, 1.e-6_r);
 };
 TEST(Tetrahedral, Pk3DElementTrace) {
-  TestPk3DElementTrace<1>(tetrahedral::kTetrahedralTraceQuadrature1);
-  TestPk3DElementTrace<3>(tetrahedral::kTetrahedralTraceQuadrature3);
-  TestPk3DElementTrace<6>(tetrahedral::kTetrahedralTraceQuadrature6);
-  TestPk3DElementTrace<7>(tetrahedral::kTetrahedralTraceQuadrature7);
-  TestPk3DElementTrace<12>(tetrahedral::kTetrahedralTraceQuadrature12);
-  TestPk3DElementTrace<16>(tetrahedral::kTetrahedralTraceQuadrature16);
+  TestPk3DElementTrace<1>();
+  TestPk3DElementTrace<3>();
+  TestPk3DElementTrace<6>();
+  TestPk3DElementTrace<7>();
+  TestPk3DElementTrace<12>();
+  TestPk3DElementTrace<16>();
 }
 
 /**
@@ -629,8 +587,7 @@ TEST(Tetrahedral, Pk3DElementTrace) {
 */
 
 template <int kQuadDegreeTrace>
-void TestPk3DElementTraceIrregular(
-    NdArray<tetrahedral::TetrahedralQuadrature<kQuadDegreeTrace>, 4> const& quadrature) {
+void TestPk3DElementTraceIrregular() {
   constexpr int kNumFaces = 4;
   constexpr int kPolyOrder = 1;
   constexpr int kQuadDegree = 1;
@@ -653,17 +610,13 @@ void TestPk3DElementTraceIrregular(
   TetrahedralMesh mesh(coordinates, connectivity);
 
   // Create the volume element
-  auto element = ElementT{
-      0,
-      mesh.GetNodeCoordinates(),
-      mesh.GetElementConnectivity(),
-      tetrahedral::kTetrahedralQuadrature1};
+  auto element = ElementT{0, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity()};
 
   // Create the four element traces over the base element
   std::vector<ElementTraceT> elementTraces;
   elementTraces.reserve(kNumFaces);
   for (int f = 0; f < kNumFaces; ++f) {
-    elementTraces.emplace_back(element, f, quadrature[f]);
+    elementTraces.emplace_back(element, f);
   }
 
   // Compute the area for the face
@@ -681,7 +634,7 @@ void TestPk3DElementTraceIrregular(
       for (int i = 1; i < elementTraces[f].kNumDofs; ++i) {
         EXPECT_NEAR(
             elementTraces[f].basisEvaluated[q][i],
-            elementTraces[f].quadrature.points[q][(i - 1)],
+            ElementTraceT::kQuadratures[f].points[q][(i - 1)],
             1.e-6);
       }
     }
@@ -709,10 +662,10 @@ void TestPk3DElementTraceIrregular(
 }
 
 TEST(Tetrahedral, Pk3DElementTraceIrregular) {
-  TestPk3DElementTraceIrregular<1>(tetrahedral::kTetrahedralTraceQuadrature1);
-  TestPk3DElementTraceIrregular<3>(tetrahedral::kTetrahedralTraceQuadrature3);
-  TestPk3DElementTraceIrregular<6>(tetrahedral::kTetrahedralTraceQuadrature6);
-  TestPk3DElementTraceIrregular<7>(tetrahedral::kTetrahedralTraceQuadrature7);
-  TestPk3DElementTraceIrregular<12>(tetrahedral::kTetrahedralTraceQuadrature12);
-  TestPk3DElementTraceIrregular<16>(tetrahedral::kTetrahedralTraceQuadrature16);
+  TestPk3DElementTraceIrregular<1>();
+  TestPk3DElementTraceIrregular<3>();
+  TestPk3DElementTraceIrregular<6>();
+  TestPk3DElementTraceIrregular<7>();
+  TestPk3DElementTraceIrregular<12>();
+  TestPk3DElementTraceIrregular<16>();
 }

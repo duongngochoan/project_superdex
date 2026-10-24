@@ -20,6 +20,8 @@
 // is available (MOCHI_USE_OCCT); elsewhere this header is an empty translation unit.
 #if MOCHI_USE_OCCT
 
+#include "occ_face_sizing.h"
+
 #include <IMeshTools_MeshAlgo.hxx>
 
 #include <BRepAdaptor_Surface.hxx>
@@ -65,22 +67,24 @@ class FaceMeshFallbackStats {
 /// hole in the model, such a face is retried with @p fallbackAlgo (OCCT's own mesher).
 class IsotropicFaceMesher : public IMeshTools_MeshAlgo {
  public:
-  /// @param targetEdgeLength Target edge length in 3D model units.
+  /// @param sizing Target edge length and deflections, per face. Must outlive this mesher.
   /// @param gradedInterior Grade interior sampling towards the boundary's own density instead of
-  ///        holding it at @p targetEdgeLength everywhere. Without it, a boundary that curvature
+  ///        holding it at the target edge length everywhere. Without it, a boundary that curvature
   ///        has already refined -- a fillet's cross-section, say -- has nothing to attach to but
-  ///        one distant interior point, producing a fan.
+  ///        one distant interior point, producing a fan. Always on for a face bordering a finer
+  ///        one (see @ref FaceSizingField::BordersFinerFace).
   /// @param fallbackAlgo Mesher to retry a failed face with; may be null to disable the retry.
   /// @param stats Fallback tally; may be null. Must outlive this mesher.
   IsotropicFaceMesher(
-      double targetEdgeLength,
+      FaceSizingField const& sizing,
       bool gradedInterior,
       Handle(IMeshTools_MeshAlgo) fallbackAlgo,
       FaceMeshFallbackStats* stats);
 
   ~IsotropicFaceMesher() override = default;
 
-  /// Triangulates a single face using CGAL CDT2 + grid refinement.
+  /// Triangulates a single face using CGAL CDT2 + grid refinement. BRepMesh_FaceDiscret creates one
+  /// mesher per face, so this resolves the face's sizing into the members below.
   void Perform(
       IMeshData::IFaceHandle const& dFace,
       IMeshTools_Parameters const& parameters,
@@ -95,6 +99,12 @@ class IsotropicFaceMesher : public IMeshTools_MeshAlgo {
   using Wires = std::vector<Wire>;
 
  private:
+  /// The face meshing proper, with @p parameters already carrying the face's deflections.
+  void Mesh(
+      IMeshData::IFaceHandle const& dFace,
+      IMeshTools_Parameters const& parameters,
+      Message_ProgressRange const& range);
+
   /// Extract boundary wires from OCCT face data in 2D parametric space.
   Wires ExtractBoundaryWires(IMeshData::IFaceHandle const& dFace);
 
@@ -133,6 +143,7 @@ class IsotropicFaceMesher : public IMeshTools_MeshAlgo {
       IMeshTools_Parameters const& parameters,
       Message_ProgressRange const& range);
 
+  FaceSizingField const* _sizing{};
   double _targetEdgeLength{};
   bool _gradedInterior{};
   Handle(IMeshTools_MeshAlgo) _fallbackAlgo;

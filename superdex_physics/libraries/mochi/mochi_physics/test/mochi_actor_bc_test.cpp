@@ -21,6 +21,7 @@
 #include "mochi_physics_test_fixture.h"
 
 #include <array>
+#include <limits>
 #include <numeric>
 #include <vector>
 
@@ -71,9 +72,13 @@ TEST_F(MochiActorBC, RigidComTranslation) {
   Real3 com0 = getCOM(box);
   EXPECT_NEAR_EQ(com0, center);
 
-  // Add 3 BCs so the COM can't move
+  // Non-finite values are rejected without adding BCs
+  box->AddBoundaryConditionDofsWorld(
+      comIndices, Real3{0_r, std::numeric_limits<real>::quiet_NaN(), 0_r}, test::ExpectNotOK{});
   EXPECT_EQ(0, isize(box->GetBoundaryConditionDofIndices()));
   EXPECT_EQ(0, isize(box->GetBoundaryConditionDofValuesWorld()));
+
+  // Add 3 BCs so the COM can't move
   box->AddBoundaryConditionDofsWorld(comIndices, com0, test::ExpectOK{});
   EXPECT_TRUE(test::EqualSpan(comIndices, box->GetBoundaryConditionDofIndices()));
   EXPECT_TRUE(test::NearEqualSpan(com0, box->GetBoundaryConditionDofValuesWorld()));
@@ -384,10 +389,11 @@ TEST_F(MochiActorBC, AddBoundaryConditionConstrainedNodesAtRest) {
 
   // Expected DoF indices for constrained nodes {0, 2, 4, 6}: 3 DoFs per node
   int const expectedDofIndices[] = {0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20};
-  int const expectedNodeOneThenConstrainedDofIndices[] = {
-      3, 4, 5, 0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20};
-  int const expectedConstrainedThenNodeOneDofIndices[] = {
-      0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20, 3, 4, 5};
+  int const expectedPermanentDofIndices[] = {0, 1, 2, 0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20};
+  int const expectedNodeOneThenPermanentDofIndices[] = {
+      3, 4, 5, 0, 1, 2, 0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20};
+  int const expectedPermanentThenNodeOneDofIndices[] = {
+      0, 1, 2, 0, 1, 2, 6, 7, 8, 12, 13, 14, 18, 19, 20, 3, 4, 5};
 
   auto restPositionWorld = [&](int nodeIdx) {
     return params.worldFromLocal.TransformPoint(coordinates[nodeIdx]);
@@ -444,21 +450,23 @@ TEST_F(MochiActorBC, AddBoundaryConditionConstrainedNodesAtRest) {
       MakeSingletonConstSpan(nonPermanentNode),
       restPositionWorld(nonPermanentNode),
       test::ExpectOK{});
+  actor->AddBoundaryConditionNodesWorldPermanent(
+      MakeSingletonConstSpan(0), restPositionWorld(0), test::ExpectOK{});
   actor->AddBoundaryConditionConstrainedNodesAtRestPermanent(test::ExpectOK{});
-  expectBoundaryConditionDofs(MakeConstSpan(expectedNodeOneThenConstrainedDofIndices));
+  expectBoundaryConditionDofs(MakeConstSpan(expectedNodeOneThenPermanentDofIndices));
 
   actor->ClearBoundaryConditions();
-  expectBoundaryConditionDofs(MakeConstSpan(expectedDofIndices));
+  expectBoundaryConditionDofs(MakeConstSpan(expectedPermanentDofIndices));
 
-  // Permanent followed by non-permanent: clear should still remove only the second batch.
+  // Permanent followed by non-permanent: clear should still remove only the last batch.
   actor->AddBoundaryConditionNodesWorld(
       MakeSingletonConstSpan(nonPermanentNode),
       restPositionWorld(nonPermanentNode),
       test::ExpectOK{});
-  expectBoundaryConditionDofs(MakeConstSpan(expectedConstrainedThenNodeOneDofIndices));
+  expectBoundaryConditionDofs(MakeConstSpan(expectedPermanentThenNodeOneDofIndices));
 
   actor->ClearBoundaryConditions();
-  expectBoundaryConditionDofs(MakeConstSpan(expectedDofIndices));
+  expectBoundaryConditionDofs(MakeConstSpan(expectedPermanentDofIndices));
 
   simulateAndVerifyConstraints();
 }
@@ -519,4 +527,30 @@ TEST_F(MochiActorBC, BoundaryConditionSettersRejectNestedSoftActors) {
   expectRejected([&](Error& error) {
     nestedSoftActor->AddBoundaryConditionConstrainedNodesAtRestPermanent(error);
   });
+}
+
+TEST_F(MochiActorBC, BoundaryConditionSettersRejectPartialRotations) {
+  RigidActorParams rigidParams;
+  rigidParams.shape = _cubeShape;
+  rigidParams.colliderType = ColliderType::Box;
+  Actor* rigidActor = _scene->CreateRigidActor(rigidParams, test::ExpectOK{});
+
+  ArticulatedActorParams articulatedParams;
+  articulatedParams.joints = {{.type = ArticulatedJointType::Free}};
+  articulatedParams.links = {{.shape = _cubeShape, .colliderType = ColliderType::None}};
+  Actor* articulatedActor = _scene->CreateArticulatedActor(articulatedParams, test::ExpectOK{});
+
+  // DoFs 3-5 are the rotation of both actors. Constraining only some of them is rejected and adds
+  // nothing.
+  int const partialRotationDofIndices[] = {3, 4};
+  real const partialRotationValues[] = {0_r, 0_r};
+  for (Actor* actor : {rigidActor, articulatedActor}) {
+    Error error;
+    actor->AddBoundaryConditionDofsWorld(partialRotationDofIndices, partialRotationValues, error);
+    EXPECT_STREQ("Rotation BCs must be all or none.", error.GetDescription());
+    actor->AddBoundaryConditionDofsWorldPermanent(
+        partialRotationDofIndices, partialRotationValues, test::ExpectNotOK{});
+    EXPECT_EQ(0, isize(actor->GetBoundaryConditionDofIndices()));
+    EXPECT_EQ(0, isize(actor->GetBoundaryConditionDofValuesWorld()));
+  }
 }

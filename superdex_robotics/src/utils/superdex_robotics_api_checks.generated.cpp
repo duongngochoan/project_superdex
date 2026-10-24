@@ -18,16 +18,18 @@
 
 // clang-format off
 
-#include <limits>
-#include <superdex_robotics/superdex_robotics.h>
+#include <superdex_robotics/actuators/actuator_base.h>
 #include <superdex_robotics/controllers/controller_basic_jsc_pd.h>
 #include <superdex_robotics/controllers/controller_basic_osc_pd.h>
 #include <superdex_robotics/controllers/controller_mochi_articulated_pose.h>
 #include <superdex_robotics/sensors/camera_sensor.h>
-#include <superdex_robotics/actuators/actuator_base.h>
-#include <superdex_robotics/utils/file_utils.h>
+#include <superdex_robotics/superdex_robotics.h>
+#include <superdex_robotics/utils/archive_utils.h>
 #include <superdex_robotics/utils/bot_utils.h>
+#include <superdex_robotics/utils/file_utils.h>
 #include <superdex_robotics/utils/superdex_robotics_api_checks.generated.h>
+
+#include <limits>
 
 #if MOCHI_COMPILER_MSVC
 #define MOCHI_ASSERT_EQ(a, b, message) MOCHI_ASSERT(mochi::NearEqual((a), (b), std::numeric_limits<decltype(b)>::epsilon()), message)
@@ -99,8 +101,45 @@ static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::linearTran
 static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::spatialTendons), mochi::DynamicArray<superdex::robotics::BotSpatialTendonPrefab> superdex::robotics::BotPrefab::*>, "\n  ERROR: Field superdex::robotics::BotPrefab::spatialTendons is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::contactOverrides), mochi::DynamicArray<superdex::robotics::BotContactOverride> superdex::robotics::BotPrefab::*>, "\n  ERROR: Field superdex::robotics::BotPrefab::contactOverrides is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::cycles), mochi::DynamicArray<mochi::ArticulatedCycleJointParams> superdex::robotics::BotPrefab::*>, "\n  ERROR: Field superdex::robotics::BotPrefab::cycles is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::skin), std::optional<mochi::prefab::ArticulatedSkinPrefab> superdex::robotics::BotPrefab::*>, "\n  ERROR: Field superdex::robotics::BotPrefab::skin is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::_numDofs), int superdex::robotics::BotPrefab::*>, "\n  ERROR: Field superdex::robotics::BotPrefab::_numDofs is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::_dofIndices), mochi::DynamicArray<int> superdex::robotics::BotPrefab::*>, "\n  ERROR: Field superdex::robotics::BotPrefab::_dofIndices is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotPrefab::_skinBoneLinks), mochi::DynamicArray<mochi::DynamicString> superdex::robotics::BotPrefab::*>, "\n  ERROR: Field superdex::robotics::BotPrefab::_skinBoneLinks is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::BotModBase
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotModBase::name), mochi::DynamicString superdex::robotics::BotModBase::*>, "\n  ERROR: Field superdex::robotics::BotModBase::name is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotModBase::enabled), bool superdex::robotics::BotModBase::*>, "\n  ERROR: Field superdex::robotics::BotModBase::enabled is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::AttachBot
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachBot::parentLinkName), mochi::DynamicString superdex::robotics::AttachBot::*>, "\n  ERROR: Field superdex::robotics::AttachBot::parentLinkName is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachBot::joint), superdex::robotics::BotJointPrefab superdex::robotics::AttachBot::*>, "\n  ERROR: Field superdex::robotics::AttachBot::joint is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachBot::prefix), mochi::DynamicString superdex::robotics::AttachBot::*>, "\n  ERROR: Field superdex::robotics::AttachBot::prefix is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachBot::path), mochi::DynamicString superdex::robotics::AttachBot::*>, "\n  ERROR: Field superdex::robotics::AttachBot::path is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::AttachLink
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachLink::parentLinkName), mochi::DynamicString superdex::robotics::AttachLink::*>, "\n  ERROR: Field superdex::robotics::AttachLink::parentLinkName is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachLink::joint), superdex::robotics::BotJointPrefab superdex::robotics::AttachLink::*>, "\n  ERROR: Field superdex::robotics::AttachLink::joint is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachLink::link), superdex::robotics::BotLinkPrefab superdex::robotics::AttachLink::*>, "\n  ERROR: Field superdex::robotics::AttachLink::link is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::ReplaceLink
+static_assert(std::is_same_v<decltype(&superdex::robotics::ReplaceLink::linkToReplace), mochi::DynamicString superdex::robotics::ReplaceLink::*>, "\n  ERROR: Field superdex::robotics::ReplaceLink::linkToReplace is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::ReplaceLink::link), superdex::robotics::BotLinkPrefab superdex::robotics::ReplaceLink::*>, "\n  ERROR: Field superdex::robotics::ReplaceLink::link is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::ReplaceLinkWithBot
+static_assert(std::is_same_v<decltype(&superdex::robotics::ReplaceLinkWithBot::linkToReplace), mochi::DynamicString superdex::robotics::ReplaceLinkWithBot::*>, "\n  ERROR: Field superdex::robotics::ReplaceLinkWithBot::linkToReplace is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::ReplaceLinkWithBot::prefix), mochi::DynamicString superdex::robotics::ReplaceLinkWithBot::*>, "\n  ERROR: Field superdex::robotics::ReplaceLinkWithBot::prefix is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::ReplaceLinkWithBot::path), mochi::DynamicString superdex::robotics::ReplaceLinkWithBot::*>, "\n  ERROR: Field superdex::robotics::ReplaceLinkWithBot::path is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::AttachSkin
+static_assert(std::is_same_v<decltype(&superdex::robotics::AttachSkin::skin), mochi::prefab::ArticulatedSkinPrefab superdex::robotics::AttachSkin::*>, "\n  ERROR: Field superdex::robotics::AttachSkin::skin is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::BotArchiveMetadata
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotArchiveMetadata::date), mochi::DynamicString superdex::robotics::BotArchiveMetadata::*>, "\n  ERROR: Field superdex::robotics::BotArchiveMetadata::date is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotArchiveMetadata::botHash), mochi::DynamicString superdex::robotics::BotArchiveMetadata::*>, "\n  ERROR: Field superdex::robotics::BotArchiveMetadata::botHash is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotArchiveMetadata::commitHash), mochi::DynamicString superdex::robotics::BotArchiveMetadata::*>, "\n  ERROR: Field superdex::robotics::BotArchiveMetadata::commitHash is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotArchiveMetadata::target), mochi::DynamicString superdex::robotics::BotArchiveMetadata::*>, "\n  ERROR: Field superdex::robotics::BotArchiveMetadata::target is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotArchiveMetadata::comment), std::optional<mochi::DynamicString> superdex::robotics::BotArchiveMetadata::*>, "\n  ERROR: Field superdex::robotics::BotArchiveMetadata::comment is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::BotArchiveMetadata::warnings), mochi::DynamicArray<mochi::DynamicString> superdex::robotics::BotArchiveMetadata::*>, "\n  ERROR: Field superdex::robotics::BotArchiveMetadata::warnings is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // class superdex::robotics::RoboticsContext
 static_assert(std::is_same_v<decltype(&superdex::robotics::RoboticsContext::CreateController), superdex::robotics::ControllerHandle (superdex::robotics::RoboticsContext::*)(std::string_view, superdex::robotics::BotPrefab const*, mochi::Actor*, std::string_view, mochi::Error&)>, "\n  ERROR: Function superdex::robotics::RoboticsContext::CreateController is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -152,6 +191,10 @@ static_assert(std::is_same_v<decltype(&superdex::robotics::ControllerBasicOscPdP
 static_assert(std::is_same_v<decltype(&superdex::robotics::ControllerBasicOscPdParams::bApplyMaxOSCTorqueNormalization), bool superdex::robotics::ControllerBasicOscPdParams::*>, "\n  ERROR: Field superdex::robotics::ControllerBasicOscPdParams::bApplyMaxOSCTorqueNormalization is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&superdex::robotics::ControllerBasicOscPdParams::LoadFromFile), superdex::robotics::ControllerBasicOscPdParams (*)(std::string_view, mochi::Error&)>, "\n  ERROR: Function superdex::robotics::ControllerBasicOscPdParams::LoadFromFile is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&superdex::robotics::ControllerBasicOscPdParams::SaveToFile), void (superdex::robotics::ControllerBasicOscPdParams::*)(std::string_view, mochi::Error&) const>, "\n  ERROR: Function superdex::robotics::ControllerBasicOscPdParams::SaveToFile is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// struct superdex::robotics::ControllerBasicOscPdInitArgs
+static_assert(std::is_same_v<decltype(&superdex::robotics::ControllerBasicOscPdInitArgs::baseLinkName), mochi::DynamicString superdex::robotics::ControllerBasicOscPdInitArgs::*>, "\n  ERROR: Field superdex::robotics::ControllerBasicOscPdInitArgs::baseLinkName is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&superdex::robotics::ControllerBasicOscPdInitArgs::eeLinkName), mochi::DynamicString superdex::robotics::ControllerBasicOscPdInitArgs::*>, "\n  ERROR: Field superdex::robotics::ControllerBasicOscPdInitArgs::eeLinkName is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct superdex::robotics::ControllerBasicOscPdObsv
 static_assert(std::is_same_v<decltype(&superdex::robotics::ControllerBasicOscPdObsv::dofPositions), mochi::DynamicArray<mochi::real> superdex::robotics::ControllerBasicOscPdObsv::*>, "\n  ERROR: Field superdex::robotics::ControllerBasicOscPdObsv::dofPositions is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");

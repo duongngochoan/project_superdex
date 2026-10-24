@@ -110,6 +110,16 @@ def _child_environment() -> dict[str, str]:
     return environment
 
 
+# Options that run the application once and report through its exit code.
+_WINDOWLESS_OPTIONS = ("--process", "--screenshot", "--help", "-h")
+
+
+def _runs_windowless(arguments: list[str]) -> bool:
+    return any(
+        argument.split("=", 1)[0] in _WINDOWLESS_OPTIONS for argument in arguments
+    )
+
+
 def main() -> int:
     executable = find_executable()
     if executable is None:
@@ -124,6 +134,9 @@ def main() -> int:
     environment = _child_environment()
     arguments = [str(executable), *sys.argv[1:]]
     if sys.platform == "win32":
+        if _runs_windowless(sys.argv[1:]):
+            # A windowless run reports through its exit code, so wait for it and pass it on.
+            return subprocess.call(arguments, env=environment)
         # A gui-script runs under pythonw.exe, so waiting would keep that interpreter
         # resident for the window's lifetime.
         subprocess.Popen(

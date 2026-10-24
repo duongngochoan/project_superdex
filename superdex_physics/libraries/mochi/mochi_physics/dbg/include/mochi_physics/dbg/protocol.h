@@ -23,6 +23,7 @@
 #include <mochi_core/utils/log.h>
 #include <mochi_core/utils/reflection.h>
 #include <mochi_physics/mochi_physics.h>
+#include <mochi_physics/mochi_physics_experimental.h>
 
 #include <cstdint>
 #include <optional>
@@ -59,9 +60,11 @@ MOCHI_ENUM_END()
 namespace mochi::dbg::protocol {
 
 // Forwards
+struct DebugDrawReply;
 struct PingReply;
 struct SceneStepReply;
 struct SceneSyncReply;
+struct SleepParamsReply;
 
 //------------------------------------------------------------------------------
 // Base Classes
@@ -138,6 +141,29 @@ struct DbgDrawData {
   MOCHI_STRUCT_END()
 };
 
+/// @brief One entry in the debug draw feature catalog.
+struct DbgDrawFeature {
+  DynamicString name;
+  DynamicString description;
+  bool enabled = false;
+
+  MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::DbgDrawFeature)
+  MOCHI_FIELD(name)
+  MOCHI_FIELD(description)
+  MOCHI_FIELD(enabled)
+  MOCHI_STRUCT_END()
+};
+
+struct DbgDrawFeatures {
+  bool masterEnabled = false;
+  DynamicArray<DbgDrawFeature> features;
+
+  MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::DbgDrawFeatures)
+  MOCHI_FIELD(masterEnabled)
+  MOCHI_FIELD(features)
+  MOCHI_STRUCT_END()
+};
+
 struct MeshSyncRanges {
   // Offsets into MeshSyncData.
   Int2 coordinatesRange = {}; // [begin, end)
@@ -196,6 +222,37 @@ struct SceneList {
   MOCHI_STRUCT_END()
 };
 
+/// @brief Profiling data for one simulation step. "Active" counts only include awake islands.
+struct StepProfileData {
+  uint64_t sequence = 0; ///< Monotonically increasing sequence within the scene debugger
+  float timeStepSec = 0.0f; ///< Simulated time step [s]
+  float preStepSec = 0.0f; ///< Duration of the pre-step phase [s]
+  float stepSec = 0.0f; ///< Duration of the step phase [s]
+  float postStepSec = 0.0f; ///< Duration of the post-step phase [s]
+  int32_t activeActors = 0; ///< Top-level actors (direct island members)
+  int32_t activeConstraints = 0;
+  int32_t activeContacts = 0; ///< Contact points, both sync and async
+  int32_t activeDofs = 0;
+  int32_t activeIslands = 0;
+  ConvergenceStatus convergenceStatus = ConvergenceStatus::None; ///< Worst over active islands
+
+  bool operator==(StepProfileData const& rhs) const = default;
+
+  MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::StepProfileData)
+  MOCHI_FIELD(sequence)
+  MOCHI_FIELD(timeStepSec)
+  MOCHI_FIELD(preStepSec)
+  MOCHI_FIELD(stepSec)
+  MOCHI_FIELD(postStepSec)
+  MOCHI_FIELD(activeActors)
+  MOCHI_FIELD(activeConstraints)
+  MOCHI_FIELD(activeContacts)
+  MOCHI_FIELD(activeDofs)
+  MOCHI_FIELD(activeIslands)
+  MOCHI_FIELD(convergenceStatus)
+  MOCHI_STRUCT_END()
+};
+
 //------------------------------------------------------------------------------
 // Message Types
 //------------------------------------------------------------------------------
@@ -247,6 +304,14 @@ struct PingReply : net::ReplyMessage {
 };
 
 /// @brief [S-->C] Broadcast when a scene is added to or removed from the context.
+///
+/// @warning Receiving this notification does not grant ownership of the referenced scene or extend
+/// its lifetime.
+/// @warning For an in-process connection, the receive callback may run on the thread calling
+/// @ref Context::CreateScene or @ref Context::DestroyScene before that call returns. For an add
+/// notification, do not destroy the announced scene or pass it to an ownership-taking API until
+/// the originating @ref Context::CreateScene call returns, and only then if the caller controls the
+/// scene's lifetime. After a removal notification, do not resolve or access the announced scene.
 struct SceneAddRemove : net::Message {
   SceneHandle scene;
   DynamicString name;
@@ -258,6 +323,26 @@ struct SceneAddRemove : net::Message {
   MOCHI_FIELD(name)
   MOCHI_FIELD(wasAdded)
   MOCHI_STRUCT_END()
+};
+
+/// @brief [S<--C] Request the scene to apply the client's complete debug draw state.
+struct DebugDrawRequest : SceneRequest {
+  using Reply = DebugDrawReply;
+
+  bool masterEnable = false;
+  DynamicArray<bool> featureEnable;
+
+  MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::DebugDrawRequest)
+  MOCHI_BASE_CLASS(SceneRequest)
+  MOCHI_FIELD(masterEnable)
+  MOCHI_FIELD(featureEnable)
+  MOCHI_STRUCT_END()
+};
+
+/// @brief [S-->C] Reply to @ref DebugDrawRequest.
+struct DebugDrawReply : SceneReply {
+  using SceneReply::SceneReply;
+  MOCHI_STRUCT_WITH_BASE(mochi::dbg::protocol::DebugDrawReply, SceneReply)
 };
 
 /// @brief [S<--C] Request the scene to change its play/pause/step behavior.
@@ -319,6 +404,10 @@ struct SceneSyncRequest : SceneRequest {
   // Requires syncMeshes. Changing this setting starts a new mesh version.
   bool useVisualMesh = true;
 
+  // Should per-step profiling data be included in periodic replies? Samples accumulate on the
+  // server between replies. Only affects auto syncing behavior if enableAutoSync.has_value().
+  bool syncPerformance = false;
+
   MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::SceneSyncRequest)
   MOCHI_BASE_CLASS(SceneRequest)
   MOCHI_FIELD(enableAutoSync)
@@ -327,6 +416,7 @@ struct SceneSyncRequest : SceneRequest {
   MOCHI_FIELD(syncDebugDraw)
   MOCHI_FIELD(syncMeshes)
   MOCHI_FIELD(useVisualMesh)
+  MOCHI_FIELD(syncPerformance)
   MOCHI_STRUCT_END()
 };
 
@@ -345,6 +435,8 @@ struct SceneSyncReply : SceneReply {
   // to mean "no mesh".
   uint64_t meshVersionCounter = 0;
   std::optional<DbgDrawData> debugDraw; // Sent if syncDebugDraw requested
+  // Steps completed since the previous reply, oldest first. Sent if syncPerformance is enabled.
+  std::optional<DynamicArray<StepProfileData>> performance;
 
   MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::SceneSyncReply)
   MOCHI_BASE_CLASS(SceneReply)
@@ -353,19 +445,48 @@ struct SceneSyncReply : SceneReply {
   MOCHI_FIELD(actorMeshRanges)
   MOCHI_FIELD(meshVersionCounter)
   MOCHI_FIELD(debugDraw)
+  MOCHI_FIELD(performance)
+  MOCHI_STRUCT_END()
+};
+
+/// @brief [S<--C] Query, and optionally modify, the scene's @ref experimental::SleepParams.
+struct SleepParamsRequest : SceneRequest {
+  using Reply = SleepParamsReply;
+
+  std::optional<experimental::SleepParams> params; // If nullopt, only query the current value.
+
+  MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::SleepParamsRequest)
+  MOCHI_BASE_CLASS(SceneRequest)
+  MOCHI_FIELD(params)
+  MOCHI_STRUCT_END()
+};
+
+/// @brief [S-->C] Reply to @ref SleepParamsRequest.
+struct SleepParamsReply : SceneReply {
+  using SceneReply::SceneReply;
+
+  experimental::SleepParams params; // The scene's value after applying the request.
+
+  MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::SleepParamsReply)
+  MOCHI_BASE_CLASS(SceneReply)
+  MOCHI_FIELD(params)
   MOCHI_STRUCT_END()
 };
 
 /// @brief [S-->C] First message sent from the server to the client. The client does not consider
 /// themselves to be fully connected until this arrives.
 struct WelcomeMessage : net::Message {
+  DbgDrawFeatures debugDraw; ///< Debug draw feature catalog; enable fields are initially false.
   SceneList scenes; ///< Information about all scenes that already exist.
   CoordinateSpace coordinateSpace = {}; ///< The server's coordinate space convention.
+  int32_t numWorkerThreads = 0; ///< Task scheduler worker threads. Zero if single-threaded.
 
   MOCHI_STRUCT_BEGIN(mochi::dbg::protocol::WelcomeMessage)
   MOCHI_BASE_CLASS(net::Message)
+  MOCHI_FIELD(debugDraw)
   MOCHI_FIELD(scenes)
   MOCHI_FIELD(coordinateSpace)
+  MOCHI_FIELD(numWorkerThreads)
   MOCHI_STRUCT_END()
 };
 

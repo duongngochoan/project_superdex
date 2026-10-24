@@ -16,8 +16,6 @@
 
 #include "meshing/processing_modifiers/preset_discovery.h"
 
-#include "app/app.h"
-
 #include <picojson/picojson.h>
 
 #include <algorithm>
@@ -31,18 +29,18 @@
 
 namespace superdex::studio {
 
-std::vector<ProcessingPreset> DiscoverProcessingPresets() {
+std::vector<ProcessingPreset> DiscoverProcessingPresets(
+    std::filesystem::path const& executableDir) {
   std::vector<ProcessingPreset> presets;
 
   std::filesystem::path dir;
   if (char const* const overrideDir = std::getenv("MOCHI_STUDIO_PRESETS_DIR")) {
     dir = overrideDir;
   } else {
-    std::filesystem::path const exeDir = SuperDexStudio::GetExecutableDir();
-    if (exeDir.empty()) {
+    if (executableDir.empty()) {
       return presets;
     }
-    dir = exeDir / "processing_presets";
+    dir = executableDir / "processing_presets";
   }
 
   std::error_code ec;

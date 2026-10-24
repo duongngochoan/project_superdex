@@ -83,6 +83,10 @@ void AsyncSceneImpl::StartSimLoopTask() {
         // Create and destroy the scene on the thread that will use it
         this->_scene = assert_cast<SceneImpl*>(_context->CreateScene(_name));
 
+        // AsyncScene retains ownership until it destroys the Scene.
+        [[maybe_unused]] bool const ownershipClaimed = _scene->TryClaimOwnership();
+        MOCHI_ASSERT(ownershipClaimed, "A newly created Scene must be unowned.");
+
         // Initialize before signalReady so IsSimThread() is valid when CreateAsyncScene() returns.
         _simThreadId.Store(std::this_thread::get_id());
         signalReady.Done();
@@ -253,13 +257,12 @@ void AsyncSceneImpl::QueueActorCommand(
 }
 
 void AsyncSceneImpl::WaitForQueuedCommands() {
-  if (IsSimThread())
-    MOCHI_UNLIKELY {
-      MOCHI_LOG_ERROR_ONCE(
-          "AsyncScene::WaitForQueuedCommands must not be called from the simulation thread (would self-deadlock). "
-          "Returning without waiting. Previously queued commands may not have executed yet. Do not rely on their effects.");
-      return;
-    }
+  if (IsSimThread()) MOCHI_UNLIKELY {
+    MOCHI_LOG_ERROR_ONCE(
+        "AsyncScene::WaitForQueuedCommands must not be called from the simulation thread (would self-deadlock). "
+        "Returning without waiting. Previously queued commands may not have executed yet. Do not rely on their effects.");
+    return;
+  }
 
   // Queue a new command that will set the stack variable 'done' to true.
   // Commands are executed in order, so any previously queued commands will

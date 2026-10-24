@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pyre-strict
-
 from typing import Any, Callable, Iterator, Optional, Sequence, overload
 import numpy as np
 import numpy.typing as npt
@@ -759,6 +757,13 @@ class ConvergenceStatus:
     STOPPED: ConvergenceStatus
     """Solver met at least one stopping criterion without converging to the requested
     tolerance.
+
+    Note:
+        This does not necessarily indicate a problem: the residual tolerances may be
+        stricter than required. If the maximum-iteration limit
+        (:attr:`~superdex.physics.NonLinearSolverParams.max_iter`) caused the
+        status, increase it only if additional iterations materially change the
+        results.
     """
     DIVERGED: ConvergenceStatus
     """Solver diverged. Some form of solution reset may have been used."""
@@ -1116,10 +1121,13 @@ class ColliderType:
     """[Experimental] Represent the actor by its surface mesh.
 
     Note:
-        Performance is slow.
-
-    Note:
         Only supported for rigid actors and articulated links.
+
+    Warning:
+        Mesh collision performs triangle-mesh distance queries during simulation and
+        can be prohibitively slow. For mesh-backed actors, prefer :class:`AUTO
+        <superdex.physics.ColliderType>` or :class:`SDF
+        <superdex.physics.ColliderType>` unless measurements justify using Mesh.
 
     Warning:
         This is an experimental feature. It may be changed or removed in the future.
@@ -1144,7 +1152,8 @@ class ColliderType:
 
     Note:
         If the grid is not baked in the actor's Shape, it is computed at
-        initialization (expensive).
+        initialization (expensive), and actor creation fails if it cannot be
+        computed.
 
     Note:
         Also supported for soft actors via SDF mapping.
@@ -1338,7 +1347,18 @@ class PsdProjectionMode:
     def __index__(self) -> int: ...
 
 class LineSearchType:
-    """Line-search strategy used by the non-linear solver."""
+    """Line-search strategy used by the non-linear solver.
+
+    Note:
+        In the line searches that test the objective (:class:`SIMPLE
+        <superdex.physics.LineSearchType>`, :class:`ARMIJO
+        <superdex.physics.LineSearchType>`, :class:`WOLFE_WEAK
+        <superdex.physics.LineSearchType>`, :class:`WOLFE_STRONG
+        <superdex.physics.LineSearchType>` and :class:`ARMIJO_OR_RESIDUAL_NORM
+        <superdex.physics.LineSearchType>`), a step that fails the test but changes
+        the objective by no more than an estimate of its rounding error is tested on
+        the slope of the objective along the step instead.
+    """
     NONE: LineSearchType
     """No line search. May substantially degrade stability."""
     SIMPLE: LineSearchType
@@ -1733,7 +1753,7 @@ class PreconditionerType:
     """Domain decomposition preconditioner, where each actor is a subdomain.
 
     Note:
-        The most appropriate preconditioner type is used for each actor.
+        By default, an appropriate preconditioner type is selected for each actor.
     """
     COLORED_SSOR: PreconditionerType
     """[Experimental] Colored symmetric successive over-relaxation (SSOR)
@@ -1768,10 +1788,11 @@ class LinearSolverConvergenceNorm:
         <superdex.physics.LinearSolverType>` and :class:`ASYNC_CG
         <superdex.physics.LinearSolverType>`. :class:`GMRES
         <superdex.physics.LinearSolverType>`, :class:`CUDA_GMRES
-        <superdex.physics.LinearSolverType>`, :class:`MINRES
         <superdex.physics.LinearSolverType>`, and :class:`AUGMENTED_CG
         <superdex.physics.LinearSolverType>` always use the L2-norm of the residual
-        regardless of this setting. Direct solvers do not have stop criteria.
+        regardless of this setting. :class:`MINRES
+        <superdex.physics.LinearSolverType>` always uses the preconditioner-induced
+        norm of the residual. Direct solvers do not have stop criteria.
     """
     RESIDUAL_L2: LinearSolverConvergenceNorm
     """L2-norm of the residual: ``‖r‖₂``."""
@@ -2005,12 +2026,21 @@ class BlendingData:
     """Name of the soft source shape."""
     @property
     def indices(self) -> DynamicArrayInt:
-        """Indices for blending. Size is numNodes * 2."""
+        """Nested-soft source vertex indices for each target vertex.
+
+        Entry `i` identifies the vertex in the nested soft shape for target vertex `i`.
+        The index is ignored when `weights[i]` is zero. The size equals the number of
+        target vertices.
+        """
     @indices.setter
     def indices(self, value: ArrayLikeInt) -> None: ...
     @property
     def weights(self) -> DynamicArrayReal:
-        """Weights for blending. Size is numNodes * 2."""
+        """Nested-soft blend weights for each target vertex.
+
+        Entry `i` is in `[0, 1]`, where zero is purely articulated and one is fully
+        nested-soft. The size equals the number of target vertices.
+        """
     @weights.setter
     def weights(self, value: ArrayLikeReal) -> None: ...
     @overload
@@ -2040,15 +2070,15 @@ class BlendingDataView:
         :class:`~superdex.physics.BlendingData`
     """
     source_shape: str
-    """Name of the soft source shape."""
+    """See :attr:`~superdex.physics.BlendingData.source_shape`."""
     @property
     def indices(self) -> SpanConstInt:
-        """Indices for blending. Size is numNodes * 2."""
+        """See :attr:`~superdex.physics.BlendingData.indices`."""
     @indices.setter
     def indices(self, value: ArrayLikeInt) -> None: ...
     @property
     def weights(self) -> SpanConstReal:
-        """Weights for blending. Size is numNodes * 2."""
+        """See :attr:`~superdex.physics.BlendingData.weights`."""
     @weights.setter
     def weights(self, value: ArrayLikeReal) -> None: ...
     @overload
@@ -2533,6 +2563,16 @@ class ModelData:
     """
     mesh: Optional[MeshData]
     visual_mesh: Optional[MeshData]
+    contact_skin_mesh: Optional[MeshData]
+    """Optional triangular mesh exposed through the contact-skin queries and, when
+    selected as a deformable actor's contact geometry, for contact quadrature.
+
+    Skinning data is required. For triangular and tetrahedral primary meshes, it is
+    a node-based linear embedding whose indices reference primary-mesh nodes. For
+    polylines, the indices reference primary-mesh elements and define the rod's
+    element-based embedding. Every contact-skin node must be referenced by at least
+    one triangle.
+    """
     @property
     def blending(self) -> Optional[DynamicArrayBlendingData]: ...
     @blending.setter
@@ -2564,6 +2604,7 @@ class ModelData:
         self,
         mesh: Optional[MeshData] = ...,
         visual_mesh: Optional[MeshData] = ...,
+        contact_skin_mesh: Optional[MeshData] = ...,
         blending: Optional[ArrayLikeBlendingData] = ...,
         constrained_nodes: Optional[ArrayLikeInt] = ...,
         element_frame_axes: Optional[ArrayLikeReal] = ...,
@@ -2591,6 +2632,16 @@ class ModelDataView:
     """
     mesh: Optional[MeshDataView]
     visual_mesh: Optional[MeshDataView]
+    contact_skin_mesh: Optional[MeshDataView]
+    """Optional triangular mesh exposed through the contact-skin queries and, when
+    selected as a deformable actor's contact geometry, for contact quadrature.
+
+    Skinning data is required. For triangular and tetrahedral primary meshes, it is
+    a node-based linear embedding whose indices reference primary-mesh nodes. For
+    polylines, the indices reference primary-mesh elements and define the rod's
+    element-based embedding. Every contact-skin node must be referenced by at least
+    one triangle.
+    """
     @property
     def blending(self) -> Optional[DynamicArrayBlendingDataView]: ...
     @blending.setter
@@ -2622,6 +2673,7 @@ class ModelDataView:
         self,
         mesh: Optional[MeshDataView] = ...,
         visual_mesh: Optional[MeshDataView] = ...,
+        contact_skin_mesh: Optional[MeshDataView] = ...,
         blending: Optional[ArrayLikeBlendingDataView] = ...,
         constrained_nodes: Optional[ArrayLikeInt] = ...,
         element_frame_axes: Optional[ArrayLikeReal] = ...,
@@ -2729,6 +2781,8 @@ class GridSdfParams:
         boundary_padding_dist: float = ...,
         min_grid_resolution: Int3Like = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class LinearElasticMaterialParams:
     """Parameters for a linear elastic material model."""
@@ -2748,6 +2802,8 @@ class LinearElasticMaterialParams:
         youngs_modulus: float = ...,
         poisson_ratio: float = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class StVenantKirchhoffMaterialParams:
     """Parameters for the St. Venant-Kirchhoff material model."""
@@ -2774,6 +2830,8 @@ class StVenantKirchhoffMaterialParams:
         poisson_ratio: float = ...,
         psd_strategy: MaterialPsdStrategy | int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class NeoHookeanMaterialParams:
     """Parameters for the Smith stable Neo-Hookean material model."""
@@ -2843,6 +2901,8 @@ class ActiveAnisoArapMaterialParams:
         aniso_dir: Real3Like = ...,
         psd_strategy: MaterialPsdStrategy | int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
     def get_theta(self) -> float:
         """Returns the azimuthal angle (θ) [rad] from the stored fiber direction.
 
@@ -2899,6 +2959,8 @@ class ActiveNeoHookeanMaterialParams:
         passive_isotropic: NeoHookeanMaterialParams = ...,
         active_anisotropic: ActiveAnisoArapMaterialParams = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ArapMaterialParams:
     """Parameters for an as-rigid-as-possible material model."""
@@ -2922,6 +2984,8 @@ class ArapMaterialParams:
         stiffness: float = ...,
         psd_strategy: MaterialPsdStrategy | int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ActiveShapeTargetingArapMaterialParams:
     """Parameters for an active ARAP material targeting a preferred shape tensor."""
@@ -2957,6 +3021,8 @@ class ActiveShapeTargetingArapMaterialParams:
         shape_target_tensor: Real6Like = ...,
         psd_strategy: MaterialPsdStrategy | int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class SoftMaterialParams:
     """Parameters for a homogeneous soft material."""
@@ -3038,6 +3104,8 @@ class SoftMaterialParams:
         stiffness_damping_coefficient: float = ...,
         stiffness_damping_include_geometric_term: bool = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class PerElementSoftMaterialData:
     """Per-element soft material data for heterogeneous materials.
@@ -3226,21 +3294,25 @@ class ContactParams:
     """Parameters for contact mechanics simulation.
 
     Note:
-        In contact between a colliding actor and a collider, the collider's contact
-        parameters (not the colliding actor's) are used. The exceptions are: - For
-        friction and dissipation coefficients (viscousFrictionCoefficient,
-        coulombFrictionCoefficient, normalViscousDampingCoefficient), the geometric
-        mean of the colliding and collider's coefficients is used. This disables
-        friction/dissipation if either of them does. - For penalty coefficient
-        (penaltyCoefficient) and friction velocity threshold (frictionFalloffVel),
-        the geometric mean of the colliding and collider's values is used, except if
-        the collider is static in which case the colliding's values are used.
+        For each field without an actor-pair override, contact between a colliding
+        actor and a collider uses the collider's contact parameter (not the
+        colliding actor's). The exceptions are: - For friction and dissipation
+        coefficients (viscousFrictionCoefficient, coulombFrictionCoefficient,
+        normalViscousDampingCoefficient), the geometric mean of the colliding and
+        collider's coefficients is used. This disables friction/dissipation if
+        either of them does. - For penalty coefficient (penaltyCoefficient) and
+        friction velocity threshold (frictionFalloffVel), the geometric mean of the
+        colliding and collider's values is used, except if the collider is static in
+        which case the colliding's values are used.
+
+    See Also:
+        :meth:`~superdex.physics.Scene.set_contact_pair_params_override`
     """
     penalty_coefficient: float
     """Stiffness of the contact penalty force [Pa/m].
 
     Note:
-        Must be strictly positive.
+        Must be finite and strictly positive.
 
     Note:
         Higher penalties create stiffer contacts and reduce penetration.
@@ -3254,9 +3326,10 @@ class ContactParams:
         coefficient may need to be increased/decreased accordingly.
 
     Note:
-        The penalty coefficient used in a collision is the geometric mean of the
-        colliding and collider's coefficients. The exception is if the collider is
-        static, in which case the colliding's penalty is used.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. The
+        exception is if the collider is static, in which case the colliding's
+        penalty is used.
 
     Note:
         The penalty coefficient is additionally scaled by length-scale corrections
@@ -3272,7 +3345,7 @@ class ContactParams:
     :attr:`~superdex.physics.ContactParams.penalty_smoothing_half_distance`).
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Larger smoothing distances improve stability but may increase penetration.
@@ -3289,7 +3362,7 @@ class ContactParams:
     :attr:`~superdex.physics.ContactParams.penalty_smoothing_half_distance`).
 
     Note:
-        Negative values are legal.
+        Must be finite. Negative values are legal.
 
     Note:
         If the colliding actor has :class:`NONE <superdex.physics.ColliderType>` or
@@ -3308,7 +3381,7 @@ class ContactParams:
     :class:`POINT_CLOUD <superdex.physics.ColliderType>`.
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Extra padding is useful to avoid tunneling through thin actors when the
@@ -3336,8 +3409,8 @@ class ContactParams:
     collider when penetration is large.
 
     Note:
-        Valid range is [-1, 1]. -1 allows contact only for perfectly opposing
-        normals, 1 allows all contacts.
+        Must be in [-1, 1]. -1 allows contact only for perfectly opposing normals, 1
+        allows all contacts.
 
     Note:
         For co-dimensional colliding actors with ambiguous normals, contact is not
@@ -3351,7 +3424,7 @@ class ContactParams:
         Friction force is proportional to contact force and tangential velocity.
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Both viscousFrictionCoefficient and
@@ -3359,24 +3432,24 @@ class ContactParams:
         >0.
 
     Note:
-        The viscous friction coefficient used in a collision is the geometric mean
-        of the colliding and collider's coefficients. This disables viscous friction
-        if either of them does.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. This
+        disables viscous friction if either of them does.
     """
     coulomb_friction_coefficient: float
     """Coulomb friction coefficient (dimensionless).
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
         Both :attr:`~superdex.physics.ContactParams.viscous_friction_coefficient`
         and coulombFrictionCoefficient can be >0.
 
     Note:
-        The Coulomb friction coefficient used in a collision is the geometric mean
-        of the colliding and collider's coefficients. This disables Coulomb friction
-        if either of them does.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. This
+        disables Coulomb friction if either of them does.
     """
     friction_falloff_vel: float
     """Velocity threshold for Coulomb friction smoothing [m/s].
@@ -3388,17 +3461,18 @@ class ContactParams:
     regularization scale.
 
     Note:
-        Must not be negative. For CinfRegularized, a value of zero is clamped
-        internally to avoid numerical issues.
+        Must be finite and not negative. For CinfRegularized, a value of zero is
+        clamped internally to avoid numerical issues.
 
     Note:
         Smaller velocity thresholds improve physical accuracy but may degrade
         stability.
 
     Note:
-        The velocity threshold used in a collision is the geometric mean of the
-        colliding and collider's thresholds. The exception is if the collider is
-        static, in which case the colliding's threshold is used.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's thresholds. The
+        exception is if the collider is static, in which case the colliding's
+        threshold is used.
     """
     normal_viscous_damping_coefficient: float
     """Normal viscous damping coefficient [s/m].
@@ -3409,12 +3483,12 @@ class ContactParams:
     in the normal direction instead of tangentially.
 
     Note:
-        Must not be negative.
+        Must be finite and not negative.
 
     Note:
-        The normal viscous damping coefficient used in a collision is the geometric
-        mean of the colliding and collider's coefficients. This disables normal
-        damping if either of them does.
+        Without an actor-pair override for this field, the value used in a collision
+        is the geometric mean of the colliding and collider's coefficients. This
+        disables normal damping if either of them does.
 
     Note:
         The resulting coefficient of restitution (CoR) is velocity-dependent. For a
@@ -3439,6 +3513,9 @@ class ContactParams:
     culling.
 
     Note:
+        Must be finite.
+
+    Note:
         Useful, for example, with approximate SDFs (e.g., deep flow map) to
         compensate for potentially overestimating the true distance.
 
@@ -3450,6 +3527,9 @@ class ContactParams:
     """[Experimental] Object scale relative to default size (dimensionless). Used by
     deep flow only.
 
+    Note:
+        Must be finite and strictly positive.
+
     Warning:
         Deep flow is an experimental feature. It may be changed or removed in the
         future. Use at your own risk.
@@ -3460,6 +3540,9 @@ class ContactParams:
     manifold, such as a rod or point mass. E.g., the penalty is scaled by this value
     if the colliding body lumps contact tractions on a line, or this value squared
     if lumping contact forces on a point.
+
+    Note:
+        Must be finite and strictly positive.
 
     Note:
         This value is not used in the most common case, where contact traction is
@@ -3492,6 +3575,8 @@ class ContactParams:
         obj_scale: float = ...,
         colliding_penalty_length_scale: float = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
     def get_penalty_threshold_dist(self, add_padding: bool) -> float:
         """Get the total contact detection threshold.
 
@@ -3625,6 +3710,8 @@ class ArticulatedDofInfo:
         trans_size: int = ...,
         rot_size: int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
     def get_trans_offset(self) -> int:
         """Offset of this joint's translational DoFs in the flattened DoF array.
 
@@ -3680,6 +3767,8 @@ class SaturationHessianParams:
         joint_friction: bool = ...,
         constraint_saturation: bool = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
     @staticmethod
     def all(value: bool) -> SaturationHessianParams:
         """Construct with all three flags set to the given value.
@@ -3805,6 +3894,8 @@ class ExperimentalEvalParams:
         consistency_res_norm: bool = ...,
         consistency_res_norm_step: float = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class NonLinearSolverParams:
     """Parameters for non-linear implicit solves."""
@@ -3867,8 +3958,6 @@ class NonLinearSolverParams:
     """
     psd_proj_mode: PsdProjectionMode
     """Positive Semi-Definite (PSD) projection mode for the dresidual matrix."""
-    gradient_descent_fallback: bool
-    """Fall back to gradient descent direction if the solver search direction fails."""
     explosion_control: bool
     """Enable heuristic explosion prevention."""
     abs_div_tol: float
@@ -3933,6 +4022,11 @@ class NonLinearSolverParams:
 
     Note:
         Only applies to :class:`SIMPLE <superdex.physics.LineSearchType>`.
+
+    Note:
+        An increase beyond this maximum but within an estimate of the objective's
+        rounding error is tested on the slope of the objective along the step
+        instead (see :class:`~superdex.physics.LineSearchType`).
     """
     line_search_type: LineSearchType
     """Line search type."""
@@ -3955,7 +4049,6 @@ class NonLinearSolverParams:
         rel_step_tol: float = ...,
         stop_if_no_improvement: bool = ...,
         psd_proj_mode: PsdProjectionMode | int = ...,
-        gradient_descent_fallback: bool = ...,
         explosion_control: bool = ...,
         abs_div_tol: float = ...,
         rel_div_tol: float = ...,
@@ -3968,6 +4061,8 @@ class NonLinearSolverParams:
         linear_tolerance_strategy: LinearToleranceStrategy | int = ...,
         verbosity: VerbosityLevel | int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class LinearSolverParams:
     """Parameters for linear solves."""
@@ -3993,8 +4088,8 @@ class LinearSolverParams:
         Applies only to iterative solvers.
     """
     rel_tol: float
-    """Relative residual norm tolerance for convergence, relative to the initial
-    residual.
+    """Relative residual norm tolerance for convergence, relative to the same norm of
+    the right-hand side.
 
     Note:
         Applies only to iterative solvers.
@@ -4010,21 +4105,20 @@ class LinearSolverParams:
         iteration.
     """
     rel_div_tol: float
-    """Relative residual norm tolerance for divergence, relative to the initial
-    residual.
+    """Relative residual norm tolerance for divergence, relative to the same norm of
+    the right-hand side.
 
     Note:
         Applies only to iterative solvers.
     """
     max_iter: int
-    """Maximum number of linear solver iterations.
+    """Maximum number of iterations for iterative solvers.
 
     Note:
         Applies only to iterative solvers.
 
     Note:
-        Must be non-negative or
-        :const:`~superdex.physics.AUTO_LINEAR_SOLVER_MAX_ITER`.
+        Must be positive or :const:`~superdex.physics.AUTO_LINEAR_SOLVER_MAX_ITER`.
 
     Note:
         :const:`~superdex.physics.AUTO_LINEAR_SOLVER_MAX_ITER` lets Mochi select the
@@ -4065,6 +4159,8 @@ class LinearSolverParams:
         abort_if_not_spd: bool = ...,
         verbosity: VerbosityLevel | int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class CoordinateSpace:
     """Coordinate-axis convention and linear unit scale."""
@@ -4234,6 +4330,7 @@ class SceneHandle(Handle):
     def __init__(self) -> None: ...
     @overload
     def __init__(self, value: Handle.ValueTypeLike = ...) -> None: ...
+    def __hash__(self) -> int: ...
 
 class ActorHandle(Handle):
     """Unique identifier for an :class:`~superdex.physics.Actor` within a
@@ -4252,6 +4349,7 @@ class ActorHandle(Handle):
     def __init__(self) -> None: ...
     @overload
     def __init__(self, value: Handle.ValueTypeLike = ...) -> None: ...
+    def __hash__(self) -> int: ...
 
 class ShapeHandle(Handle):
     """Handle to a shape (mesh, sphere, plane, etc.) within a Mochi context.
@@ -4269,6 +4367,7 @@ class ShapeHandle(Handle):
     def __init__(self) -> None: ...
     @overload
     def __init__(self, value: Handle.ValueTypeLike = ...) -> None: ...
+    def __hash__(self) -> int: ...
 
 class CallbackHandle(Handle):
     """Unique identifier for a callback registration within a
@@ -4282,6 +4381,7 @@ class CallbackHandle(Handle):
     def __init__(self) -> None: ...
     @overload
     def __init__(self, value: Handle.ValueTypeLike = ...) -> None: ...
+    def __hash__(self) -> int: ...
 
 class ConstraintHandle(Handle):
     """Unique identifier for a :class:`~superdex.physics.Constraint` within a
@@ -4300,6 +4400,7 @@ class ConstraintHandle(Handle):
     def __init__(self) -> None: ...
     @overload
     def __init__(self, value: Handle.ValueTypeLike = ...) -> None: ...
+    def __hash__(self) -> int: ...
 
 class StateHandle(Handle):
     """Unique identifier for a captured simulation state within a
@@ -4318,6 +4419,7 @@ class StateHandle(Handle):
     def __init__(self) -> None: ...
     @overload
     def __init__(self, value: Handle.ValueTypeLike = ...) -> None: ...
+    def __hash__(self) -> int: ...
 
 class QueryHandle(Handle):
     """Unique identifier for a query within a :class:`~superdex.physics.Scene`.
@@ -4336,6 +4438,7 @@ class QueryHandle(Handle):
     def __init__(self) -> None: ...
     @overload
     def __init__(self, value: Handle.ValueTypeLike = ...) -> None: ...
+    def __hash__(self) -> int: ...
 
 INVALID_HANDLE: int
 """Default value for an invalid handle."""
@@ -4683,14 +4786,15 @@ class QueryType:
     :meth:`~superdex.physics.Actor.get_node_positions_local`.
 
     Note:
-        Only supported for soft, soft-skinned and shell actors.
+        Only supported for standalone soft actors, nested soft actors, and shell
+        actors.
     """
     ELEMENTS_DEFORMATION_GRADIENT: QueryType
     """Deformation gradients for elements in deformable actors. Available via
     :meth:`~superdex.physics.Actor.get_elements_deformation_gradient`.
 
     Note:
-        Only supported for soft and soft-skinned actors (except ROMs).
+        Only supported for standalone and nested soft actors (except ROMs).
     """
     SURFACE_NODE_POSITIONS: QueryType
     """Positions of surface mesh nodes. Available via
@@ -4724,6 +4828,26 @@ class QueryType:
         Only supported for actors with a visual mesh. Deformable actors also require
         a visual mesh embedding.
     """
+    CONTACT_SKIN_NODE_POSITIONS: QueryType
+    """Positions of contact skin mesh nodes. Available via
+    :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_positions_local`.
+
+    Note:
+        Only supported for deformable actors whose shape has a contact skin,
+        regardless of :attr:`~superdex.physics.SoftActorParams.use_contact_skin` /
+        :attr:`~superdex.physics.experimental.RodActorParams.use_contact_skin` /
+        :attr:`~superdex.physics.experimental.ShellActorParams.use_contact_skin`.
+    """
+    CONTACT_SKIN_NODE_NORMALS: QueryType
+    """Normals of contact skin mesh nodes. Available via
+    :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_normals_local`.
+
+    Note:
+        Only supported for deformable actors whose shape has a contact skin,
+        regardless of :attr:`~superdex.physics.SoftActorParams.use_contact_skin` /
+        :attr:`~superdex.physics.experimental.RodActorParams.use_contact_skin` /
+        :attr:`~superdex.physics.experimental.ShellActorParams.use_contact_skin`.
+    """
     CONTACT_POINTS: QueryType
     """Contact points between actors. Available via
     :meth:`~superdex.physics.Actor.get_contact_points_world`.
@@ -4742,7 +4866,7 @@ class QueryType:
     :meth:`~superdex.physics.Actor.get_elastic_energy`.
 
     Note:
-        Only supported for soft and soft-skinned actors.
+        Only supported for standalone and nested soft actors.
     """
     NODE_CONTACT_FORCES: QueryType
     """Contact forces per node. Available via
@@ -4868,7 +4992,7 @@ class SolverParams:
     def __ne__(self, other: object) -> bool: ...
 
 class RecenteringParams:
-    """Parameters controlling recentering behavior for soft actors (not soft-skinned).
+    """Parameters controlling recentering behavior for standalone soft actors.
 
     Recentering automatically updates the root transform as the actor's "rigid
     pivot" (typically near the center of mass) moves, with corresponding adjustments
@@ -4913,6 +5037,8 @@ class RecenteringParams:
         rotation_epsilon_deg: float = ...,
         translation_epsilon: float = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class BoundarySubsamplingParams:
     """Parameters for subsampling boundary integrals such as contact.
@@ -4935,6 +5061,61 @@ class BoundarySubsamplingParams:
         self,
         subsampling_density: float = ...,
         strategy: BoundarySubsamplingStrategy | int = ...,
+    ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
+
+class ContactPairParamsOverride:
+    """Optional contact-response parameter replacements for an unordered actor pair.
+
+    Each present field replaces the value normally combined from the two actors. An
+    absent field retains the existing combination rule.
+
+    Note:
+        Present fields have the same validity requirements as the corresponding
+        :class:`~superdex.physics.ContactParams` fields. A present zero is a value
+        subject to those requirements, not an absent field.
+    """
+    penalty_coefficient: Optional[float]
+    """Pair penalty coefficient [Pa/m] before role-dependent dimensional corrections.
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.penalty_coefficient`
+    """
+    friction_falloff_vel: Optional[float]
+    """Friction falloff velocity [m/s].
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.friction_falloff_vel`
+    """
+    viscous_friction_coefficient: Optional[float]
+    """Pair viscous friction coefficient [s/m].
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.viscous_friction_coefficient`
+    """
+    coulomb_friction_coefficient: Optional[float]
+    """Pair Coulomb friction coefficient.
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.coulomb_friction_coefficient`
+    """
+    normal_viscous_damping_coefficient: Optional[float]
+    """Pair normal viscous damping coefficient [s/m].
+
+    See Also:
+        :attr:`~superdex.physics.ContactParams.normal_viscous_damping_coefficient`
+    """
+    @overload
+    def __init__(self) -> None: ...
+    @overload
+    def __init__(
+        self,
+        penalty_coefficient: Optional[float] = ...,
+        friction_falloff_vel: Optional[float] = ...,
+        viscous_friction_coefficient: Optional[float] = ...,
+        coulomb_friction_coefficient: Optional[float] = ...,
+        normal_viscous_damping_coefficient: Optional[float] = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
@@ -5148,7 +5329,8 @@ class RigidActorParams:
     forces and collisions).
 
     Note:
-        Also used to create links in articulated bodies.
+        Articulated links are created from
+        :class:`~superdex.physics.ArticulatedLinkParams` instead.
 
     See Also:
         :meth:`~superdex.physics.Scene.create_rigid_actor`,
@@ -5173,6 +5355,10 @@ class RigidActorParams:
 
     Note:
         Dynamic rigid actors require a shape with a surface mesh.
+
+    Note:
+        A tetrahedral or triangular mesh shape may have nodes that no element
+        references. :meth:`~superdex.physics.Actor.get_mesh` omits them.
 
     See Also:
         :class:`~superdex.physics.ShapeHandle`,
@@ -5213,11 +5399,19 @@ class RigidActorParams:
     shape doesn't already have one.
 
     Note:
-        Ignored if :attr:`~superdex.physics.RigidActorParams.collider_type` is not
-        :class:`SDF <superdex.physics.ColliderType>`.
+        Ignored unless :attr:`~superdex.physics.RigidActorParams.shape` is a
+        tetrahedral or triangular mesh shape and
+        :attr:`~superdex.physics.RigidActorParams.collider_type` is :class:`SDF
+        <superdex.physics.ColliderType>` or :class:`AUTO
+        <superdex.physics.ColliderType>`.
 
     Note:
-        Ignored if the shape already has a grid-based SDF.
+        Ignored if the shape already has a grid-based SDF, or one is already being
+        computed.
+
+    Note:
+        Actor creation fails if these parameters are used but cannot produce an SDF
+        for the shape.
     """
     has_gravity: bool
     """If true, actor is affected by gravity.
@@ -5335,7 +5529,7 @@ class RigidActorParams:
         zero otherwise.
 
         Note:
-            Not valid for static rigid actors or articulated links.
+            Not valid for static rigid actors.
 
         See Also:
             :meth:`~superdex.physics.Actor.get_linear_velocity`,
@@ -5348,7 +5542,7 @@ class RigidActorParams:
         """Optional initial angular velocity in world frame [rad/s], zero otherwise.
 
         Note:
-            Not valid for static rigid actors or articulated links.
+            Not valid for static rigid actors.
 
         See Also:
             :meth:`~superdex.physics.Actor.get_angular_velocity`,
@@ -5436,7 +5630,8 @@ class SoftActorParams:
     """Shape handle defining the actor's geometry and other metadata.
 
     Note:
-        Must be a TetrahedralMeshShape for soft actors.
+        Actor creation fails if the shape is not a tetrahedral mesh shape or has a
+        node that no element references.
 
     Note:
         A shape can be shared by multiple actors, even actors in different scenes.
@@ -5515,11 +5710,32 @@ class SoftActorParams:
         :attr:`~superdex.physics.SoftActorParams.has_inertia` or
         :attr:`~superdex.physics.SoftActorParams.has_stress` must be enabled.
     """
-    boundary_element_type: ActorBoundaryElementType
-    """Finite element type for boundary discretization.
+    use_contact_skin: bool
+    """[Experimental] Use the shape's authored contact skin for colliding contact
+    samples.
+
+    Actor creation fails unless the shape has a contact skin. The tetrahedral
+    boundary remains the collider geometry when an SDF or Deep Flow collider is
+    enabled. This option is not supported for ROM or nested soft actors.
 
     Note:
-        Affects accuracy and performance of contact and boundary integrals.
+        The contact skin is exposed through
+        :meth:`~superdex.physics.Actor.get_contact_skin_mesh` and
+        :class:`CONTACT_SKIN_NODE_POSITIONS <superdex.physics.QueryType>` /
+        :class:`CONTACT_SKIN_NODE_NORMALS <superdex.physics.QueryType>`
+        independently of this flag.
+
+    Warning:
+        This is an experimental feature. It may be changed or removed in the future.
+        Use at your own risk.
+    """
+    boundary_element_type: ActorBoundaryElementType
+    """Finite element type for contact discretization.
+
+    Note:
+        Selects quadrature on the tetrahedral boundary, or on the authored contact
+        skin when :attr:`~superdex.physics.SoftActorParams.use_contact_skin` is
+        true.
 
     See Also:
         :class:`~superdex.physics.ActorBoundaryElementType`
@@ -5538,6 +5754,7 @@ class SoftActorParams:
         has_gravity: bool = ...,
         has_inertia: bool = ...,
         has_stress: bool = ...,
+        use_contact_skin: bool = ...,
         boundary_element_type: ActorBoundaryElementType | int = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
@@ -5743,6 +5960,18 @@ class ArticulatedLinkParams:
         :attr:`~superdex.physics.SoftSkinnedActorParams.enable_colliding_links` is
         true.
 
+    Note:
+        A tetrahedral or triangular mesh shape may have nodes that no element
+        references. The link actor's :meth:`~superdex.physics.Actor.get_mesh` omits
+        them.
+
+    Note:
+        May be left empty. A link without a shape has no contact and is massless
+        unless it specifies an explicit
+        :attr:`~superdex.physics.ArticulatedLinkParams.mass`,
+        :attr:`~superdex.physics.ArticulatedLinkParams.center_of_mass`, and
+        :attr:`~superdex.physics.ArticulatedLinkParams.moment_of_inertia`.
+
     See Also:
         :class:`~superdex.physics.ShapeHandle`,
         :func:`~superdex.physics.load_shape_from_file`
@@ -5784,6 +6013,11 @@ class ArticulatedLinkParams:
     Note:
         If neither is set, :const:`~superdex.physics.DEFAULT_DENSITY` is used.
 
+    Note:
+        Ignored for links without a
+        :attr:`~superdex.physics.ArticulatedLinkParams.shape`, which have no volume.
+        Use :attr:`~superdex.physics.ArticulatedLinkParams.mass` instead.
+
     See Also:
         :attr:`~superdex.physics.ArticulatedLinkParams.mass`
     """
@@ -5796,6 +6030,13 @@ class ArticulatedLinkParams:
     Note:
         If mass is set, density is computed automatically from volume (and vice
         versa).
+
+    Note:
+        A link without a :attr:`~superdex.physics.ArticulatedLinkParams.shape` is
+        massless unless it sets a positive mass together with
+        :attr:`~superdex.physics.ArticulatedLinkParams.center_of_mass` and
+        :attr:`~superdex.physics.ArticulatedLinkParams.moment_of_inertia`. Otherwise
+        its mass properties are ignored.
 
     See Also:
         :attr:`~superdex.physics.ArticulatedLinkParams.density`
@@ -5896,19 +6137,30 @@ class ArticulatedSkinParams:
     """Optional skinned mesh attached to an articulated actor for collision and
     rendering.
 
-    The skin is a triangle mesh deformed by the underlying articulated links. It
-    acts as a colliding actor (its contact sample points are tested against other
-    actors' collider geometry) but not as a collider actor (other actors' contact
-    sample points are not tested against it).
+    The skin is a triangular or tetrahedral mesh deformed by the articulated links
+    and, for a blended skin, the nested soft actors. The articulated actor acts as a
+    colliding actor through the skin's surface: contact sample points on that
+    surface are tested against other actors' collider geometry. The skin does not
+    provide collider geometry, so other actors' contact sample points are not tested
+    against it.
 
     See Also:
         :attr:`~superdex.physics.ArticulatedActorParams.skin`
     """
     shape: ShapeHandle
-    """Shape handle defining the skinned triangle mesh.
+    """Shape handle defining the skinned triangular or tetrahedral mesh.
+
+    Note:
+        Actor creation fails if the shape is not a triangular or tetrahedral mesh
+        shape with skinning data, or has a node that no element references.
 
     Note:
         A shape can be shared by multiple actors, even actors in different scenes.
+
+    Note:
+        The number of skinning links per vertex impacts performance. Keep it as low
+        as possible to maximize performance, e.g., by clamping tiny skinning weights
+        to zero.
 
     See Also:
         :class:`~superdex.physics.ShapeHandle`,
@@ -5942,6 +6194,35 @@ class ArticulatedSkinParams:
         :attr:`~superdex.physics.ArticulatedSkinParams.boundary_element_type` =
         :class:`P1Q1 <superdex.physics.ActorBoundaryElementType>`.
     """
+    @property
+    def non_colliding_links(self) -> Optional[DynamicArrayString]:
+        """Local names of links that do not act as colliding actors.
+
+        Note:
+            A listed link contributes no rigid contact; the skin collides in its place.
+            A link that is not listed keeps its own rigid contact, and the skin still
+            collides over it, so both can generate contact in the same region.
+
+        Note:
+            On an articulated actor, unset means no link collides and the skin is the
+            sole colliding actor, while an empty list means every link collides.
+
+        Note:
+            Each entry must be non-empty and must match a skeleton link local name.
+
+        Note:
+            On a soft-skinned actor,
+            :attr:`~superdex.physics.SoftSkinnedActorParams.enable_colliding_links`
+            governs every link this list does not name: a link collides only when that
+            flag is true and the link is not listed here. Unset therefore leaves that
+            flag in sole control.
+
+        Note:
+            This setting does not affect whether the links act as colliders; see
+            :attr:`~superdex.physics.ArticulatedLinkParams.collider_type`.
+        """
+    @non_colliding_links.setter
+    def non_colliding_links(self, value: Optional[ArrayLikeString]) -> None: ...
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -5952,6 +6233,7 @@ class ArticulatedSkinParams:
         contact: ContactParams = ...,
         boundary_element_type: ActorBoundaryElementType | int = ...,
         boundary_subsampling: Optional[BoundarySubsamplingParams] = ...,
+        non_colliding_links: Optional[ArrayLikeString] = ...,
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
@@ -6101,11 +6383,11 @@ class SoftSkinnedActorParams:
 
     Note:
         If a skin shape is provided, the skin mesh acts as the colliding surface,
-        not the individual soft actor surfaces. The skin shape must include blending
-        data to define how the skinned surfaces of the soft actors are blended with
-        the overarching skin. Each soft actor must be linked to its corresponding
-        blending data via its effective nested soft local name after default-name
-        assignment.
+        not the surfaces of individual nested soft actors. The skin shape must
+        include blending data to define how the skinned surfaces of the nested soft
+        actors are blended with the overarching skin. Each nested soft actor must be
+        linked to its corresponding blending data via its effective nested soft
+        local name after default-name assignment.
 
     See Also:
         :class:`~superdex.physics.ArticulatedActorParams`,
@@ -6113,15 +6395,15 @@ class SoftSkinnedActorParams:
     """
     @property
     def soft_params(self) -> DynamicArraySoftActorParams:
-        """Parameters for the soft deformable actors.
+        """Parameters for the nested soft actors.
 
         Note:
             If a skin shape is provided, the skin mesh acts as the colliding surface,
-            not the individual soft actor surfaces.
+            not the surfaces of individual nested soft actors.
 
         Note:
             If a skin shape is provided, dynamic hyper-reduction is not allowed on the
-            soft actors.
+            nested soft actors.
 
         Note:
             If a :class:`~superdex.physics.SoftActorParams` entry has its hasInertia set
@@ -6138,14 +6420,14 @@ class SoftSkinnedActorParams:
             hasGravity set to false (use this struct's hasGravity instead).
 
         Note:
-            Each soft actor must have some DoFs constrained. This can be implemented (a)
-            by constraining nodes in the :class:`~superdex.physics.SoftActorParams`
-            shape for FOM actors, or (b) by constraining the ROM subspace for ROM
-            actors.
+            Each nested soft actor must have some DoFs constrained. This can be
+            implemented (a) by constraining nodes in the
+            :class:`~superdex.physics.SoftActorParams` shape for FOM actors, or (b) by
+            constraining the ROM subspace for ROM actors.
 
         Note:
-            Each soft actor must have at least one energy term enabled: either this
-            struct's :attr:`~superdex.physics.SoftSkinnedActorParams.has_gravity`,
+            Each nested soft actor must have at least one energy term enabled: either
+            this struct's :attr:`~superdex.physics.SoftSkinnedActorParams.has_gravity`,
             :attr:`~superdex.physics.SoftSkinnedActorParams.has_inertia` or
             :attr:`~superdex.physics.SoftSkinnedActorParams.has_stress` (applied to
             every entry), or that entry's own
@@ -6166,11 +6448,16 @@ class SoftSkinnedActorParams:
 
         Note:
             Each entry's :attr:`~superdex.physics.SoftActorParams.world_from_local` must
-            be identity. Each soft actor's shape must be defined directly in the
+            be identity. Each nested soft actor's shape must be defined directly in the
             reference frame of the articulated actor. The soft-skinned actor's placement
             in scene world is provided by
             :attr:`~superdex.physics.ArticulatedActorParams.world_from_root` from
             :attr:`~superdex.physics.SoftSkinnedActorParams.skeleton_params`.
+
+        Note:
+            For a blended skin, author the skin and nested-soft shapes in the same rest
+            frame and use the articulation skin as the canonical source for each
+            positively blended vertex's rest position and ordered skinning data.
 
         See Also:
             :attr:`~superdex.physics.SoftSkinnedActorParams.has_gravity`,
@@ -6181,10 +6468,11 @@ class SoftSkinnedActorParams:
     def soft_params(self, value: ArrayLikeSoftActorParams) -> None: ...
     @property
     def soft_attach_links(self) -> DynamicArrayString:
-        """Optional local names of the rigid links where soft actors are attached.
+        """Optional local names of the rigid links where nested soft actors are
+        attached.
 
         Note:
-            If empty, soft actor shapes must include skinning data.
+            If empty, nested soft actor shapes must include skinning data.
 
         Note:
             If provided, must be 1-to-1 with
@@ -6192,8 +6480,8 @@ class SoftSkinnedActorParams:
             must be non-empty and must match a skeleton link local name.
 
         Note:
-            Contact is automatically disabled between soft actors and their attachment
-            links.
+            Contact is automatically disabled between nested soft actors and their
+            attachment links.
         """
     @soft_attach_links.setter
     def soft_attach_links(self, value: ArrayLikeString) -> None: ...
@@ -6201,10 +6489,15 @@ class SoftSkinnedActorParams:
     """Enable internal skeleton links as colliding actors.
 
     Note:
-        If false, only the soft actors or the skin mesh act as colliding actors.
+        If false, only nested soft actors act as colliding actors when no skin is
+        present; otherwise, only the articulated actor acts as a colliding actor
+        through its skin.
+
+    Note:
+        This setting does not affect whether the links act as colliders.
     """
     has_gravity: bool
-    """Enable gravity evaluation of soft actors on posed/skinned positions.
+    """Enable gravity evaluation of nested soft actors on posed/skinned positions.
 
     Note:
         Each :class:`~superdex.physics.SoftActorParams` entry must have its
@@ -6214,7 +6507,7 @@ class SoftSkinnedActorParams:
         :meth:`~superdex.physics.Scene.set_gravity`
     """
     has_inertia: bool
-    """Enable inertia evaluation of soft actors on posed/skinned positions.
+    """Enable inertia evaluation of nested soft actors on posed/skinned positions.
 
     Note:
         If true, each :class:`~superdex.physics.SoftActorParams` entry must have its
@@ -6230,7 +6523,7 @@ class SoftSkinnedActorParams:
         to true. This is an approximation but may improve performance.
     """
     has_stress: bool
-    """Enable elasticity evaluation of soft actors on posed/skinned positions.
+    """Enable elasticity evaluation of nested soft actors on posed/skinned positions.
 
     Note:
         If true, each :class:`~superdex.physics.SoftActorParams` entry must have its
@@ -6344,6 +6637,8 @@ class RigidSphericalJointConstraintParams(ConstraintParams):
         actor_a: ActorHandle = ...,
         actor_b: ActorHandle = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPrismaticJointConstraintParams(ConstraintParams):
     """Parameters for creating a prismatic joint between two rigid actors.
@@ -6401,6 +6696,8 @@ class RigidPrismaticJointConstraintParams(ConstraintParams):
         max: Optional[float] = ...,
         min: Optional[float] = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class DeformableNodeToDeformableNodeConstraintParams(ConstraintParams):
     """Parameters for creating a constraint coupling a node in a deformable actor to a
@@ -6457,6 +6754,8 @@ class DeformableNodeToDeformableNodeConstraintParams(ConstraintParams):
         actor_b: ActorHandle = ...,
         find_closest: bool = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RodElementRotationToRigidConstraintParams(ConstraintParams):
     """Parameters for creating a tracking constraint on the relative rotation between a
@@ -6502,6 +6801,8 @@ class RodElementRotationToRigidConstraintParams(ConstraintParams):
         rod_actor: ActorHandle = ...,
         element_index: int = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class DeformableNodeToRigidConstraintParams(ConstraintParams):
     """Parameters for creating a constraint coupling a deformable node to a rigid
@@ -6585,6 +6886,8 @@ class DeformableNodeToRigidConstraintParams(ConstraintParams):
         find_closest: bool = ...,
         fix_to_deformable_pos: bool = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class JointRotationRangeConstraintParams(ConstraintParams):
     """Parameters for creating a joint rotation range constraint between two rigid
@@ -6654,6 +6957,8 @@ class JointRotationRangeConstraintParams(ConstraintParams):
         actor_b: ActorHandle = ...,
         range_around_rest: bool = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPivotPositionConstraintParams(ConstraintParams):
     """Parameters for creating a position constraint on a rigid actor's pivot point.
@@ -6689,6 +6994,8 @@ class RigidPivotPositionConstraintParams(ConstraintParams):
         local_position: Real3Like = ...,
         actor: ActorHandle = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPivotToRigidTargetConstraintParams(ConstraintParams):
     """Parameters for creating a constraint on a rigid actor's pivot point. The target
@@ -6723,6 +7030,8 @@ class RigidPivotToRigidTargetConstraintParams(ConstraintParams):
         local_position: Real3Like = ...,
         actor: ActorHandle = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class RigidPivotRotationConstraintParams(ConstraintParams):
     """Parameters for creating a rotation constraint on a rigid actor's pivot frame.
@@ -6759,6 +7068,8 @@ class RigidPivotRotationConstraintParams(ConstraintParams):
         local_rotation: Real3Like = ...,
         actor: ActorHandle = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class DeformableNodePositionConstraintParams(ConstraintParams):
     """Parameters for creating a position constraint on a deformable actor node.
@@ -6841,6 +7152,8 @@ class JointRotationTrackingConstraintParams(ConstraintParams):
         actor_a: ActorHandle = ...,
         actor_b: ActorHandle = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ArticulatedSingleDofTargetConstraintParams(ConstraintParams):
     """Parameters for creating a target constraint on a single articulated DoF.
@@ -6886,6 +7199,8 @@ class ArticulatedSingleDofTargetConstraintParams(ConstraintParams):
         dof_index: int = ...,
         target_value: float = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class Articulated3dRotationTargetConstraintParams(ConstraintParams):
     """Parameters for creating a target constraint on 3D rotation DoFs of an
@@ -6930,6 +7245,8 @@ class Articulated3dRotationTargetConstraintParams(ConstraintParams):
         joint_index: int = ...,
         target: QuaternionLike = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ArticulatedSingleDofRangeConstraintParams(ConstraintParams):
     """Parameters for creating a range constraint on a single articulated DoF.
@@ -6976,6 +7293,8 @@ class ArticulatedSingleDofRangeConstraintParams(ConstraintParams):
         min_value: float = ...,
         max_value: float = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class Articulated3dRotationRangeConstraintParams(ConstraintParams):
     """Parameters for creating a range constraint on a 3D-rotation articulated joint.
@@ -7019,6 +7338,8 @@ class Articulated3dRotationRangeConstraintParams(ConstraintParams):
         min_values: Real3Like = ...,
         max_values: Real3Like = ...,
     ) -> None: ...
+    def __eq__(self, other: object) -> bool: ...
+    def __ne__(self, other: object) -> bool: ...
 
 class ContactPoint:
     """Information about a contact point between two actors.
@@ -7128,8 +7449,8 @@ class ContactPoint:
     Note:
         Units depend on the dimensionality of the colliding manifold of
         :attr:`~superdex.physics.ContactPoint.actor_a`: [m²] for surface contact
-        (e.g., rigid, articulated, soft, shell, and rod actors with visual-mesh
-        contact enabled), or [m] for rod actors using centerline contact.
+        (e.g., rigid, articulated, soft, shell, and rod actors using contact-skin
+        contact), or [m] for rod actors using centerline contact.
 
     Note:
         For surface contact, represents the surface area corresponding to the sample
@@ -7143,8 +7464,10 @@ class ContactPoint:
         value.
     """
     element_index: int
-    """Element index on the surface mesh of
-    :attr:`~superdex.physics.ContactPoint.actor_a`.
+    """Index of the triangle of :attr:`~superdex.physics.ContactPoint.actor_a` in
+    :meth:`~superdex.physics.Actor.get_surface_mesh`, or in
+    :meth:`~superdex.physics.Actor.get_contact_skin_mesh` when contact uses the
+    contact skin.
 
     Note:
         For rod actors, this field is not populated and is reported as 0. Use
@@ -7206,8 +7529,10 @@ class NodeContactForce:
         :meth:`~superdex.physics.Actor.get_node_contact_forces_world`
     """
     index: int
-    """Node index in the volumetric mesh (for actors with a volumetric mesh) or surface
-    mesh (for actors without a volumetric mesh).
+    """Index of the node in the node list returned by
+    :meth:`~superdex.physics.Actor.get_mesh`, or by
+    :meth:`~superdex.physics.Actor.get_contact_skin_mesh` when contact uses the
+    contact skin.
     """
     @property
     def force(self) -> Real3:
@@ -7284,7 +7609,8 @@ class PerformanceStats:
     """
     total_step_duration_sec: float
     """Total wall-clock time [s] spent in the last call to
-    :meth:`~superdex.physics.Scene.step`.
+    :meth:`~superdex.physics.Scene.step`, excluding time spent in the remote physics
+    debugger.
 
     Note:
         Includes time spent in user-defined pre-step and post-step callbacks.
@@ -7308,6 +7634,14 @@ class PerformanceStats:
     recording_step_duration_sec: float
     """Wall-clock time [s] spent on recording in the last call to
     :meth:`~superdex.physics.Scene.step`.
+
+    Warning:
+        Recording is an experimental feature. It may be changed or removed without
+        notice.
+
+    See Also:
+        :func:`~superdex.physics.experimental.start_recording`,
+        :class:`~superdex.physics.experimental.RecordingParams`
     """
     @overload
     def __init__(self) -> None: ...
@@ -7330,29 +7664,38 @@ class SolverStats:
         :meth:`~superdex.physics.Scene.get_solver_stats`
     """
     max_non_linear_iters: int
-    """Maximum number of non-linear solver iterations across all islands and
+    """Maximum number of non-linear solver iterations across all awake islands and
     integration stages in the last call to :meth:`~superdex.physics.Scene.step`.
     """
     residual_norm: float
-    """Aggregate residual norm across all islands and integration stages in the last
-    call to :meth:`~superdex.physics.Scene.step`. Computed as the root mean square
-    across integration stages of the L2 norm of per-island residual norms.
+    """Aggregate residual norm across all awake islands and integration stages in the
+    last call to :meth:`~superdex.physics.Scene.step`. Computed as the root mean
+    square across integration stages of the L2 norm of per-island residual norms.
     """
     max_line_search_iters: int
-    """Maximum number of line-search iterations per Newton solve across all islands and
-    integration stages in the last call to :meth:`~superdex.physics.Scene.step`.
+    """Maximum number of line-search iterations per Newton solve across all awake
+    islands and integration stages in the last call to
+    :meth:`~superdex.physics.Scene.step`.
     """
     convergence_status: ConvergenceStatus
     """Aggregate convergence status of the scene in the last call to
     :meth:`~superdex.physics.Scene.step`.
 
-    Returns the worst convergence status across all dynamic actors: :class:`DIVERGED
-    <superdex.physics.ConvergenceStatus>` if any actor diverged, :class:`STOPPED
-    <superdex.physics.ConvergenceStatus>` if any actor's solver was stopped,
-    :class:`CONVERGED <superdex.physics.ConvergenceStatus>` if all dynamic actors
-    converged, :class:`NONE <superdex.physics.ConvergenceStatus>` if no dynamic
-    actors exist, :meth:`~superdex.physics.Scene.step` has not been called yet or
-    the last call to :meth:`~superdex.physics.Scene.step` was with zero time step.
+    Returns the worst convergence status across all dynamic actors in awake islands:
+    :class:`DIVERGED <superdex.physics.ConvergenceStatus>` if any actor diverged,
+    :class:`STOPPED <superdex.physics.ConvergenceStatus>` if any actor's solver was
+    stopped, :class:`CONVERGED <superdex.physics.ConvergenceStatus>` if all dynamic
+    actors in awake islands converged, :class:`NONE
+    <superdex.physics.ConvergenceStatus>` if no dynamic actors exist, all islands
+    are asleep, :meth:`~superdex.physics.Scene.step` has not been called yet or the
+    last call to :meth:`~superdex.physics.Scene.step` was with zero time step.
+
+    Note:
+        Unlike :class:`DIVERGED <superdex.physics.ConvergenceStatus>`,
+        :class:`STOPPED <superdex.physics.ConvergenceStatus>` does not indicate that
+        the step failed. It means that the nonlinear solve reached a stopping
+        criterion, such as the maximum number of iterations, before meeting its
+        residual tolerances, which may be stricter than the scene requires.
 
     See Also:
         :class:`~superdex.physics.ConvergenceStatus`,
@@ -7370,77 +7713,6 @@ class SolverStats:
     ) -> None: ...
     def __eq__(self, other: object) -> bool: ...
     def __ne__(self, other: object) -> bool: ...
-
-class RecordingParams:
-    """Parameters controlling what data gets included in a scene recording.
-
-    Warning:
-        The recording system may undergo a substantial refactor to expand its
-        capabilities. Its API and recorded file format may change in future
-        releases.
-
-    See Also:
-        :meth:`~superdex.physics.Scene.start_recording`,
-        :meth:`~superdex.physics.Scene.stop_recording`
-    """
-    record_actor_meshes: bool
-    """Include the meshes (if any) when recording actor creation events."""
-    record_actor_local_to_global_map: bool
-    """Include the local-to-global map (if any) when recording actor creation events."""
-    record_actor_mass_matrix: bool
-    """Include the mass matrix (if any) when recording actor creation events."""
-    record_target_state: bool
-    """Record articulated pose controller targets and tracking parameters every step."""
-    record_dynamic_actor_state: bool
-    """Record the state of dynamic actors every step.
-
-    This includes position, rotation, and velocity. For soft actors, it includes the
-    node displacements and velocities.
-    """
-    record_static_actor_state: bool
-    """Record the state of static actors every step. This includes position and
-    rotation.
-    """
-    record_contact_points: bool
-    """Record results from :class:`CONTACT_POINTS <superdex.physics.QueryType>` for
-    each dynamic actor every step.
-    """
-    record_node_contact_forces: bool
-    """Record results for :class:`NODE_CONTACT_FORCES <superdex.physics.QueryType>` for
-    each soft actor every step.
-    """
-    record_sdf_distances: bool
-    """Record SDF distances for :class:`SDF_DISTANCES <superdex.physics.QueryType>` for
-    each dynamic actor every step.
-    """
-    @overload
-    def __init__(self) -> None: ...
-    @overload
-    def __init__(
-        self,
-        record_actor_meshes: bool = ...,
-        record_actor_local_to_global_map: bool = ...,
-        record_actor_mass_matrix: bool = ...,
-        record_target_state: bool = ...,
-        record_dynamic_actor_state: bool = ...,
-        record_static_actor_state: bool = ...,
-        record_contact_points: bool = ...,
-        record_node_contact_forces: bool = ...,
-        record_sdf_distances: bool = ...,
-    ) -> None: ...
-    @staticmethod
-    def all(enabled: bool = ...) -> RecordingParams:
-        """Return :class:`~superdex.physics.RecordingParams` with all boolean options
-        set
-        to the given value.
-
-        Args:
-            enabled (bool): True to enable all options (maximum data), false to disable
-                (minimum data).
-
-        Returns:
-            The initialized :class:`~superdex.physics.RecordingParams`.
-        """
 
 class PoseTrackingParams:
     """Parameters for pose controller tracking constraints.
@@ -8473,6 +8745,7 @@ def create_model_shape(model: ModelData) -> ShapeHandle:
 def create_model_shape(
     mesh: Optional[MeshData] = ...,
     visual_mesh: Optional[MeshData] = ...,
+    contact_skin_mesh: Optional[MeshData] = ...,
     blending: Optional[ArrayLikeBlendingData] = ...,
     constrained_nodes: Optional[ArrayLikeInt] = ...,
     element_frame_axes: Optional[ArrayLikeReal] = ...,
@@ -8643,11 +8916,11 @@ def create_plane_shape(normal: Real3Like, distance: float) -> ShapeHandle:
 def get_shape_mesh(shape: ShapeHandle) -> MeshDataView:
     """Get a view of the shape's main mesh data.
 
-    For tetrahedral mesh shapes, returns the volume mesh (4 nodes per element). For
-    triangular mesh shapes, returns the surface mesh (3 nodes per element). For
+    For tetrahedral mesh shapes, returns the tetrahedral mesh (4 nodes per element).
+    For triangular mesh shapes, returns the triangle mesh (3 nodes per element). For
     polyline shapes, returns the polyline mesh (2 nodes per element). For shapes
     without a main mesh, including implicit shapes such as spheres and planes,
-    returns an empty view.
+    returns an empty view. The view includes any nodes that no element references.
 
     Args:
         shape (ShapeHandle): Handle to a valid shape.
@@ -8679,8 +8952,8 @@ def get_shape_surface_mesh(shape: ShapeHandle) -> MeshDataView:
     The coordinate array contains exactly the surface nodes referenced by the
     returned connectivity; nodes present in the underlying main mesh but not
     referenced by any surface triangle are omitted. Connectivity values are indices
-    into this returned coordinate array. For shapes without a surface mesh, returns
-    an empty view.
+    into this returned coordinate array. For shapes without a surface mesh, such as
+    polyline shapes, returns an empty view.
 
     Args:
         shape (ShapeHandle): Handle to a valid shape.
@@ -8693,10 +8966,10 @@ def get_shape_surface_mesh(shape: ShapeHandle) -> MeshDataView:
         :class:`~superdex.physics.Error`: If an error occurs.
 
     Note:
-        For triangular mesh shapes, this may differ from
-        :func:`~superdex.physics.get_shape_mesh` if the main mesh contains
-        unreferenced nodes. For tetrahedral mesh shapes, this is the boundary
-        surface of the volume mesh, with non-boundary volume nodes omitted.
+        For triangular mesh shapes, this differs from
+        :func:`~superdex.physics.get_shape_mesh` only if the main mesh has nodes
+        that no element references. For tetrahedral mesh shapes, this is the
+        boundary surface of the volume mesh, with non-boundary volume nodes omitted.
 
     Note:
         Can be called on any thread.
@@ -8707,8 +8980,50 @@ def get_shape_surface_mesh(shape: ShapeHandle) -> MeshDataView:
     See Also:
         :class:`~superdex.physics.MeshDataView`,
         :func:`~superdex.physics.get_shape_mesh`,
+        :func:`~superdex.physics.get_shape_contact_skin_mesh`,
         :func:`~superdex.physics.get_shape_visual_mesh`,
         :meth:`~superdex.physics.Actor.get_surface_mesh`
+    """
+
+def get_shape_contact_skin_mesh(shape: ShapeHandle) -> MeshDataView:
+    """Get a view of the shape's contact-skin mesh data, including its skinning data.
+
+    Returns a triangle mesh (3 nodes per element). Every contact-skin node is
+    referenced by the contact-skin connectivity, so
+    :meth:`~superdex.physics.Actor.get_contact_skin_mesh` has the same node
+    ordering. The mesh includes the authored skinning data, in the format of
+    :attr:`~superdex.physics.ModelData.contact_skin_mesh`. For shapes without a
+    contact skin, returns an empty view.
+
+    Args:
+        shape (ShapeHandle): Handle to a valid shape.
+
+    Returns:
+        A non-owning view of the shape's contact-skin mesh data, or an empty view if
+        the shape has no contact skin.
+
+    Raises:
+        :class:`~superdex.physics.Error`: If an error occurs.
+
+    Note:
+        Can be called on any thread.
+
+    Note:
+        The returned view will be invalid after the shape handle has been released.
+
+    Note:
+        For tetrahedral and triangular mesh shapes, skinning indices refer to the
+        node ordering returned by :func:`~superdex.physics.get_shape_mesh`, not to
+        the compact surface-node ordering returned by
+        :func:`~superdex.physics.get_shape_surface_mesh`. For polyline shapes,
+        skinning indices refer to polyline elements.
+
+    See Also:
+        :class:`~superdex.physics.MeshDataView`,
+        :func:`~superdex.physics.get_shape_mesh`,
+        :func:`~superdex.physics.get_shape_surface_mesh`,
+        :func:`~superdex.physics.get_shape_visual_mesh`,
+        :meth:`~superdex.physics.Actor.get_contact_skin_mesh`
     """
 
 def get_shape_visual_mesh(shape: ShapeHandle) -> MeshDataView:
@@ -8717,9 +9032,9 @@ def get_shape_visual_mesh(shape: ShapeHandle) -> MeshDataView:
 
     Returns a triangle mesh (3 nodes per element) intended for visual rendering.
     Coordinates and connectivity are returned in visual-mesh node-index space,
-    including any visual mesh nodes not referenced by the visual connectivity. The
-    mesh may include linear skinning data for deformation. For shapes without a
-    visual mesh, returns an empty view.
+    including any nodes that no visual triangle references. The mesh includes the
+    authored skinning data when available. For shapes without a visual mesh, returns
+    an empty view.
 
     Args:
         shape (ShapeHandle): Handle to a valid shape.
@@ -8738,11 +9053,11 @@ def get_shape_visual_mesh(shape: ShapeHandle) -> MeshDataView:
         The returned view will be invalid after the shape handle has been released.
 
     Note:
-        When linear visual-mesh skinning data is present, skinning indices refer to
-        the node ordering returned by :func:`~superdex.physics.get_shape_mesh`, not
-        to the compact surface-node ordering returned by
-        :func:`~superdex.physics.get_shape_surface_mesh`. Rod visual mesh embeddings
-        are nonlinear and are not exposed through this linear skinning field.
+        For tetrahedral and triangular mesh shapes, skinning indices refer to the
+        node ordering returned by :func:`~superdex.physics.get_shape_mesh`, not to
+        the compact surface-node ordering returned by
+        :func:`~superdex.physics.get_shape_surface_mesh`. For polyline shapes,
+        skinning indices refer to polyline elements.
 
     See Also:
         :class:`~superdex.physics.MeshDataView`,
@@ -8899,8 +9214,10 @@ def clear_file_from_cache(file_path: str) -> None:
     combinations.
 
     Args:
-        file_path (str): Path to a file that may have been loaded. The match is
-            case-sensitive and must equal the path used at load time exactly.
+        file_path (str): Path to a file that may have been loaded. It is matched
+            against the path used at load time after lexical normalization, so
+            separator style and "." / ".." segments may differ. The match is
+            case-sensitive.
 
     Note:
         Call on any thread.
@@ -9073,6 +9390,18 @@ class Actor:
             Static actors do not participate in the solver and may return :class:`NONE
             <superdex.physics.ConvergenceStatus>`.
 
+        Note:
+            Actors in sleeping islands are not solved and return :class:`NONE
+            <superdex.physics.ConvergenceStatus>`. See
+            :class:`~superdex.physics.experimental.SleepParams`.
+
+        Note:
+            Unlike :class:`DIVERGED <superdex.physics.ConvergenceStatus>`,
+            :class:`STOPPED <superdex.physics.ConvergenceStatus>` does not indicate a
+            failure. It means that the nonlinear solve reached a stopping criterion,
+            such as the maximum number of iterations, before meeting its residual
+            tolerances, which may be stricter than the actor requires.
+
         See Also:
             :class:`~superdex.physics.ConvergenceStatus`,
             :attr:`~superdex.physics.SolverStats.convergence_status`
@@ -9091,6 +9420,9 @@ class Actor:
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Reports an error if the actor has no contact parameters.
         """
     def set_contact_params(self, params: ContactParams) -> None:
         """Set the contact parameters of the actor.
@@ -9146,7 +9478,9 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Not allowed on articulated links.
+            Not allowed on nested link actors
+            (:meth:`~superdex.physics.Actor.get_nested_link_actors`) or nested soft
+            actors (:meth:`~superdex.physics.Actor.get_nested_soft_actors`).
 
         Note:
             For a top-level articulated actor, the local frame is the articulation root
@@ -9210,7 +9544,7 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for dynamic rigid actors.
+            Only supported for standalone dynamic rigid actors.
 
         Note:
             Does not change velocity.
@@ -9218,6 +9552,11 @@ class Actor:
         Note:
             Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler
             in the first time step after this method is called.
+
+        Note:
+            Moves the actor without changing where the center of mass is within the
+            actor (:meth:`~superdex.physics.Actor.get_rigid_center_of_mass_local`). To
+            change that, use :meth:`~superdex.physics.Actor.set_inertia_properties`.
 
         See Also:
             :meth:`~superdex.physics.Actor.get_center_of_mass_transform`,
@@ -9258,14 +9597,14 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for rigid actors (except articulated links) and soft actors
-            (except ROMs and soft-skinned actors).
+            Only supported for standalone rigid actors and standalone soft actors
+            (except ROMs).
 
         Note:
             For static actors, it only supports setting zero velocity.
 
         Note:
-            For soft actors, the angular velocity must be zero.
+            For standalone soft actors, the angular velocity must be zero.
 
         Note:
             Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler
@@ -9325,7 +9664,7 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Not supported for static actors.
+            Not supported for standalone static actors.
         """
     def get_density(self) -> float:
         """Get the density of the actor in the undeformed configuration.
@@ -9356,6 +9695,9 @@ class Actor:
         Note:
             Only supported for rigid actors (except static rigid actors), articulated
             links and soft actors.
+
+        Note:
+            Has no effect on links of articulated actors without a shape.
 
         Note:
             The moment of inertia is updated based on the new density. The center of
@@ -9392,8 +9734,7 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for dynamic rigid actors. Not supported for static actors,
-            soft actors, shell actors, or articulated links.
+            Only supported for standalone dynamic rigid actors.
 
         Note:
             A finite but physically invalid moment of inertia tensor (negative principal
@@ -9409,6 +9750,22 @@ class Actor:
         Note:
             After this call, :meth:`~superdex.physics.Actor.get_density` returns bulk
             density mass / volume.
+
+        Note:
+            The root transform (:meth:`~superdex.physics.Actor.get_root_transform`) and
+            the velocity of every material point are preserved, so changing the center
+            of mass does not move the actor.
+            :meth:`~superdex.physics.Actor.get_linear_velocity`, the center-of-mass
+            velocity, changes accordingly when the actor is rotating. To place the new
+            center of mass at the previous center-of-mass pose instead, call
+            :meth:`~superdex.physics.Actor.get_center_of_mass_transform` before this
+            call and pass the result to
+            :meth:`~superdex.physics.Actor.set_center_of_mass_transform` afterwards.
+
+        Note:
+            The center of mass cannot be changed while the actor has constraints or
+            translation boundary conditions. Set the center of mass before adding them.
+            Changing only mass or moment of inertia remains supported.
 
         See Also:
             :meth:`~superdex.physics.Actor.get_mass`,
@@ -9448,8 +9805,8 @@ class Actor:
             Recentering parameters of the actor.
 
         Note:
-            Recentering is only supported for soft actors (not soft-skinned). For other
-            actor types, returns default recentering parameters with
+            Recentering is only supported for standalone soft actors. For other actor
+            types, returns default recentering parameters with
             :attr:`~superdex.physics.RecenteringParams.use_recentering` set to false.
 
         See Also:
@@ -9459,8 +9816,8 @@ class Actor:
     def set_recentering_params(self, params: RecenteringParams) -> None:
         """Set the recentering parameters of the actor.
 
-        When enabled for a soft actor, the root transform automatically moves as the
-        actor's "rigid pivot" (typically near the center of mass) moves.
+        When enabled, the root transform automatically moves as the actor's "rigid
+        pivot" (typically near the center of mass) moves.
 
         Args:
             params (RecenteringParams): Recentering parameters to set.
@@ -9469,7 +9826,7 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft actors (not soft-skinned).
+            Only supported for standalone soft actors.
 
         See Also:
             :class:`~superdex.physics.RecenteringParams`,
@@ -9482,18 +9839,22 @@ class Actor:
 
         Returns:
             Node displacements in the actor's local frame. Length is 3 × the number of
-            nodes for soft, shell, and soft-skinned actors, or 4 × the number of nodes
-            for rod actors (3 displacement [m] + 1 twist [rad] per node). The number of
-            nodes is available from :meth:`~superdex.physics.Actor.get_mesh`.
+            nodes, except for rod actors, where it is 4 × the number of nodes (3
+            displacement [m] + 1 twist [rad] per node). The number of nodes is available
+            from :meth:`~superdex.physics.Actor.get_mesh`.
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft, soft-skinned, shell and rod actors.
+            Only supported for standalone soft actors, nested soft actors, shell actors,
+            rod actors, and articulated actors with a skin mesh.
 
         Note:
-            For soft-skinned actors, it returns post-skinning displacements, which may
+            For articulated actors, returns displacements of the skin mesh.
+
+        Note:
+            For nested soft actors, returns post-skinning displacements, which may
             differ from the pre-skinning elastic deformation component written by
             :meth:`~superdex.physics.Actor.set_displacements`.
 
@@ -9514,14 +9875,16 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft, soft-skinned and shell actors.
+            Only supported for standalone soft actors, nested soft actors, and shell
+            actors.
 
         Note:
-            For soft-skinned actors, displacements are the elastic deformation component
+            For nested soft actors, displacements are the elastic deformation component
             only (before skinning is applied).
 
         Note:
-            Does not change node velocities.
+            Does not change the elastic velocity DoFs, but changes the skinned node
+            velocities of nested soft actors.
 
         Note:
             Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler
@@ -9594,12 +9957,15 @@ class Actor:
         Note:
             For rigid actors with tetrahedral or triangular mesh shapes, returns the
             same compact surface view as
-            :meth:`~superdex.physics.Actor.get_surface_mesh`. For tetrahedral meshes
-            this is the boundary surface. For triangular meshes, nodes not referenced by
-            any surface triangle are omitted and remaining nodes may be reindexed. Use
-            :meth:`~superdex.physics.Actor.get_reference_shape` and
+            :meth:`~superdex.physics.Actor.get_surface_mesh`, which is the boundary
+            surface for tetrahedral meshes. It omits interior nodes and nodes that no
+            element references, and keeps the remaining nodes in their original relative
+            order. Use :meth:`~superdex.physics.Actor.get_reference_shape` and
             :func:`~superdex.physics.get_shape_mesh` to retrieve the original authored
             shape mesh.
+
+        Note:
+            The returned mesh has only the nodes that its elements reference.
 
         Note:
             The returned view remains valid until the actor is destroyed.
@@ -9615,10 +9981,10 @@ class Actor:
 
         Returns a compact triangle mesh for the actor's surface. For volumetric
         simulation meshes, the surface is the boundary triangles. For triangular
-        simulation meshes, the surface has the same triangle elements as the simulation
-        mesh, but nodes not referenced by any surface triangle are omitted and remaining
-        nodes may be reindexed. Returns an empty view if the actor does not have a
-        surface mesh.
+        simulation meshes, the surface is the simulation mesh. For articulated actors
+        with a skinned simulation surface, returns that surface. Returns an empty view
+        if the actor does not have a surface mesh, e.g. for rod actors. Contact skins
+        are exposed by :meth:`~superdex.physics.Actor.get_contact_skin_mesh` instead.
 
         Returns:
             A non-owning view of the actor's reference surface mesh, or an empty view if
@@ -9629,13 +9995,11 @@ class Actor:
             local frame. They do not include deformation for deformable actors.
 
         Note:
-            The returned mesh uses compact surface-node ordering. Connectivity indices
-            refer to this ordering, which may differ from the node ordering returned by
-            :meth:`~superdex.physics.Actor.get_mesh`. Interior nodes and nodes not
-            referenced by any surface triangle are excluded. Results from
-            :meth:`~superdex.physics.Actor.get_surface_mesh_node_positions_local` and
-            :meth:`~superdex.physics.Actor.get_surface_mesh_node_normals_local` use this
-            same surface ordering.
+            The returned mesh has only the nodes that its triangles reference, in the
+            same relative order as in :meth:`~superdex.physics.Actor.get_mesh`. Results
+            from :meth:`~superdex.physics.Actor.get_surface_mesh_node_positions_local`
+            and :meth:`~superdex.physics.Actor.get_surface_mesh_node_normals_local` use
+            this node order.
 
         Note:
             The returned view remains valid until the actor is destroyed.
@@ -9644,6 +10008,7 @@ class Actor:
             :class:`~superdex.physics.MeshDataView`,
             :meth:`~superdex.physics.Actor.get_mesh`,
             :meth:`~superdex.physics.Actor.get_visual_mesh`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh`,
             :meth:`~superdex.physics.Actor.get_surface_mesh_node_positions_local`,
             :meth:`~superdex.physics.Actor.get_surface_mesh_node_normals_local`,
             :func:`~superdex.physics.get_shape_surface_mesh`
@@ -9664,8 +10029,8 @@ class Actor:
             local frame. They do not include deformation for deformable actors.
 
         Note:
-            Includes visual mesh nodes not referenced by any visual triangle. Unlike
-            surface mesh getters, visual mesh getters do not omit unreferenced nodes.
+            Unlike surface mesh getters, visual mesh getters include any nodes that no
+            visual triangle references.
 
         Note:
             When linear visual-mesh skinning data is present, skinning indices refer to
@@ -9681,9 +10046,50 @@ class Actor:
             :class:`~superdex.physics.MeshDataView`,
             :meth:`~superdex.physics.Actor.get_mesh`,
             :meth:`~superdex.physics.Actor.get_surface_mesh`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh`,
             :meth:`~superdex.physics.Actor.get_visual_mesh_node_positions_local`,
             :meth:`~superdex.physics.Actor.get_visual_mesh_node_normals_local`,
             :func:`~superdex.physics.get_shape_visual_mesh`
+        """
+    def get_contact_skin_mesh(self) -> MeshDataView:
+        """Get a view of the actor's reference contact skin mesh.
+
+        Returns the :attr:`~superdex.physics.ModelData.contact_skin_mesh` of the actor's
+        shape, regardless of whether the actor selected it as its collision
+        representation. Only deformable actors expose it. Other actors return an empty
+        view. For soft and shell actors, the mesh includes the linear contact-skin
+        skinning data.
+
+        Returns:
+            A non-owning view of the actor's reference contact skin mesh, or an empty
+            view if the actor has no contact skin.
+
+        Note:
+            The returned coordinates are reference contact-skin positions in the actor's
+            local frame. Deformed contact-skin positions are only available through
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_positions_local`.
+
+        Note:
+            The node ordering matches
+            :func:`~superdex.physics.get_shape_contact_skin_mesh`.
+
+        Note:
+            When linear contact-skin skinning data is present, skinning indices refer to
+            the node ordering returned by :meth:`~superdex.physics.Actor.get_mesh`. Rod
+            contact skin embeddings are nonlinear and are not exposed through this
+            linear skinning field.
+
+        Note:
+            The returned view remains valid until the actor is destroyed.
+
+        See Also:
+            :class:`~superdex.physics.MeshDataView`,
+            :meth:`~superdex.physics.Actor.get_mesh`,
+            :meth:`~superdex.physics.Actor.get_surface_mesh`,
+            :meth:`~superdex.physics.Actor.get_visual_mesh`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_positions_local`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_normals_local`,
+            :func:`~superdex.physics.get_shape_contact_skin_mesh`
         """
     def get_surface_mesh_node_positions_local(self) -> SpanConstReal:
         """Get the current position of the nodes (reference + displacements) of the
@@ -9716,7 +10122,8 @@ class Actor:
             :meth:`~superdex.physics.Actor.register_query`,
             :class:`SURFACE_NODE_POSITIONS <superdex.physics.QueryType>`,
             :meth:`~superdex.physics.Actor.get_surface_mesh`,
-            :meth:`~superdex.physics.Actor.get_surface_mesh_node_normals_local`
+            :meth:`~superdex.physics.Actor.get_surface_mesh_node_normals_local`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_positions_local`
         """
     def get_surface_mesh_node_normals_local(self) -> SpanConstReal:
         """Get the normal direction for each node of the surface mesh in the actor's
@@ -9750,7 +10157,8 @@ class Actor:
             :meth:`~superdex.physics.Actor.register_query`, :class:`SURFACE_NODE_NORMALS
             <superdex.physics.QueryType>`,
             :meth:`~superdex.physics.Actor.get_surface_mesh`,
-            :meth:`~superdex.physics.Actor.get_surface_mesh_node_positions_local`
+            :meth:`~superdex.physics.Actor.get_surface_mesh_node_positions_local`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_normals_local`
         """
     def get_reference_shape(self) -> ShapeHandle:
         """Get a new :class:`~superdex.physics.ShapeHandle` referencing the same shape
@@ -9868,10 +10276,10 @@ class Actor:
             without a simulation mesh are not supported.
 
         Note:
-            Requires query registration before the simulation step. Register
-            :class:`NODE_POSITIONS <superdex.physics.QueryType>` when ``boundary_only``
-            is false, or :class:`SURFACE_NODE_POSITIONS <superdex.physics.QueryType>`
-            when ``boundary_only`` is true. Results are available after the simulation
+            When ``boundary_only`` is false, requires registering :class:`NODE_POSITIONS
+            <superdex.physics.QueryType>` before the simulation step. When true,
+            requires registering :class:`SURFACE_NODE_POSITIONS
+            <superdex.physics.QueryType>`. Results are available after the simulation
             step completes.
 
         Warning:
@@ -9906,10 +10314,10 @@ class Actor:
             without a simulation mesh are not supported.
 
         Note:
-            Requires query registration before the simulation step. Register
-            :class:`NODE_POSITIONS <superdex.physics.QueryType>` when ``boundary_only``
-            is false, or :class:`SURFACE_NODE_POSITIONS <superdex.physics.QueryType>`
-            when ``boundary_only`` is true. Results are available after the simulation
+            When ``boundary_only`` is false, requires registering :class:`NODE_POSITIONS
+            <superdex.physics.QueryType>` before the simulation step. When true,
+            requires registering :class:`SURFACE_NODE_POSITIONS
+            <superdex.physics.QueryType>`. Results are available after the simulation
             step completes.
 
         Warning:
@@ -9944,10 +10352,10 @@ class Actor:
             without a simulation mesh are not supported.
 
         Note:
-            Requires query registration before the simulation step. Register
-            :class:`NODE_POSITIONS <superdex.physics.QueryType>` when ``boundary_only``
-            is false, or :class:`SURFACE_NODE_POSITIONS <superdex.physics.QueryType>`
-            when ``boundary_only`` is true. Results are available after the simulation
+            When ``boundary_only`` is false, requires registering :class:`NODE_POSITIONS
+            <superdex.physics.QueryType>` before the simulation step. When true,
+            requires registering :class:`SURFACE_NODE_POSITIONS
+            <superdex.physics.QueryType>`. Results are available after the simulation
             step completes.
 
         Warning:
@@ -10033,15 +10441,17 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft, soft-skinned, shell and rod actors.
+            Only supported for standalone soft actors, nested soft actors, shell actors,
+            and rod actors.
 
         Note:
-            For soft-skinned actors, it zeroes the elastic deformation and velocity
-            only. The skeleton-driven pose is unaffected.
+            For nested soft actors, it zeroes only elastic displacement and velocity.
+            Skeleton-driven displacement and velocity are preserved.
 
         Note:
             For rod actors, it zeroes both the translational displacement DoFs and the
-            twist-angle DoFs.
+            twist-angle DoFs, and returns each element's cross-section to its rest
+            orientation.
 
         Note:
             Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler
@@ -10084,7 +10494,7 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft (not soft-skinned) and shell actors.
+            Only supported for standalone soft actors and shell actors.
 
         Note:
             Does not change node velocities.
@@ -10104,10 +10514,11 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft (not soft-skinned), shell and rod actors.
+            Only supported for standalone soft actors, shell actors, and rod actors.
 
         Note:
-            For soft and shell actors: 3 values per node [m/s] — (vx, vy, vz).
+            For standalone soft actors and shell actors: 3 values per node [m/s] — (vx,
+            vy, vz).
 
         Note:
             For rod actors: 4 values per node — (vx, vy, vz) in [m/s] plus a twist rate
@@ -10133,8 +10544,8 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Includes visual mesh nodes not referenced by any visual triangle. Unlike
-            surface mesh getters, visual mesh getters do not omit unreferenced nodes.
+            Unlike surface mesh getters, visual mesh getters include any nodes that no
+            visual triangle references.
 
         Note:
             Requires registering :class:`VISUAL_NODE_POSITIONS
@@ -10161,14 +10572,14 @@ class Actor:
             :meth:`~superdex.physics.Actor.get_visual_mesh`. The order of the nodes is
             1-to-1 with
             :meth:`~superdex.physics.Actor.get_visual_mesh_node_positions_local`.
-            Normals for visual nodes not referenced by any visual triangle are zero.
+            Normals of nodes that no visual triangle references are zero.
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Includes visual mesh nodes not referenced by any visual triangle. Unlike
-            surface mesh getters, visual mesh getters do not omit unreferenced nodes.
+            Unlike surface mesh getters, visual mesh getters include any nodes that no
+            visual triangle references.
 
         Note:
             Requires registering :class:`VISUAL_NODE_NORMALS
@@ -10184,6 +10595,65 @@ class Actor:
             <superdex.physics.QueryType>`,
             :meth:`~superdex.physics.Actor.get_visual_mesh`,
             :meth:`~superdex.physics.Actor.get_visual_mesh_node_positions_local`
+        """
+    def get_contact_skin_mesh_node_positions_local(self) -> SpanConstReal:
+        """Get the current positions of the contact skin mesh nodes in the actor's local
+        frame.
+
+        Returns:
+            Current node positions [m] of the contact skin mesh in the actor's local
+            frame (3 values per node: x, y, z). The number of nodes is available via
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh`. The order of the
+            nodes is 1-to-1 with
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_normals_local`.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Requires registering :class:`CONTACT_SKIN_NODE_POSITIONS
+            <superdex.physics.QueryType>` before the simulation step. Results are
+            available after the simulation step completes.
+
+        Note:
+            Requires the actor to support :class:`CONTACT_SKIN_NODE_POSITIONS
+            <superdex.physics.QueryType>`.
+
+        See Also:
+            :meth:`~superdex.physics.Actor.register_query`,
+            :class:`CONTACT_SKIN_NODE_POSITIONS <superdex.physics.QueryType>`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_normals_local`
+        """
+    def get_contact_skin_mesh_node_normals_local(self) -> SpanConstReal:
+        """Get the normal direction to each node of the contact skin mesh in the actor's
+        local frame.
+
+        Returns:
+            Flattened normals (3 values per node: nx, ny, nz) in the actor's local
+            frame, computed by normalizing the area-weighted sum of adjacent triangle
+            normals. The number of nodes is available via
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh`. The order of the
+            nodes is 1-to-1 with
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_positions_local`.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Requires registering :class:`CONTACT_SKIN_NODE_NORMALS
+            <superdex.physics.QueryType>` before the simulation step. Results are
+            available after the simulation step completes.
+
+        Note:
+            Requires the actor to support :class:`CONTACT_SKIN_NODE_NORMALS
+            <superdex.physics.QueryType>`.
+
+        See Also:
+            :meth:`~superdex.physics.Actor.register_query`,
+            :class:`CONTACT_SKIN_NODE_NORMALS <superdex.physics.QueryType>`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh`,
+            :meth:`~superdex.physics.Actor.get_contact_skin_mesh_node_positions_local`
         """
     def get_boundary_condition_dof_indices(self) -> SpanConstInt:
         """Get the DoF indices that are constrained by boundary conditions.
@@ -10250,6 +10720,7 @@ class Actor:
             dof_indices (ArrayLikeInt): DoF indices to constrain.
             dof_values_world (ArrayLikeReal): Target values in the actor-specific
                 representations described below. Length must equal ``dof_indices``.
+                Values must be finite.
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
@@ -10343,7 +10814,7 @@ class Actor:
             dof_values_world (ArrayLikeReal): Target values in the actor-specific
                 representations documented by
                 :meth:`~superdex.physics.Actor.add_boundary_condition_dofs_world`.
-                Length must equal ``dof_indices``.
+                Length must equal ``dof_indices``. Values must be finite.
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
@@ -10388,14 +10859,14 @@ class Actor:
         Args:
             node_indices (ArrayLikeInt): Node indices to constrain.
             node_positions_world (ArrayLikeReal): Target positions [m] in world frame.
-                Length must be 3 times the size of ``node_indices``.
+                Length must be 3 times the size of ``node_indices``. Values must be
+                finite.
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft and shell actors, except nested soft actors (see
-            :meth:`~superdex.physics.Actor.get_nested_soft_actors`).
+            Only supported for standalone soft actors and shell actors.
 
         Note:
             Not supported in differentiable scenes
@@ -10438,14 +10909,14 @@ class Actor:
         Args:
             node_indices (ArrayLikeInt): Node indices to constrain.
             node_positions_world (ArrayLikeReal): Target positions [m] in world frame.
-                Length must be 3 times the size of ``node_indices``.
+                Length must be 3 times the size of ``node_indices``. Values must be
+                finite.
 
         Raises:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft and shell actors, except nested soft actors (see
-            :meth:`~superdex.physics.Actor.get_nested_soft_actors`).
+            Only supported for standalone soft actors and shell actors.
 
         Note:
             Not supported in differentiable scenes
@@ -10477,8 +10948,7 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft and shell actors, except nested soft actors (see
-            :meth:`~superdex.physics.Actor.get_nested_soft_actors`).
+            Only supported for standalone soft actors and shell actors.
 
         Note:
             Not supported in differentiable scenes
@@ -10521,8 +10991,7 @@ class Actor:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            Only supported for soft and shell actors, except nested soft actors (see
-            :meth:`~superdex.physics.Actor.get_nested_soft_actors`).
+            Only supported for standalone soft actors and shell actors.
 
         Note:
             Not supported in differentiable scenes
@@ -10990,6 +11459,11 @@ class Actor:
 
         Note:
             Only applicable to articulated actors.
+
+        Note:
+            These constraints are owned by the articulated actor and cannot be destroyed
+            directly with :meth:`~superdex.physics.Scene.destroy_constraint`. They are
+            destroyed with the actor.
 
         See Also:
             :meth:`~superdex.physics.Actor.get_articulated_dof_limits`
@@ -11565,6 +12039,13 @@ class Actor:
         Note:
             Only applicable to articulated actors with a pose controller.
 
+        Note:
+            These constraints are owned by the pose controller and cannot be destroyed
+            individually with :meth:`~superdex.physics.Scene.destroy_constraint`.
+            Removing the pose controller with
+            :meth:`~superdex.physics.Actor.remove_articulated_pose_controller` destroys
+            all of its constraints.
+
         See Also:
             :class:`~superdex.physics.PoseConstraintInfo`,
             :meth:`~superdex.physics.Actor.get_articulated_pose_controller_params`,
@@ -11712,8 +12193,7 @@ class Actor:
             :meth:`~superdex.physics.Actor.get_articulated_actor`
         """
     def is_nested_soft_actor(self) -> bool:
-        """Check if the actor is a soft actor nested within a soft skinned articulated
-        actor.
+        """Check if the actor is a nested soft actor within a soft-skinned actor.
 
         Returns:
             True if the actor is a nested soft actor, false otherwise.
@@ -12678,6 +13158,7 @@ class Scene:
         has_gravity: bool = ...,
         has_inertia: bool = ...,
         has_stress: bool = ...,
+        use_contact_skin: bool = ...,
         boundary_element_type: ActorBoundaryElementType | int = ...,
     ) -> Optional[Actor]: ...
     @overload
@@ -12737,15 +13218,20 @@ class Scene:
             :class:`~superdex.physics.Error`: If an error occurs.
 
         Note:
-            To access underlying soft actors, use
+            To access nested soft actors, use
             :meth:`~superdex.physics.Actor.get_nested_soft_actors`.
 
         Note:
-            To access underlying rigid link actors, use
+            To access nested link actors, use
             :meth:`~superdex.physics.Actor.get_nested_link_actors`.
 
         Warning:
             The skeleton must have at least one non-Hard joint.
+
+        Warning:
+            For a blended skin, each vertex pair with a positive nested-soft blend
+            weight must have exactly equal rest positions and identical ordered skinning
+            indices and weights.
 
         See Also:
             :class:`~superdex.physics.SoftSkinnedActorParams`,
@@ -13421,6 +13907,13 @@ class Scene:
             If ``constraint`` is None, this function has no effect.
 
         Note:
+            Use this function to destroy constraints created through the scene's
+            constraint-creation APIs. It has no effect on constraints created
+            automatically while creating or configuring an actor, such as joint-limit,
+            cycle-joint, or pose-controller constraints. To remove such a constraint,
+            remove the corresponding actor feature, if supported, or destroy the actor.
+
+        Note:
             After the constraint is destroyed, do not use the pointer or its handle.
 
         Warning:
@@ -13443,6 +13936,13 @@ class Scene:
         Note:
             An invalid handle or one that does not currently identify a constraint in
             the scene has no effect.
+
+        Note:
+            Use this function to destroy constraints created through the scene's
+            constraint-creation APIs. It has no effect on constraints created
+            automatically while creating or configuring an actor, such as joint-limit,
+            cycle-joint, or pose-controller constraints. To remove such a constraint,
+            remove the corresponding actor feature, if supported, or destroy the actor.
 
         Note:
             After the constraint is destroyed, do not use its handle.
@@ -13497,59 +13997,6 @@ class Scene:
         Note:
             Must be called on the scene's owning thread (like other
             :class:`~superdex.physics.Scene` methods).
-        """
-    def is_recording(self) -> bool:
-        """Check if the scene is currently recording.
-
-        Returns:
-            True if recording is active, false otherwise.
-
-        Note:
-            A recording write failure does not end the recording session.
-
-        See Also:
-            :meth:`~superdex.physics.Scene.start_recording`,
-            :meth:`~superdex.physics.Scene.stop_recording`
-        """
-    def start_recording(self, file_path: str, params: RecordingParams) -> None:
-        """Create or replace the specified file and start recording the scene to an HDF5
-        file.
-
-        Args:
-            file_path (str): Path to the output recording file (case sensitive on some
-                filesystems). File will be created or replaced.
-            params (RecordingParams): Parameters controlling what data to record.
-
-        Raises:
-            :class:`~superdex.physics.Error`: If an error occurs.
-
-        Note:
-            Enabling additional recording features will generally increase the recording
-            file size and degrade performance.
-
-        Note:
-            If the scene is already recording, the previous recording is stopped before
-            starting the new one.
-
-        Warning:
-            Requires a build with HDF5 support.
-
-        Warning:
-            The recording system may undergo a substantial refactor to expand its
-            capabilities. Its API and recorded file format may change in future
-            releases.
-
-        See Also:
-            :meth:`~superdex.physics.Scene.stop_recording`,
-            :meth:`~superdex.physics.Scene.is_recording`,
-            :class:`~superdex.physics.RecordingParams`
-        """
-    def stop_recording(self) -> None:
-        """Stop recording the scene and close the recording file.
-
-        See Also:
-            :meth:`~superdex.physics.Scene.start_recording`,
-            :meth:`~superdex.physics.Scene.is_recording`
         """
     def enable_layer_contact_asymmetric(
         self,
@@ -13762,6 +14209,100 @@ class Scene:
         See Also:
             :meth:`~superdex.physics.Scene.enable_actor_contact_asymmetric`,
             :meth:`~superdex.physics.Scene.enable_layer_contact_symmetric`
+        """
+    def set_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+        params_override: ContactPairParamsOverride,
+    ) -> None:
+        """Set contact parameter overrides for an unordered actor pair.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+            params_override (ContactPairParamsOverride): Parameter override with at
+                least one present field. This replaces any existing override for the
+                pair; absent fields use the normal actor-parameter combination.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Both actors must have contact parameters.
+
+        Note:
+            The exact actors are used; nested actors are not included automatically.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.clear_contact_pair_params_override`,
+            :meth:`~superdex.physics.Scene.has_contact_pair_params_override`,
+            :meth:`~superdex.physics.Scene.get_contact_pair_params_override`
+        """
+    def clear_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+    ) -> None:
+        """Clear contact parameter overrides for an unordered actor pair.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Clearing a valid pair without an override succeeds without changing the
+            scene.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.set_contact_pair_params_override`
+        """
+    def has_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+    ) -> bool:
+        """Check whether the exact unordered actor pair has a parameter override.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+
+        Returns:
+            True if the exact pair has a stored override.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.get_contact_pair_params_override`
+        """
+    def get_contact_pair_params_override(
+        self,
+        actor_a: ActorHandle,
+        actor_b: ActorHandle,
+    ) -> ContactPairParamsOverride:
+        """Get the parameter override for the exact unordered actor pair.
+
+        Args:
+            actor_a (ActorHandle): Handle of the first actor.
+            actor_b (ActorHandle): Handle of the second actor.
+
+        Returns:
+            The complete stored override.
+
+        Raises:
+            :class:`~superdex.physics.Error`: If an error occurs.
+
+        Note:
+            Reports an error when a valid pair has no stored override.
+
+        See Also:
+            :meth:`~superdex.physics.Scene.set_contact_pair_params_override`,
+            :meth:`~superdex.physics.Scene.has_contact_pair_params_override`
         """
     def register_pre_step_callback(
         self,
@@ -14124,15 +14665,6 @@ class DebugServer:
 DEFAULT_BACK_PROPAGATION_EPS_FINITE_DIFF: float
 """Default finite-difference epsilon used by back-propagation solvers."""
 
-TRANSFORM_RT_IDENTITY: TransformRT
-"""Identity transform (no rotation, no translation)."""
-
-QUATERNION_IDENTITY: Quaternion
-"""Identity quaternion (no rotation)."""
-
-GRID_SDF_PARAMS_DEFAULT: GridSdfParams
-"""Default grid SDF construction parameters."""
-
 # Core types (defined in mochi_physics_pybind.cpp)
 class Error(RuntimeError):
     '''Exception raised when a SuperDex Physics operation fails.'''
@@ -14455,7 +14987,7 @@ constraints.
     ...
 def uses_double_precision() -> bool:
     '''Return whether the loaded native library uses double-precision floating-point
-values.'''
+(FP64) values.'''
     ...
 def uses_hdf5() -> bool:
     '''Return whether the loaded native library includes HDF5 support.'''

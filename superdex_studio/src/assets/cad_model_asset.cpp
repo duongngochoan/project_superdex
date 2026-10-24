@@ -18,10 +18,10 @@
 #include "app/app.h"
 #include "assets/asset_manager.h"
 #include "editors/model_editor.h"
+#include "meshing/processing_modifiers/processing_mesh_utils.h" // TessellateStepSections
 
 #include <mochi_mesh/step_tessellation.h>
 
-#include <mochi_core/geometry/mesh_data.h>
 #include <mochi_core/utils/error.h>
 #include <mochi_core/utils/log.h>
 
@@ -43,33 +43,25 @@ std::vector<MeshSection> TessellateCadModelFile(
     mochi::Path const& path,
     mochi::mesh::StepTessellationParams const& params,
     mochi::Error& error) {
-  mochi::MeshData const mesh = mochi::mesh::TessellateStep(path.ToString(), params, error);
-  if (!error.IsOK() || mesh.nodesPerElement != 3 || mesh.GetNumElements() == 0) {
+  std::vector<MeshSection> sections =
+      processing::TessellateStepSections(path.ToString(), params, error);
+  if (!error.IsOK()) {
     MOCHI_LOG_ERROR("Failed to tessellate CAD model: %s", path.ToString().c_str());
     return {};
   }
 
-  MeshSection section;
-  section.positions.reserve(mesh.coordinates.size());
-  for (mochi::real const coordinate : mesh.coordinates) {
-    section.positions.push_back(static_cast<float>(coordinate));
+  int vertices = 0;
+  int triangles = 0;
+  for (MeshSection const& section : sections) {
+    vertices += static_cast<int>(section.positions.size() / 3);
+    triangles += static_cast<int>(section.indices.size() / 3);
   }
-  section.indices.reserve(mesh.connectivity.size());
-  for (int const index : mesh.connectivity) {
-    section.indices.push_back(index);
-  }
-  section.hasNormals = false;
-
   MOCHI_LOG(
-      "Tessellated CAD model %s: %d vertices, %d triangles",
+      "Tessellated CAD model %s: %d vertices, %d triangles, %d color section(s)",
       path.ToString().c_str(),
-      static_cast<int>(section.positions.size() / 3),
-      static_cast<int>(section.indices.size() / 3));
-
-  // No space conversion here, unlike the .obj/.stl readers: the superdex_mesh_cli helper already
-  // converts OCCT's Z-up mm to renderer-space (Y-up) m.
-  std::vector<MeshSection> sections;
-  sections.push_back(std::move(section));
+      vertices,
+      triangles,
+      static_cast<int>(sections.size()));
   return sections;
 }
 

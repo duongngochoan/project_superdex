@@ -19,6 +19,53 @@ from test.conftest import assets_dir, mochi, MochiTestBase, requires_internal_as
 
 
 class TestPrefab(MochiTestBase):
+    def test_export_params_current_pose_defaults_to_false(self):
+        self.assertFalse(mochi.prefab.ExportParams().export_current_pose)
+        self.assertTrue(
+            mochi.prefab.ExportParams(export_current_pose=True).export_current_pose
+        )
+
+    def test_constraint_params_equality_includes_derived_fields(self):
+        original = mochi.RigidSphericalJointConstraintParams()
+        changed = mochi.RigidSphericalJointConstraintParams()
+        self.assertEqual(original, changed)
+
+        changed.local_pos_a = [1, 2, 3]
+        self.assertNotEqual(original, changed)
+
+        changed = mochi.RigidSphericalJointConstraintParams()
+        changed.stiffness += 1
+        self.assertNotEqual(original, changed)
+
+    def test_constraint_prefab_equality_includes_actor_names(self):
+        original = mochi.prefab.RigidSphericalJointConstraintPrefab()
+        changed = mochi.prefab.RigidSphericalJointConstraintPrefab()
+        self.assertEqual(original, changed)
+
+        changed.actor_name_a = "Different"
+        self.assertNotEqual(original, changed)
+
+        changed = mochi.prefab.RigidSphericalJointConstraintPrefab()
+        changed.local_pos_a = [1, 0, 0]
+        self.assertNotEqual(original, changed)
+
+    def test_actor_prefab_equality_includes_translation(self):
+        for prefab_type in (
+            mochi.prefab.RigidActorPrefab,
+            mochi.prefab.SoftActorPrefab,
+        ):
+            with self.subTest(prefab=prefab_type.__name__):
+                original = prefab_type()
+                changed = prefab_type()
+                self.assertEqual(original, changed)
+
+                changed.translation = [1, 2, 3]
+                self.assertNotEqual(original, changed)
+
+                changed = prefab_type()
+                changed.name = "Different"
+                self.assertNotEqual(original, changed)
+
     @requires_internal_assets
     def test_add_to_scene_returns_result(self):
         """Verify that add_to_scene returns an AddToSceneResult with actors and constraints."""
@@ -311,6 +358,46 @@ class TestPrefab(MochiTestBase):
         mochi.destroy_scene(scene)
 
     @requires_internal_assets
+    def test_add_to_scene_contact_pair_params_override(self):
+        prefab_json = """{
+            "actors": {
+                "rigid": [
+                    {"name": "ActorA", "colliderType": "Box",
+                     "shape": "cube/cube_minimal.mochi.json"},
+                    {"name": "ActorB", "colliderType": "Box",
+                     "shape": "cube/cube_minimal.mochi.json"}
+                ]
+            }
+        }"""
+        prefab = mochi.prefab.load_from_json_string(prefab_json, assets_dir)
+        self.assertIsNone(prefab.contact_pair_params_overrides)
+
+        entry = mochi.prefab.ContactPairParamsOverrideEntry(
+            actors=["ActorA", "ActorB"],
+            params_override=mochi.ContactPairParamsOverride(
+                penalty_coefficient=2e9,
+                coulomb_friction_coefficient=0.0,
+            ),
+        )
+        prefab.contact_pair_params_overrides = [entry]
+        self.assertEqual(
+            ["ActorA", "ActorB"],
+            list(prefab.contact_pair_params_overrides[0].actors),
+        )
+
+        scene = mochi.create_scene("test_contact_pair_params_override")
+        result = mochi.prefab.add_to_scene(prefab=prefab, scene=scene)
+        actors = {actor.get_name(): actor.get_handle() for actor in result.actors}
+        stored = scene.get_contact_pair_params_override(
+            actors["ActorB"], actors["ActorA"]
+        )
+        self.assertAlmostEqual(2e9, stored.penalty_coefficient)
+        self.assertEqual(0.0, stored.coulomb_friction_coefficient)
+        self.assertIsNone(stored.viscous_friction_coefficient)
+
+        mochi.destroy_scene(scene)
+
+    @requires_internal_assets
     def test_add_to_scene_file_path_overload(self):
         """Verify the file-path overload of add_to_scene with default and custom params."""
         prefab_path = os.path.join(
@@ -335,4 +422,59 @@ class TestPrefab(MochiTestBase):
             params=params,
         )
         self.assertGreater(len(result.actors), 0)
+        mochi.destroy_scene(scene)
+
+    @requires_internal_assets
+    def test_export_scene_exclude_actors(self):
+        """Verify export_scene with default params and with ExportParams(exclude_actors=...)."""
+        prefab_json = """{
+            "actors": {
+                "rigid": [
+                    {"name": "Keep", "shape": "cube/cube_minimal.mochi.json"},
+                    {"name": "Drop", "shape": "cube/cube_minimal.mochi.json"}
+                ]
+            }
+        }"""
+        prefab = mochi.prefab.load_from_json_string(prefab_json, assets_dir)
+        scene = mochi.create_scene("test_export_scene")
+        result = mochi.prefab.add_to_scene(prefab=prefab, scene=scene)
+        drop = next(a for a in result.actors if a.get_name() == "Drop")
+
+        def exported_rigid_names(output_dir, name):
+            path = os.path.join(output_dir, name, f"{name}.mochi_scene")
+            return sorted(
+                a.name for a in mochi.prefab.shallow_load_from_file(path).actors.rigid
+            )
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            mochi.prefab.export_scene(scene, "all", output_dir)
+            self.assertEqual(["Drop", "Keep"], exported_rigid_names(output_dir, "all"))
+
+            params = mochi.prefab.ExportParams(exclude_actors=[drop.get_handle()])
+            mochi.prefab.export_scene(scene, "excluded", output_dir, params)
+            self.assertEqual(["Keep"], exported_rigid_names(output_dir, "excluded"))
+
+        mochi.destroy_scene(scene)
+
+    @requires_internal_assets
+    def test_export_actor_with_and_without_params(self):
+        """Verify export_actor with default params and exclude_actors, which it ignores."""
+        prefab_json = """{
+            "actors": {
+                "rigid": [{"name": "Box", "shape": "cube/cube_minimal.mochi.json"}]
+            }
+        }"""
+        prefab = mochi.prefab.load_from_json_string(prefab_json, assets_dir)
+        scene = mochi.create_scene("test_export_actor")
+        actor = mochi.prefab.add_to_scene(prefab=prefab, scene=scene).actors[0]
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            mochi.prefab.export_actor(actor, "default", output_dir)
+            params = mochi.prefab.ExportParams(exclude_actors=[actor.get_handle()])
+            mochi.prefab.export_actor(actor, "with_params", output_dir, params)
+            for name in ("default", "with_params"):
+                path = os.path.join(output_dir, name, f"{name}.mochi_scene")
+                exported = mochi.prefab.shallow_load_from_file(path)
+                self.assertEqual(1, len(exported.actors.rigid))
+
         mochi.destroy_scene(scene)

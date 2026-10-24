@@ -142,6 +142,12 @@ namespace CADRobotExporter.CAD
         private bool automaticallySwitched = false;
         private Dictionary<string, int> _linkCounters = new Dictionary<string, int>();
 
+        /// <summary>
+        /// Super-duper important flag that selects between body vs component selection
+        /// for parts vs assemblies.
+        /// </summary>
+        private readonly bool isPartDoc;
+
         //Each object in the page needs a unique ID
 
         private const int GroupID = 1;
@@ -235,14 +241,30 @@ namespace CADRobotExporter.CAD
         private const int OptionLinkTypeSiteID = 124;
 
         private const string LabelLinkVisualCaption = "Link Visual Components (Optional)";
-        private const string LabelLinkVisualExtraCaption = "\nUse for visual meshes, recommend selecting individual parts";
+        private string LabelLinkVisualExtraCaption =>
+            isPartDoc ? "" : "\nUse for visual meshes, recommend selecting individual parts";
 
         private const string LabelLinkCollisionCaption = "Link Collision Components (Optional)";
         private const string LabelLinkCollisionExtraCaption = "\nUse for simplified geometry of complex components\n" +
             "Will be generated from visuals, then inertials if not selected";
 
         private const string LabelLinkInertialCaption = "Link Inertial Components (Optional)";
-        private const string LabelLinkInertialExtraCaption = "\nUse for accurate inertial properties, recommned selecting whole subassemblies from Feature Tree";
+        private string LabelLinkInertialExtraCaption =>
+            isPartDoc ? "\nUse for accurate inertial properties" :
+            "\nUse for accurate inertial properties, recommend selecting whole subassemblies from Feature Tree";
+
+        private const string LabelLinkVisualBodyCaption = "Link Visual Bodies (Optional)";
+        private const string LabelLinkCollisionBodyCaption = "Link Collision Bodies (Optional)";
+        private const string LabelLinkInertialBodyCaption = "Link Inertial Bodies (Optional)";
+
+        private string VisualSelectionCaption =>
+            isPartDoc ? LabelLinkVisualBodyCaption : LabelLinkVisualCaption;
+
+        private string CollisionSelectionCaption =>
+            isPartDoc ? LabelLinkCollisionBodyCaption : LabelLinkCollisionCaption;
+
+        private string InertialSelectionCaption =>
+            isPartDoc ? LabelLinkInertialBodyCaption : LabelLinkInertialCaption;
 
         private const string CheckboxLinkPurelyInertialCaption = "Purely Inertial Link";
         private const string CheckboxLinkPurelyInertialExtraCaption = ". If no Visual components,\n" +
@@ -305,6 +327,7 @@ namespace CADRobotExporter.CAD
         {
             swApp = swAppPtr;
             model = swApp.ActiveDoc;
+            isPartDoc = model.GetType() == (int)swDocumentTypes_e.swDocPART;
 
             SolidworksBridge cadBridge = new SolidworksBridge(swApp, model);
 
@@ -396,20 +419,24 @@ namespace CADRobotExporter.CAD
 
             if (CheckIfNamesAreUnique((LinkNode)Tree.Nodes[0]) && CheckNodesComplete(Tree))
             {
-                //It saves automatically when sending Okay as true;
+                // It saves automatically when sending Okay as true;
                 PMPage.Close(true);
-                AssemblyDoc assy = (AssemblyDoc)model;
+                int result = (int)swComponentResolveStatus_e.swResolveOk;
+                if (!isPartDoc)
+                {
+                    AssemblyDoc assy = (AssemblyDoc)model;
 
-                //This call can be a real sink of processing time if the model is large.
-                //Unfortunately there isn't a way around it I believe.
-                int result = assy.ResolveAllLightWeightComponents(true);
+                    // This call can be a real sink of processing time if the model is large.
+                    // Unfortunately there isn't a way around it I believe.
+                    result = assy.ResolveAllLightWeightComponents(true);
+                }
 
                 // If the user confirms to resolve the components and they are successfully
                 // resolved we can continue
                 if (result == (int)swComponentResolveStatus_e.swResolveOk)
                 {
                     List<string> unresolvedComponents = new List<string>();
-                    CheckModelDocsExist((LinkNode)Tree.Nodes[0], unresolvedComponents);
+                    CheckModelDocsExist(((LinkNode)Tree.Nodes[0]).Link, unresolvedComponents);
                     if (unresolvedComponents.Count > 0)
                     {
                         string componentNames = string.Join("\r\n", unresolvedComponents);
@@ -444,15 +471,9 @@ namespace CADRobotExporter.CAD
                         // Process.MainWindowHandle, which can resolve to the wrong top-level
                         // window and cause SolidWorks to lose focus/minimize when the form closes.
                         IntPtr swHwnd = new IntPtr(((Frame)swApp.Frame()).GetHWnd());
-                        if (swHwnd != IntPtr.Zero)
-                        {
-                            exportForm.Show(new NativeWindowWrapper(swHwnd));
-                        }
-                        else
-                        {
-                            exportForm.Show();
-                        }
-                        exportForm.Focus();
+                        WpfWindowOwner.OwnTo(exportForm, swHwnd);
+                        exportForm.Show();
+                        exportForm.Activate();
                     }
                 }
                 else if (result == (int)swComponentResolveStatus_e.swResolveError ||
@@ -477,23 +498,6 @@ namespace CADRobotExporter.CAD
         {
             control.Enabled = isEnabled;
             control.Visible = true;
-        }
-
-        private LinkNode LinkNodeFromTreeViewItem(System.Windows.Controls.TreeViewItem item)
-        {
-            Link itemLink = (Link)item.Tag;
-            LinkNode node = new LinkNode
-            {
-                Link = itemLink,
-                Name = itemLink.Name,
-                Text = itemLink.Name
-            };
-            node.IsBaseNode = item.Parent.GetType() != typeof(System.Windows.Controls.TreeViewItem);
-            foreach (System.Windows.Controls.TreeViewItem child in item.Items)
-            {
-                node.Nodes.Add(LinkNodeFromTreeViewItem(child));
-            }
-            return node;
         }
 
         private void OnButtonPress(int Id)
@@ -665,8 +669,8 @@ namespace CADRobotExporter.CAD
             if (Id == TextBoxLinkNameID)
             {
                 LinkNode node = (LinkNode)Tree.SelectedNode;
+                node.Link.Name = PMTextBoxLinkName.Text;
                 node.Text = PMTextBoxLinkName.Text;
-                node.Name = PMTextBoxLinkName.Text;
                 SyncCountersWithTree(_rootNode);
 
                 if (PMCheckboxAutoJointNaming.Checked && !node.IsBaseNode && !node.Link.isSite)
@@ -783,9 +787,8 @@ namespace CADRobotExporter.CAD
                 node.Link.isSite = true;
                 node.Link.Joint.Type = "fixed";
                 node.Link.Name = "site_" + node.Link.Name;
-                node.Name = node.Link.Name;
                 node.Text = node.Link.Name;
-                rightClickedNode.Nodes.Add(node);
+                rightClickedNode.AddChildNode(node);
                 rightClickedNode.ExpandAll();
             }
             catch (Exception ex)
@@ -808,7 +811,7 @@ namespace CADRobotExporter.CAD
                     // this is the root node, which we cannot remove
                     return;
                 }
-                parent.Nodes.Remove(rightClickedNode);
+                parent.RemoveChildNode(rightClickedNode);
                 SyncCountersWithTree(_rootNode);
             }
             catch (Exception ex)
@@ -933,8 +936,8 @@ namespace CADRobotExporter.CAD
             // If the it was dropped into the box itself, but not onto an actual node
             targetNode = targetNode ?? (LinkNode)Tree.TopNode;
 
-            draggedNode.Remove();
-            targetNode.Nodes.Add(draggedNode);
+            draggedNode.DetachFromParent();
+            targetNode.AddChildNode(draggedNode);
             targetNode.ExpandAll();
         }
 
@@ -954,6 +957,20 @@ namespace CADRobotExporter.CAD
         }
 
         #endregion TreeView handler methods
+
+        private void ApplyGeometrySelectionFilter(PropertyManagerPageSelectionbox selectionBox)
+        {
+            swSelectType_e[] geometryFilters = isPartDoc
+                ? new swSelectType_e[]
+                    {
+                        swSelectType_e.swSelSOLIDBODIES,
+                        swSelectType_e.swSelMESHSOLIDBODIES,
+                        swSelectType_e.swSelSURFACEBODIES,
+                    }
+                : new swSelectType_e[] { swSelectType_e.swSelCOMPONENTS };
+
+            selectionBox.SetSelectionFilters(geometryFilters);
+        }
 
         private string[] CreateTemporaryIcons(string filename)
         {
@@ -1306,13 +1323,9 @@ namespace CADRobotExporter.CAD
             ((PropertyManagerPageControl)PMOptionFixedJoint).Left = 80;
             ((PropertyManagerPageControl)PMOptionFixedJoint).Width = 1;
 
-            swSelectType_e[] filters = new swSelectType_e[1];
-            filters = new swSelectType_e[1];
-            object filterObj = null;
-
             //Create the selection box label
             controlType = (int)swPropertyManagerPageControlType_e.swControlType_Label;
-            caption = LabelLinkInertialCaption;
+            caption = InertialSelectionCaption;
             tip = "";
             alignment = (int)swPropertyManagerPageControlLeftAlign_e.swControlAlign_Indent;
             options = (int)swAddControlOptions_e.swControlOptions_Visible +
@@ -1329,17 +1342,13 @@ namespace CADRobotExporter.CAD
             PMLinkInertialComponentsSelection = (PropertyManagerPageSelectionbox)PMGroup.AddControl2(
                 LinkInertialComponentsSelectionID, (short)controlType, caption, (short)alignment, (int)options, tip);
 
-            filters[0] = swSelectType_e.swSelCOMPONENTS;
-            filterObj = null;
-            filterObj = filters;
-
             PMLinkInertialComponentsSelection.AllowSelectInMultipleBoxes = true;
             PMLinkInertialComponentsSelection.SingleEntityOnly = false;
             PMLinkInertialComponentsSelection.AllowMultipleSelectOfSameEntity = false;
             PMLinkInertialComponentsSelection.Height = 32;
             PMLinkInertialComponentsSelection.Mark = 16;
             PMLinkInertialComponentsSelection.EnableSelectIdenticalComponents = true;
-            PMLinkInertialComponentsSelection.SetSelectionFilters(filterObj);
+            ApplyGeometrySelectionFilter(PMLinkInertialComponentsSelection);
             PMLinkInertialComponentsSelection.Style = /*(int)swPropMgrPageSelectionBoxStyle_e.swPropMgrPageSelectionBoxStyle_MultipleItemSelect +*/
                 (int)swPropMgrPageSelectionBoxStyle_e.swPropMgrPageSelectionBoxStyle_HScroll;
             PMLinkInertialComponentsSelection.SetSelectionColor(true, (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem2);
@@ -1348,7 +1357,7 @@ namespace CADRobotExporter.CAD
 
             //Create the selection box label
             controlType = (int)swPropertyManagerPageControlType_e.swControlType_Label;
-            caption = LabelLinkCollisionCaption;
+            caption = CollisionSelectionCaption;
             tip = "";
             alignment = (int)swPropertyManagerPageControlLeftAlign_e.swControlAlign_Indent;
             options = (int)swAddControlOptions_e.swControlOptions_Visible +
@@ -1366,17 +1375,13 @@ namespace CADRobotExporter.CAD
             PMLinkCollisionComponentsSelection = (PropertyManagerPageSelectionbox)PMGroup.AddControl2(
                 LinkCollisionComponentsSelectionID, (short)controlType, caption, (short)alignment, (int)options, tip);
 
-            filters[0] = swSelectType_e.swSelCOMPONENTS;
-            filterObj = null;
-            filterObj = filters;
-
             PMLinkCollisionComponentsSelection.AllowSelectInMultipleBoxes = true;
             PMLinkCollisionComponentsSelection.SingleEntityOnly = false;
             PMLinkCollisionComponentsSelection.AllowMultipleSelectOfSameEntity = false;
             PMLinkCollisionComponentsSelection.Height = 32;
             PMLinkCollisionComponentsSelection.Mark = 8;
             PMLinkCollisionComponentsSelection.EnableSelectIdenticalComponents = true;
-            PMLinkCollisionComponentsSelection.SetSelectionFilters(filterObj);
+            ApplyGeometrySelectionFilter(PMLinkCollisionComponentsSelection);
             PMLinkCollisionComponentsSelection.Style = /*(int)swPropMgrPageSelectionBoxStyle_e.swPropMgrPageSelectionBoxStyle_MultipleItemSelect +*/
                 (int)swPropMgrPageSelectionBoxStyle_e.swPropMgrPageSelectionBoxStyle_HScroll;
             PMLinkCollisionComponentsSelection.SetSelectionColor(true, (int)swUserPreferenceIntegerValue_e.swSystemColorsSelectedItem3);
@@ -1385,7 +1390,7 @@ namespace CADRobotExporter.CAD
 
             //Create the selection box label
             controlType = (int)swPropertyManagerPageControlType_e.swControlType_Label;
-            caption = LabelLinkVisualCaption;
+            caption = VisualSelectionCaption;
             tip = "";
             alignment = (int)swPropertyManagerPageControlLeftAlign_e.swControlAlign_Indent;
             options = (int)swAddControlOptions_e.swControlOptions_Visible +
@@ -1402,16 +1407,13 @@ namespace CADRobotExporter.CAD
             PMLinkVisualComponentsSelection = (PropertyManagerPageSelectionbox)PMGroup.AddControl2(
                 LinkVisualComponentsSelectionID, (short)controlType, caption, (short)alignment, (int)options, tip);
 
-            filters[0] = swSelectType_e.swSelCOMPONENTS;
-            filterObj = filters;
-
             PMLinkVisualComponentsSelection.AllowSelectInMultipleBoxes = true;
             PMLinkVisualComponentsSelection.SingleEntityOnly = false;
             PMLinkVisualComponentsSelection.AllowMultipleSelectOfSameEntity = false;
             PMLinkVisualComponentsSelection.Height = 50;
             PMLinkVisualComponentsSelection.Mark = 1;
             PMLinkVisualComponentsSelection.EnableSelectIdenticalComponents = true;
-            PMLinkVisualComponentsSelection.SetSelectionFilters(filterObj);
+            ApplyGeometrySelectionFilter(PMLinkVisualComponentsSelection);
             PMLinkVisualComponentsSelection.Style = /*(int)swPropMgrPageSelectionBoxStyle_e.swPropMgrPageSelectionBoxStyle_MultipleItemSelect +*/
                 (int)swPropMgrPageSelectionBoxStyle_e.swPropMgrPageSelectionBoxStyle_HScroll;
             icons = CreateTemporaryIcons("visual");
@@ -1653,9 +1655,9 @@ namespace CADRobotExporter.CAD
                     }
                     break;
                 case CheckboxShowExtraCaptionsID:
-                    PMLabelLinkVisualComponents.Caption = LabelLinkVisualCaption + (Checked ? LabelLinkVisualExtraCaption : "");
-                    PMLabelLinkCollisionComponents.Caption = LabelLinkCollisionCaption + (Checked ? LabelLinkCollisionExtraCaption : "");
-                    PMLabelLinkInertialComponents.Caption = LabelLinkInertialCaption + (Checked ? LabelLinkInertialExtraCaption : "");
+                    PMLabelLinkVisualComponents.Caption = VisualSelectionCaption + (Checked ? LabelLinkVisualExtraCaption : "");
+                    PMLabelLinkCollisionComponents.Caption = CollisionSelectionCaption + (Checked ? LabelLinkCollisionExtraCaption : "");
+                    PMLabelLinkInertialComponents.Caption = InertialSelectionCaption + (Checked ? LabelLinkInertialExtraCaption : "");
                     PMCheckboxLinkPurelyInertial.Caption = CheckboxLinkPurelyInertialCaption + (Checked ? CheckboxLinkPurelyInertialExtraCaption : "");
                     PMCheckboxLinkPurelyVisual.Caption = CheckboxLinkPurelyVisualCaption + (Checked ? CheckboxLinkPurelyVisualExtraCaption : "");
                     PMLabelKinematicTree.Caption = LabelKinematicTreeCaption + (Checked ? LabelKinematicTreeExtraCaption : "");

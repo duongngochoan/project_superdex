@@ -16,21 +16,25 @@
 
 #pragma once
 
+#include <mochi_core/geometry/batch_sphere.h>
 #include <mochi_core/geometry/grid_sdf.h>
 #include <mochi_core/geometry/scalar_field.h>
-#include <mochi_core/geometry/sphere.h>
 #include <mochi_core/mochi_config.h>
 #include <mochi_core/mochi_platform.h>
-#include <mochi_core/utils/basic_utils.h>
-#include <mochi_core/utils/concepts.h>
-#include <mochi_core/utils/debug.h>
-#include <mochi_core/utils/nd_array.h>
-#include <mochi_core/utils/span.h>
+#include <mochi_core/utils/batch_types.h>
 #include <mochi_core/utils/vmatrix.h>
 
 namespace mochi {
 
-/** @brief Represents a bounding volume defined by the level set of a signed distance field (SDF).
+/**
+ * @brief Represents a bounding volume defined by the level set of a signed distance field (SDF).
+ *
+ * @note Overlap tests assume that the interpolated SDF is 1-Lipschitz: a sphere overlaps iff the
+ * SDF at its center is at most its radius plus @ref distanceThreshold. Trilinear interpolation can
+ * be up to sqrt(3)-Lipschitz where the distance field bends within a cell (e.g. near sharp or thin
+ * features). Culling may therefore rarely discard a point within the threshold, but only one whose
+ * SDF exceeds the threshold minus (sqrt(3) - 1) times the sphere radius. Scaling radii by sqrt(3)
+ * would make culling conservative, at the cost of more false positives.
  */
 struct SdfBv {
   // Pointer to the SDF.
@@ -46,65 +50,27 @@ struct SdfBv {
   VMatrix4x4r gridFromPointsT;
 };
 
-// NOTE: HasOverlap(SdfBv, ShapeT) is currently only supported for ShapeT = Sphere.
-MOCHI_FORCE_INLINE bool HasOverlap(SdfBv const& sdfBv, Sphere const& sphere) {
-  Real3 centerInGrid = ToReal3(DotVecMat4x4(sphere.VGetCenter(), sdfBv.gridFromPointsT));
-  real outDistance;
-
-  constexpr auto kSamplerOptions = TrilinearSamplerOptions<GridExtrapolation::LowerBound>{};
-  sdfBv.gridSdf->GetDistanceGrid().TrilinearSample(
-      MakeSingletonConstSpan(centerInGrid), MakeSingletonSpan(outDistance), kSamplerOptions);
-
-  return outDistance * sdfBv.gridSdf->GetActorFromGridScale() <=
-      sphere.GetRadius() + sdfBv.distanceThreshold;
-}
-
-template <typename ShapeT, MOCHI_CONCEPT(IsPrimitiveShape<ShapeT>)>
-MOCHI_FORCE_INLINE bool HasOverlap(ShapeT const& shape, SdfBv const& sdfBv) {
-  return HasOverlap(sdfBv, shape);
-}
-
 /**
- * @brief Checks for overlap between an SDF bounding volume and multiple spheres in batch.
+ * @brief Tests overlap between an @ref SdfBv and each of a batch of spheres.
  *
- * @tparam kMaxBatchSize Maximum number of spheres to process in a batch.
- *
- * @param batchSize Number of spheres to process in this batch (must not exceed kMaxBatchSize).
- * @param sdfBv The SDF bounding volume to check against all spheres.
- * @param spheres Span of spheres to check for overlap with the SDF bounding volume.
- * @param outHasOverlap Output span to store overlap results (must be at least batchSize in length).
- *
- * @note HasOverlapBatch(SdfBv, ShapeT) is currently only supported for ShapeT = Sphere.
+ * @tparam kBatchSize The number of spheres in the batch.
+ * @param sdfBv The SDF bounding volume.
+ * @param sphere The batch of spheres.
+ * @return A per-lane SIMD mask; each sphere's lane is set if overlap was detected.
  */
-template <int kMaxBatchSize>
-void HasOverlapBatch(
-    int batchSize,
+template <int kBatchSize>
+[[nodiscard]] MOCHI_FORCE_INLINE BatchReal<kBatchSize> HasOverlap(
     SdfBv const& sdfBv,
-    Span<Sphere const> spheres,
-    Span<bool> outHasOverlap) {
-  MOCHI_ASSERT_VERBOSE(
-      (batchSize >= 0) && (batchSize <= Min(kMaxBatchSize, isize(spheres), isize(outHasOverlap))),
-      "Invalid batch size.");
-  Real3 centersInGrid[kMaxBatchSize] MOCHI_NO_INIT;
-  for (int i = 0; i < batchSize; ++i) {
-    centersInGrid[i] = ToReal3(DotVecMat4x4(spheres[i].VGetCenter(), sdfBv.gridFromPointsT));
-  }
-  real outDistance[kMaxBatchSize] MOCHI_NO_INIT;
-
-  constexpr auto kSamplerOptions = TrilinearSamplerOptions<GridExtrapolation::LowerBound>{};
-  sdfBv.gridSdf->GetDistanceGrid().TrilinearSample(
-      Span(&centersInGrid[0], batchSize), Span(&outDistance[0], batchSize), kSamplerOptions);
-
+    BatchSphere<kBatchSize> const& sphere) {
+  using V = BatchReal<kBatchSize>;
+  auto const matT = Broadcast3x3<V>(sdfBv.gridFromPointsT);
+  auto const trans = Broadcast3<V>(sdfBv.gridFromPointsT[3]);
+  auto const centerInGrid = DotVecMat(sphere.center, matT) + trans;
+  V dist MOCHI_NO_INIT;
+  sdfBv.gridSdf->GetDistanceGrid()
+      .template TrilinearSampleBatch<V::kSize, GridExtrapolation::LowerBound>(centerInGrid, &dist);
   real const actorFromGridScale = sdfBv.gridSdf->GetActorFromGridScale();
-  for (int i = 0; i < batchSize; ++i) {
-    outHasOverlap[i] =
-        (outDistance[i] * actorFromGridScale <= spheres[i].GetRadius() + sdfBv.distanceThreshold);
-  }
+  return dist * actorFromGridScale <= sphere.radius + sdfBv.distanceThreshold;
 }
-
-namespace details {
-template <>
-inline constexpr bool IsSdfBvDef<SdfBv> = true;
-} // namespace details
 
 } // namespace mochi

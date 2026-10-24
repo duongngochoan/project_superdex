@@ -636,8 +636,6 @@ void Example02() {
   ColumnVector<real> Ax(kBlockSize);
   auto const rowLeadDim = kBlockSize * col.size();
   ColumnVector<real> xTmp;
-  //--- Use safe value for xlen
-  auto xlen = details::RowMultiplier<real, kBlockSize>::GetWorkspaceSize(col.size() * kBlockSize);
   details::RowMultiplier<real, kBlockSize>::ApplyToColVector(
       col,
       Span{val.Data(), val.Rows() * val.Cols()},
@@ -647,8 +645,7 @@ void Example02() {
       details::GetAccessor(Ax),
       0,
       0,
-      xTmp,
-      xlen);
+      xTmp);
   EXPECT_TRUE(test::NearEqualMatrices(ref, Ax, kDefaultNearEqualEpsilon<real> * kBlockSize));
 }
 
@@ -1200,11 +1197,12 @@ void SparseMatProduct2(int nBlocks) {
   mochi::details::SparseMatProduct(A, A, AA);
   auto refValues = AAref.Values();
   auto newValues = AA.Values();
+  auto const maxNnzPerRow = Scalar(AAref.ComputeMaxNnzPerRow());
   for (size_t i = 0; i < newValues.size(); ++i) {
     EXPECT_NEAR(
         newValues[i],
         refValues[i],
-        Scalar(AAref.MaxNnzPerRow()) * Abs(refValues[i] * std::numeric_limits<Scalar>::epsilon()));
+        maxNnzPerRow * Abs(refValues[i] * std::numeric_limits<Scalar>::epsilon()));
   }
 }
 } // namespace mochi::details

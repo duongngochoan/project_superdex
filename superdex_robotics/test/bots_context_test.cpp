@@ -35,17 +35,21 @@ namespace {
 // Minimal loader that returns empty shapes; used to exercise BuildArticulatedActorParams
 // for prefabs whose links carry no shape files.
 struct NoOpBotLoader : IBotLoader {
-  BotFileType GetBotFileType(std::string_view, Error&) const override {
+  BotFileType GetBotFileType(std::string_view /*path*/, Error& /*error*/) const override {
     return BotFileType::BotPrefab;
   }
-  BotPrefab LoadBotPrefab(std::string_view, Error&) const override {
+  BotPrefab LoadBotPrefab(std::string_view /*path*/, Error& /*error*/) const override {
     return {};
   }
-  ModBotPrefab LoadModBotPrefab(std::string_view, Error&) const override {
+  ModBotPrefab LoadModBotPrefab(std::string_view /*path*/, Error& /*error*/) const override {
     return {};
   }
-  ShapeHandle LoadShape(std::string_view, Real3 const&, TransformRT const&, Context*, Error&)
-      const override {
+  ShapeHandle LoadShape(
+      std::string_view /*path*/,
+      Real3 const& /*bakeScale*/,
+      TransformRT const& /*bakeTransform*/,
+      Context* /*context*/,
+      Error& /*error*/) const override {
     return {};
   }
 };

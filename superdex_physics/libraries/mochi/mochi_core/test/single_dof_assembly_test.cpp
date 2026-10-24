@@ -76,12 +76,18 @@ static void TestAssembler(
 TEST(SingleDofAssembly, SingleDofExternal) {
   // Initialize data needed by the assembler
   real force = 1.3_r;
+  real stageStartPos = -0.2_r;
 
   // Create assembly lambda and test
   auto assembler = [&](real pos, double* energy, real* gradient, real* /* hessian */) {
-    AddSingleDofExternalForce(pos, force, energy, gradient);
+    AddSingleDofExternalForce(pos, stageStartPos, force, energy, gradient);
   };
   TestAssembler(assembler, 1e-3_r, 1e-3_r);
+
+  // The energy is relative to the stage start.
+  double energy = 0.0;
+  assembler(stageStartPos, &energy, nullptr, nullptr);
+  EXPECT_EQ(0.0, energy);
 }
 
 TEST(SingleDofAssembly, SingleDofInertiaCurrent) {

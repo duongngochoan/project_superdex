@@ -24,53 +24,10 @@
 
 namespace mochi::fem {
 
-/// @brief Augment the in-plane deformation gradient with the out-of-plane normal rotation
-/// for triangle elements (plane-strain formulation).
-///
-/// @note Implements plane-strain kinematics: no transverse shear or out-of-plane stretch, but the
-/// surface normal may rotate. Safe with general 3D material models, but parameters may need
-/// adjustment to approximate plane-stress for unconstrained shell structures.
-///
-/// @see StressWork
-template <int kBatchSize, class ElementT>
-MOCHI_FORCE_INLINE void AugmentDeformationGradientTriangle(
-    BatchElementVector<kBatchSize, ElementT> const& disp,
-    NdArray<int, kBatchSize> const& elementIndices,
-    Span<ElementT const> elements,
-    BatchReal3x3<kBatchSize>& F,
-    real* staging) {
-  using V = BatchReal<kBatchSize>;
-  using V3 = BatchReal3<kBatchSize>;
-  constexpr auto kSpaceDim = ElementT::kSpaceDim;
-  static_assert(ElementT::kNumDofs == 3);
-
-  // Pack reference node positions into SoA.
-  NdArray<V, 3 * kSpaceDim> refPos MOCHI_NO_INIT;
-  for (int d = 0; d < 3 * kSpaceDim; ++d) {
-    for (int b = 0; b < kBatchSize; ++b) {
-      staging[b] = elements[elementIndices[b]].nodesCrdsPhys[d / kSpaceDim][d % kSpaceDim];
-    }
-    refPos[d] = Load<V>(staging);
-  }
-
-  // Current positions = reference + displacement.
-  NdArray<V, 3 * kSpaceDim> curPos = refPos + disp;
-
-  // Edge vectors: e1 = pos[1] - pos[0], e2 = pos[2] - pos[0]
-  auto edge = [](auto const& pos, int a, int b, int d) { return pos[a * 3 + d] - pos[b * 3 + d]; };
-  auto edge3 = [&](auto const& pos, int a, int b) -> V3 {
-    return {edge(pos, a, b, 0), edge(pos, a, b, 1), edge(pos, a, b, 2)};
-  };
-
-  V3 const refNormal = Normalize(Cross(edge3(refPos, 1, 0), edge3(refPos, 2, 0)));
-  V3 const curNormal = Normalize(Cross(edge3(curPos, 1, 0), edge3(curPos, 2, 0)));
-  F += Outer(curNormal - refNormal, refNormal);
-}
-
 /// @brief Compute stress work for a batch of elements.
 ///
 /// @param[in] elementIndices  Indices into @p elements for each batch lane.
-/// @param[in] elements  Element data array.
+/// @param[in] elements  Element data array (tetrahedral, 4-node).
 /// @param[in] disp  Batched displacement DoF vector.
 /// @param[out] outEnergy  If non-null, accumulates per-element energy.
 /// @param[out] outRes  If non-null, accumulates per-element residual.
@@ -98,9 +55,6 @@ MOCHI_FORCE_INLINE void AugmentDeformationGradientTriangle(
 /// @param[in] perElementExtraWeight  Optional per-element quadrature weight multiplier.
 /// @return true if outputs were written.
 ///
-/// @note Triangle dresidual is not implemented because it would require the derivative of the
-/// plane-strain deformation gradient with respect to the current normal; @p outDRes must be null
-/// for triangle elements.
 /// @note This is a spatial-only operation. It uses kNumFields == kSpaceDim implicitly. For element
 /// types with extra DoFs per node (e.g., rod twist), use dedicated stress functions.
 template <int kBatchSize, class ElementT, class ConstitutiveResponseFn>
@@ -130,10 +84,7 @@ bool StressWork(
   constexpr auto kNumQuads = ElementT::kNumQuadPoints;
   constexpr auto kNumDofs = kNumNodes * kSpaceDim;
   static_assert(kSpaceDim == 3, "Only 3D elements are supported");
-
-  if constexpr (kNumNodes == 3) {
-    MOCHI_ASSERT_VERBOSE(outDRes == nullptr, "DRes implementation is incomplete for triangles.");
-  }
+  static_assert(kNumNodes == 4, "StressWork supports tetrahedral (4-node) elements only.");
 
   bool const evalObj = (outEnergy != nullptr);
   bool const evalRes = (outRes != nullptr);
@@ -171,12 +122,6 @@ bool StressWork(
           F[r][c] += u_fr * dbasis[f * kSpaceDim + c];
         }
       }
-    }
-
-    // Plane-strain augmentation for triangles.
-    if constexpr (kNumNodes == 3) {
-      AugmentDeformationGradientTriangle<kBatchSize, ElementT>(
-          disp, elementIndices, elements, F, staging);
     }
 
     // Constitutive response.

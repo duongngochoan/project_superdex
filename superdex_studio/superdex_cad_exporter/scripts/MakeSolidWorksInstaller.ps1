@@ -3,17 +3,21 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# Builds the MSI installer for the SolidWorks add-in.
+# Builds the MSI installer for the SolidWorks add-in, or for another WiX project passed in
+# -WixProject (MakeNXInstaller.ps1 uses this for the NX add-in).
 # Requires the .NET SDK; the WiX v6 toolset is restored automatically via NuGet.
 
 param (
-    [string]$Configuration = "Release"
+    [string]$Configuration = "Release",
+    [string]$WixProject = ""
 )
 
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
-$WixProject = Join-Path $ProjectRoot "installer\SuperDexCadExporter.wixproj"
+if (-not $WixProject) {
+    $WixProject = Join-Path $ProjectRoot "installer\solidworks\SuperDexCadExporter.wixproj"
+}
 
 function Invoke-Native {
     # Local $ErrorActionPreference keeps native stderr from becoming a terminating

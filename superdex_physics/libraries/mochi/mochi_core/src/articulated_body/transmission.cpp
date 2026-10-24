@@ -83,6 +83,7 @@ void LinearTransmission::AddObjResDRes(
     AssemblyParams const& params,
     double& outObjective,
     Span<real> outResidual,
+    Span<real> /*outLinkResidual*/,
     Matrix<real>& outDResidual) const {
   if (!(params.assemObj || params.assemRes || params.assemDRes) || !HasActuator()) {
     return;
@@ -159,6 +160,89 @@ real ComputeElementSum(
   return sum;
 }
 
+// Overwrites the gradient of the element sum with respect to the pose, split in two parts: the
+// waypoint segments in link space, one 6-vector per link with waypoints (the derivative with
+// respect to the translation of the link's CoM and the rotation about it), and the linear-joint
+// elements in joint space (one value per reduced DoF). `waypointSlots` gives, for each Waypoint
+// element, the index in `outLinkGradients` of its link.
+void ComputeElementSumGradient(
+    Span<RoutingElement const> routingElements,
+    Span<SpatialTendon::LinearJointOffsets const> linearJointOffsets,
+    Span<int const> waypointSlots,
+    Span<TransformRT const> linkTransforms,
+    Span<ColumnVector<real, RigidSize::kDAll>> outLinkGradients,
+    ColumnVectorView<real> outJointGradient) {
+  for (auto& linkGradient : outLinkGradients) {
+    linkGradient.SetZero();
+  }
+  outJointGradient.SetZero();
+
+  // A segment with unit direction u lengthens by u . dP_end - u . dP_start, and a point P on a link
+  // moves by dP = v + omega x lever, with lever = P - CoM. Hence the gradient with respect to
+  // [v; omega] of the link of the end waypoint is [u; lever x u], and the opposite for the start.
+  auto addWaypointGradient = [&](int slot, Real3 const& lever, Real3 const& direction) {
+    Real3 const angular = Cross(lever, direction);
+    auto& linkGradient = outLinkGradients[slot];
+    for (int i = 0; i < RigidSize::kDTrans; ++i) {
+      linkGradient[i] += direction[i];
+      linkGradient[RigidSize::kDTrans + i] += angular[i];
+    }
+  };
+
+  int waypointIndex = 0;
+  int linearJointIndex = 0;
+  bool prevWasWaypoint = false;
+  int prevSlot = -1;
+  Real3 prevWorld{};
+  Real3 prevLever{};
+  for (auto const& element : routingElements) {
+    switch (element.type) {
+      case RoutingElementType::Waypoint: {
+        int const slot = waypointSlots[waypointIndex++];
+        Real3 const world = linkTransforms[element.index].TransformPoint(element.localPosition);
+        Real3 const lever = world - linkTransforms[element.index].GetTranslation();
+        if (prevWasWaypoint) {
+          // Normalize regularizes the ill-posed direction of a zero-length segment to zero; the
+          // length itself is smooth in pose, but the unit direction is undefined there.
+          Real3 const unit = Normalize(world - prevWorld);
+          addWaypointGradient(slot, lever, unit);
+          addWaypointGradient(prevSlot, prevLever, -unit);
+        }
+        prevWorld = world;
+        prevLever = lever;
+        prevSlot = slot;
+        prevWasWaypoint = true;
+        break;
+      }
+      case RoutingElementType::LinearJoint: {
+        // Single-DoF joints only; precomputed in the constructor.
+        auto const& linearJointOffset = linearJointOffsets[linearJointIndex++];
+        outJointGradient[linearJointOffset.dofsOffset] += element.coefficient;
+        prevWasWaypoint = false;
+        break;
+      }
+    }
+  }
+}
+
+// outJointGradient += bodyJacobian^T * linkGradients, with linkGradients[s] the link-space gradient
+// of link waypointLinks[s].
+void AddJacobianTransposeProduct(
+    Span<int const> waypointLinks,
+    RowMatrixView<real const> bodyJacobian,
+    Span<ColumnVector<real, RigidSize::kDAll> const> linkGradients,
+    ColumnVectorView<real> outJointGradient) {
+  MOCHI_ASSERT_VERBOSE(
+      isize(linkGradients) == isize(waypointLinks) &&
+          outJointGradient.Rows() == bodyJacobian.Cols(),
+      "Inconsistent sizes");
+  for (int s = 0; s < isize(waypointLinks); ++s) {
+    auto const base = waypointLinks[s] * RigidSize::kDAll;
+    auto const linkJacobian = bodyJacobian.MiddleRows<RigidSize::kDAll>(base, RigidSize::kDAll);
+    outJointGradient += linkJacobian.Transpose() * linkGradients[s];
+  }
+}
+
 } // namespace
 
 SpatialTendon::SpatialTendon(
@@ -224,12 +308,24 @@ SpatialTendon::SpatialTendon(
       "SpatialTendon Waypoint elements must be adjacent to at least one other Waypoint");
 
   // Precompute linear-joint offsets so Displacement / AddObjResDRes never need the joint layout
-  // time.
+  // time, and the links with waypoints.
   for (auto const& element : _routingElements) {
     if (element.type == RoutingElementType::LinearJoint) {
       _linearJointOffsets.push_back(
           {.poseOffset = poseInfo[element.index].offset,
            .dofsOffset = dofInfo[element.index].offset});
+    } else if (element.type == RoutingElementType::Waypoint) {
+      _waypointLinks.push_back(element.index);
+    }
+  }
+  std::sort(_waypointLinks.begin(), _waypointLinks.end());
+  _waypointLinks.erase(
+      std::unique(_waypointLinks.begin(), _waypointLinks.end()), _waypointLinks.end());
+  for (auto const& element : _routingElements) {
+    if (element.type == RoutingElementType::Waypoint) {
+      auto const* it =
+          std::lower_bound(_waypointLinks.begin(), _waypointLinks.end(), element.index);
+      _waypointSlots.push_back(static_cast<int>(it - _waypointLinks.begin()));
     }
   }
 
@@ -281,63 +377,21 @@ void SpatialTendon::DisplacementJacobian(
     Span<TransformRT const> linkTransforms,
     RowMatrixView<real const> bodyJacobian,
     Span<real> outJacobian) const {
-  int const reducedDofsDim = bodyJacobian.Cols();
   MOCHI_ASSERT_VERBOSE(
-      isize(outJacobian) == reducedDofsDim,
+      isize(outJacobian) == bodyJacobian.Cols(),
       "Displacement Jacobian size must equal the reduced DoF dimension");
-  std::fill(outJacobian.begin(), outJacobian.end(), 0_r);
-
-  // Column j of the world point Jacobian for a point on link `linkIndex` with lever arm `lever`
-  // (its world position minus the link's origin, i.e. R_link * localPosition):
-  //   dP/dq_j = Jt(linkIndex)[:,j] - cross(lever, Jr(linkIndex)[:,j]),
-  // where Jt / Jr are the translational / angular blocks of the body Jacobian for that link.
-  auto pointDeriv = [&](int linkIndex, Real3 const& lever, int j) -> Real3 {
-    int const base = linkIndex * RigidSize::kDAll;
-    Real3 const jt{bodyJacobian(base + 0, j), bodyJacobian(base + 1, j), bodyJacobian(base + 2, j)};
-    Real3 const jr{
-        bodyJacobian(base + RigidSize::kDTrans + 0, j),
-        bodyJacobian(base + RigidSize::kDTrans + 1, j),
-        bodyJacobian(base + RigidSize::kDTrans + 2, j)};
-    return jt - Cross(lever, jr);
-  };
-
-  bool prevWasWaypoint = false;
-  int prevLink = -1;
-  Real3 prevWorld{};
-  Real3 prevLever{};
-  auto const* linearJointOffsets = _linearJointOffsets.data();
-  // Combined displacement gradient g_j: each adjacent-waypoint segment adds unit . (dP_curr/dq_j -
-  // dP_prev/dq_j) for its two endpoints; each linear-joint element adds its constant coefficient at
-  // the joint's DoF.
-  for (auto const& element : _routingElements) {
-    switch (element.type) {
-      case RoutingElementType::Waypoint: {
-        Real3 const world = linkTransforms[element.index].TransformPoint(element.localPosition);
-        Real3 const lever = world - linkTransforms[element.index].GetTranslation();
-        if (prevWasWaypoint) {
-          // Normalize regularizes the ill-posed direction of a zero-length segment to zero; the
-          // length itself is smooth in pose, but the unit direction is undefined there.
-          Real3 const unit = Normalize(world - prevWorld);
-          for (int j = 0; j < reducedDofsDim; ++j) {
-            outJacobian[j] +=
-                Dot(unit, pointDeriv(element.index, lever, j) - pointDeriv(prevLink, prevLever, j));
-          }
-        }
-        prevWorld = world;
-        prevLever = lever;
-        prevLink = element.index;
-        prevWasWaypoint = true;
-        break;
-      }
-      case RoutingElementType::LinearJoint: {
-        // Single-DoF joints only; precomputed in the constructor.
-        outJacobian[linearJointOffsets->dofsOffset] += element.coefficient;
-        ++linearJointOffsets;
-        prevWasWaypoint = false;
-        break;
-      }
-    }
-  }
+  // The Jacobian is the joint-space gradient plus the link-space gradient mapped to joint DoFs.
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 64 * RigidSize::kDAll * sizeof(real));
+  DynamicArray<ColumnVector<real, RigidSize::kDAll>> linkGradients(
+      isize(_waypointLinks), &allocator);
+  ComputeElementSumGradient(
+      _routingElements,
+      _linearJointOffsets,
+      _waypointSlots,
+      linkTransforms,
+      linkGradients,
+      AsView(outJacobian));
+  AddJacobianTransposeProduct(_waypointLinks, bodyJacobian, linkGradients, AsView(outJacobian));
 }
 
 void SpatialTendon::AddObjResDRes(
@@ -350,15 +404,16 @@ void SpatialTendon::AddObjResDRes(
     AssemblyParams const& params,
     double& outObjective,
     Span<real> outResidual,
+    Span<real> outLinkResidual,
     Matrix<real>& outDResidual) const {
   if (!(params.assemObj || params.assemRes || params.assemDRes) || !HasActuator()) {
     return;
   }
-  int const reducedDofsDim = bodyJacobian.Cols();
 
   real const currentDisplacement = Displacement(currentLinkTransforms, currentPose);
   real const stageStartDisplacement = Displacement(stageStartLinkTransforms, stageStartPose);
 
+  // TODO: Use dE/dDisp_prev for GradTarget::Previous.
   real energy{}, force{}, stiffness{};
   _actuator->EnergyGradientHessian(
       currentDisplacement,
@@ -374,26 +429,52 @@ void SpatialTendon::AddObjResDRes(
   if (params.assemDRes && params.psdDRes) {
     stiffness = Max(stiffness, 0_r);
   }
+  MOCHI_ASSERT_VERBOSE(
+      !params.assemRes || isize(outLinkResidual) == isize(currentLinkTransforms) * RigidSize::kDAll,
+      "Expected a link-space residual with 6 values per link.");
   bool const needResidual = params.assemRes && force != 0_r;
   bool const needDResidual = params.assemDRes && stiffness != 0_r;
   if (!needResidual && !needDResidual) {
     return;
   }
 
-  MOCHI_FILO_STACK_ALLOCATOR(allocator, 4 * 1024);
-  DynamicArray<real> g(reducedDofsDim, &allocator);
-  DisplacementJacobian(currentLinkTransforms, bodyJacobian, MakeSpan(g));
+  // The gradient is evaluated on the link transforms of the grad target, which are the ones of the
+  // projection of the link-space residual to joint DoFs. The dresidual is only assembled for
+  // GradTarget::Current, so it shares the gradient with the residual.
+  MOCHI_ASSERT_VERBOSE(
+      !needDResidual || params.gradTarget == GradTarget::Current,
+      "The dresidual requires GradTarget::Current.");
+  Span<TransformRT const> const linkTransforms =
+      params.gradTarget == GradTarget::Previous ? stageStartLinkTransforms : currentLinkTransforms;
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, (64 * RigidSize::kDAll + 256) * sizeof(real));
+  DynamicArray<ColumnVector<real, RigidSize::kDAll>> linkGradients(
+      isize(_waypointLinks), &allocator);
+  ColumnVector<real> jointGradient(bodyJacobian.Cols(), &allocator);
+  ComputeElementSumGradient(
+      _routingElements,
+      _linearJointOffsets,
+      _waypointSlots,
+      linkTransforms,
+      linkGradients,
+      jointGradient);
 
-  // residual += force * g; dresidual += stiffness * g (outer) g (Gauss-Newton approximation that
-  // drops the force * d2(Displacement)/dq2 term, matching LinearTransmission and constraints).
+  // The waypoint segments go to the link-space residual, and the linear-joint elements to the
+  // joint-space residual.
   if (needResidual) {
-    for (int j = 0; j < reducedDofsDim; ++j) {
-      outResidual[j] += force * g[j];
+    auto outLinkResidualView = AsView(outLinkResidual);
+    for (int s = 0; s < isize(_waypointLinks); ++s) {
+      outLinkResidualView.Slice<RigidSize::kDAll>(
+          _waypointLinks[s] * RigidSize::kDAll, RigidSize::kDAll) += force * linkGradients[s];
     }
+    AsView(outResidual) += force * jointGradient;
   }
+
+  // Complete the displacement Jacobian g = J^T linkGradients + jointGradient. Then,
+  // dresidual += stiffness * g (outer) g (Gauss-Newton approximation that drops the
+  // force * d2(Displacement)/dq2 term, matching LinearTransmission and constraints).
   if (needDResidual) {
-    ColumnVectorView<real const> const gv = AsConstView(g);
-    outDResidual += stiffness * (gv * gv.Transpose());
+    AddJacobianTransposeProduct(_waypointLinks, bodyJacobian, linkGradients, jointGradient);
+    outDResidual += stiffness * (jointGradient * jointGradient.Transpose());
   }
 }
 

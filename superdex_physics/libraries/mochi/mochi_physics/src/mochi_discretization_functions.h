@@ -23,6 +23,7 @@
 #include "mochi_shape.h"
 
 #include <mochi_core/utils/basic_utils.h>
+#include <mochi_core/utils/dynamic_array.h>
 #include <mochi_physics/mochi_physics_experimental.h>
 
 #include <cstdint>
@@ -32,8 +33,9 @@
 
 namespace mochi {
 
-// Forward declaration for ecs::Excluded in UpdateQueryVisualNodePositionsAndNormals
+// Forward declarations for ecs::Excluded in the auxiliary mesh query systems
 struct CRodVisualMeshEmbedding;
+struct CRodContactSkinEmbedding;
 
 /**************************************************************************
   Common ECS Utils related to discretization
@@ -44,6 +46,12 @@ void UpdateQueryNodePositions(
     CSimplicialMesh const& simplicial,
     CFinalDisplacementRef<TimeStep::Current> const& currSol,
     CQueryNodePositions& outQuery);
+void UpdateLinearEmbeddedNodePositionsFromDisplacements(
+    LinearMeshEmbedding const& embedding,
+    Span<Real3 const> embeddedReferencePositions,
+    Span<Real3 const> displacements,
+    Span<int const> outputNodeIndices,
+    Span<Real3> outPositions);
 
 // Compute the local-space positions of each node in the surface mesh
 // and store them in CQuerySurfaceNodePositions
@@ -63,10 +71,15 @@ void UpdateQuerySurfaceNodeNormals(
     ecs::OptionalTag<TagStaticActor> isStatic,
     CQuerySurfaceNodeNormals& outQuery);
 
-// Compute the local-space positions and (optionally) normals of visual mesh nodes.
-// For rigid actors, the reference visual mesh positions are used directly.
-// For deformable actors, posQuery must be non-null and have been computed at input, and is
-// mapped through the visual mesh embedding.
+// Compute per-node normals of an auxiliary (visual or contact skin) mesh (area-weighted
+// per-triangle normals). For rigid actors, normals are computed once. Normals of unreferenced
+// nodes are zero.
+void UpdateAuxiliaryMeshNodeNormals(
+    bool isRigid,
+    TriangularMesh const& mesh,
+    Span<real const> positions,
+    DynamicArray<real>& outNormals);
+
 void UpdateQueryVisualNodePositionsAndNormals(
     ecs::Excluded<CRodVisualMeshEmbedding>,
     ecs::OptionalTag<TagRigidActor> isRigidDynamic,
@@ -76,13 +89,12 @@ void UpdateQueryVisualNodePositionsAndNormals(
     CQueryVisualNodePositions& outVisPosQuery,
     CQueryVisualNodeNormals* outVisNormQuery);
 
-// Compute per-vertex normals from visual mesh positions (area-weighted per-triangle normals).
-// Shared utility used by both soft/shell and rod visual query implementations.
-void UpdateQueryVisualNodeNormals(
-    bool isRigid,
-    CVisualMesh const& visualMesh,
-    CQueryVisualNodePositions const& visPosQuery,
-    CQueryVisualNodeNormals& outVisNormQuery);
+void UpdateQueryContactSkinNodePositionsAndNormals(
+    ecs::Excluded<CRodContactSkinEmbedding>,
+    CContactSkinMesh const& contactSkin,
+    CQueryNodePositions const& posQuery,
+    CQueryContactSkinNodePositions& outPosQuery,
+    CQueryContactSkinNodeNormals* outNormQuery);
 
 /**************************************************************************
   Overload set for creating active VOLUME elements

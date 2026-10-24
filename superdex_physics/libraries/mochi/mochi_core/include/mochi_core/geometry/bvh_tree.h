@@ -19,8 +19,6 @@
 #include <mochi_core/geometry/aabb.h>
 #include <mochi_core/geometry/any_shape.h>
 #include <mochi_core/geometry/obb.h>
-#include <mochi_core/geometry/scalar_field.h>
-#include <mochi_core/geometry/sdf_bv.h>
 #include <mochi_core/geometry/sphere.h>
 #include <mochi_core/memory/filo_allocator.h>
 #include <mochi_core/mochi_config.h>
@@ -160,7 +158,10 @@ class BvhTree {
   /**
    * Returns the bounding volume of the root.
    */
-  Bv const& GetRootBv() const;
+  Bv const& GetRootBv() const {
+    MOCHI_ASSERT_VERBOSE(IsValid(), "Invalid BVH Tree");
+    return _nodes[kRootNode].bv;
+  }
 
   /**
    * Refits the nodes of the tree to reflect the deformations the object underwent.
@@ -172,125 +173,6 @@ class BvhTree {
    * be invoked for each potential overlap detected.
    */
   void Query(Bv const& bv, BvhQueryFn const& callback) const;
-
-  /**
-   * Find elements that intersect with the given bounding volume.
-   *
-   * @tparam kSkipElementBvCheck When true, adds all elements from intersecting leaf nodes without
-   *         performing individual element bounding volume checks (faster but less precise). When
-   *         false, performs per-element bounding volume checks (slower but more precise).
-   * @tparam BvOther Bounding volume type to test against.
-   * @param bv The bounding volume to test against.
-   * @param outElements Output array that will be filled with the indices of the elements that
-   *         intersect with the bounding volume.
-   */
-  template <bool kSkipElementBvCheck = false, typename BvOther>
-  void FindIntersectingElements(BvOther const& bv, DynamicArray<int>& outElements) const {
-    MOCHI_PROFILE_SCOPE();
-    MOCHI_ASSERT_VERBOSE(IsValid(), "Invalid BVH Tree.");
-    outElements.clear();
-    if (_nodes.empty()) {
-      return;
-    }
-
-    // For grid SDF BVs, perform tree traversal in batches of up to 2x the batch size in DenseGrid3D
-    // queries (empirically faster than 1x). For other BVs, perform traversal one node at a time
-    // (HasOverlapBatch is not vectorized).
-    // TODO: Assess vectorizing HasOverlapBatch for other BVs. Even if it's not vectorized,
-    // kMaxBatchSize > 1 may still be faster than 1.
-    constexpr int kMaxBatchSize = IsSdfBv<BvOther> ? 2 * Simd<real>::kSize : 1;
-
-    // Enough stack memory for up to 256 levels. Falls back to heap allocation if needed.
-    MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * 2 * kMaxBatchSize * sizeof(int));
-    DynamicArray<int> traversalStack(&allocator);
-    traversalStack.resize_noinit(2 * kMaxBatchSize * _levels.size());
-
-    // Start the tree traversal from the lowest level that contains at most kMaxBatchSize nodes.
-    int startLevel = -1;
-    for (auto const& level : _levels) {
-      if (isize(level) > kMaxBatchSize) {
-        break;
-      }
-      startLevel++;
-    }
-
-    for (int levelIdx = 0; levelIdx < startLevel; ++levelIdx) {
-      for (int nodeIdx : _levels[levelIdx]) {
-        auto const& node = _nodes[nodeIdx];
-        if (node.isLeafNode && HasOverlap(bv, node.bv)) {
-          EmitLeafElements<kSkipElementBvCheck>(node, bv, outElements);
-        }
-      }
-    }
-
-    // Perform tree traversal using a stack. 'traversalStack' contains the indices of the nodes to
-    // be processed. 'stackIdx' contains the stack pointer.
-    int stackIdx = 0;
-    for (int nodeIdx : _levels[startLevel]) {
-      traversalStack[stackIdx++] = nodeIdx;
-    }
-
-    int nodeIndices[kMaxBatchSize] MOCHI_NO_INIT;
-    [[maybe_unused]] Bv nodeBvs[kMaxBatchSize] MOCHI_NO_INIT;
-    bool overlaps[kMaxBatchSize] MOCHI_NO_INIT;
-    while (stackIdx > 0) {
-      int batchSize = 1;
-
-      if constexpr (kMaxBatchSize > 1) {
-        batchSize = Min(kMaxBatchSize, stackIdx);
-
-        // Prepare batch data.
-        // NOTE: The BV copies below could be avoided if the node BVs were stored in a vector of BVs
-        // instead of in a vector of Nodes.
-        for (int i = 0; i < batchSize; ++i) {
-          nodeIndices[i] = traversalStack[--stackIdx];
-          nodeBvs[i] = _nodes[nodeIndices[i]].bv;
-        }
-
-        HasOverlapBatch<kMaxBatchSize>(batchSize, bv, MakeConstSpan(nodeBvs), MakeSpan(overlaps));
-      } else {
-        nodeIndices[0] = traversalStack[--stackIdx];
-        overlaps[0] = HasOverlap(bv, _nodes[nodeIndices[0]].bv);
-      }
-
-      // Add children to stack. Push left children last so that they are processed first.
-      for (int i = batchSize - 1; i >= 0; --i) {
-        if (overlaps[i]) {
-          auto const& node = _nodes[nodeIndices[i]];
-          if (node.isLeafNode) {
-            EmitLeafElements<kSkipElementBvCheck>(node, bv, outElements);
-          } else {
-            if constexpr (kMaxBatchSize == 1) {
-              traversalStack[stackIdx++] = node.rightChildIndex;
-              traversalStack[stackIdx++] = node.leftChildIndex;
-            } else {
-              // If possible, skip one level to improve batch utilization.
-              // NOTE: "stackIdx + X <= kMaxBatchSize" prevents traversal stack overflow.
-              if ((stackIdx + 3 <= kMaxBatchSize) && !_nodes[node.rightChildIndex].isLeafNode) {
-                traversalStack[stackIdx++] = _nodes[node.rightChildIndex].rightChildIndex;
-                traversalStack[stackIdx++] = _nodes[node.rightChildIndex].leftChildIndex;
-              } else {
-                traversalStack[stackIdx++] = node.rightChildIndex;
-              }
-              if ((stackIdx + 2 <= kMaxBatchSize) && !_nodes[node.leftChildIndex].isLeafNode) {
-                traversalStack[stackIdx++] = _nodes[node.leftChildIndex].rightChildIndex;
-                traversalStack[stackIdx++] = _nodes[node.leftChildIndex].leftChildIndex;
-              } else {
-                traversalStack[stackIdx++] = node.leftChildIndex;
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-
-  template <bool kSkipElementBvCheck = false>
-  void FindIntersectingElements(AnyShape const& anyBv, DynamicArray<int>& outElements) const {
-    std::visit(
-        [&](auto const& bv) { FindIntersectingElements<kSkipElementBvCheck>(bv, outElements); },
-        anyBv);
-  }
 
   /**
    * Queries all potential intersections with the [other] BVH tree. [callback] will be invoked for
@@ -325,7 +207,9 @@ class BvhTree {
   /**
    * Get the elements associated with this leaf node.
    */
-  RangeByIterators<std::vector<int>::const_iterator> GetElements(Node const& node) const;
+  RangeByIterators<std::vector<int>::const_iterator> GetElements(Node const& node) const {
+    return _elements.begin() + node.elementIndexRange;
+  }
 
   /**
    * Compute the Bv of a certain node.

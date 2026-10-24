@@ -30,9 +30,6 @@ namespace details {
 template <typename T>
 inline constexpr bool IsPrimitiveShapeDef = false;
 
-template <typename T>
-inline constexpr bool IsSdfBvDef = false;
-
 // Identity specialization for arithmetic types. Fires a compile error for non-arithmetic types that
 // are missing a specialization.
 template <class T, class = void>
@@ -69,15 +66,9 @@ concept IsNotVoidObject = !std::is_same_v<Void, std::decay_t<T>>;
 
 template <typename T>
 concept IsPrimitiveShape = details::IsPrimitiveShapeDef<std::decay_t<T>>;
-
-template <typename T>
-concept IsSdfBv = details::IsSdfBvDef<std::decay_t<T>>;
 #else
 template <typename T>
 inline constexpr bool IsPrimitiveShape = details::IsPrimitiveShapeDef<std::decay_t<T>>;
-
-template <typename T>
-inline constexpr bool IsSdfBv = details::IsSdfBvDef<std::decay_t<T>>;
 
 #endif // MOCHI_LANGUAGE_CPP20
 

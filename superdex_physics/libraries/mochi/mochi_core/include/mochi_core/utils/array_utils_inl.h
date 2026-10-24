@@ -19,6 +19,7 @@
 // Reverse include for intellisense
 #include "array_utils.h"
 
+#include <mochi_core/mochi_platform.h>
 #include <mochi_core/utils/basic_utils.h>
 #include <mochi_core/utils/nd_array_utils.h>
 #include <mochi_core/utils/profile.h>
@@ -219,6 +220,35 @@ inline void ArrayAddTriplesN(T* vec, Span<int const> const& indices, T const* va
   }
 }
 
+namespace details {
+
+// Return x * c0 + y * c1 + z * c2. The compiler cannot contract an explicit MulAdd or a product
+// that feeds one, so this rounds the same in every loop, call site, and element type.
+template <typename V>
+[[nodiscard]] MOCHI_FORCE_INLINE V FusedDot3(V x, V y, V z, V c0, V c1, V c2) {
+  return MulAdd(z, c2, MulAdd(x, c0, y * c1));
+}
+
+} // namespace details
+
+template <typename V>
+MOCHI_FORCE_INLINE NdArray<V, 3> RotateVectorsBatch(
+    NdArray<V, 3> const& src,
+    NdArray<V, 3, 3> const& rotT) {
+  return NdArray<V, 3>{
+      details::FusedDot3(src[0], src[1], src[2], rotT[0][0], rotT[1][0], rotT[2][0]),
+      details::FusedDot3(src[0], src[1], src[2], rotT[0][1], rotT[1][1], rotT[2][1]),
+      details::FusedDot3(src[0], src[1], src[2], rotT[0][2], rotT[1][2], rotT[2][2])};
+}
+
+template <typename V>
+MOCHI_FORCE_INLINE NdArray<V, 3> TransformPointsBatch(
+    NdArray<V, 3> const& src,
+    NdArray<V, 3, 3> const& rotT,
+    NdArray<V, 3> const& trans) {
+  return RotateVectorsBatch(src, rotT) + trans;
+}
+
 // This overload takes a TRANSPOSED 4x4 matrix
 template <bool kSingleThreaded = false, typename T>
 inline void ArrayTransformPoints_MatT(
@@ -235,22 +265,23 @@ inline void ArrayTransformPoints_MatT(
     using V = Simd<T>;
     // Benchmarking shows no benefit to larger-than-native batch sizes for both NEON and AVX2.
     int constexpr kBatchSize = Simd<T>::kSize;
+    // Vectorize rotation and translation. Ignore the right column of the matrix.
+    auto const rotT = Broadcast3x3<V>(matT); // 3x3xN
+    auto const trans = Broadcast3<V>(matT[3]); // 3xN
+    // Local spans stay in registers. Reading them through the captures reloads them after stores.
+    auto const srcLocal = src;
+    auto const dstLocal = dst;
     int i = iBegin;
-    if (i + kBatchSize <= iEnd) {
-      // Vectorize rotation and translation. Ignore the right column of the matrix.
-      auto const rotT = Broadcast3x3<V>(matT); // 3x3xN
-      auto const trans = Broadcast3<V>(matT[3]); // 3xN
-      for (; i + kBatchSize <= iEnd; i += kBatchSize) {
-        NdArray<V, 3> pt;
-        LoadTransposed(&src[i][0], pt);
-        auto result = DotVecMat(pt, rotT) + trans;
-        StoreTransposed(&dst[i][0], result);
-      }
+    for (; i + kBatchSize <= iEnd; i += kBatchSize) {
+      NdArray<V, 3> pt;
+      LoadTransposed(&srcLocal[i][0], pt);
+      StoreTransposed(&dstLocal[i][0], TransformPointsBatch(pt, rotT, trans));
     }
-    for (; i < iEnd; ++i) {
-      auto pt = Load<3, Simd<T, 4>>(&src[i][0]);
-      auto result = DotVecMat4x4(ToSimdPoint(pt), matT);
-      Store<3>(&dst[i][0], result);
+    // Process the tail as a partial batch, so every point's result is independent of its index.
+    if (i < iEnd) {
+      NdArray<V, 3> pt;
+      LoadTransposed(&srcLocal[i][0], pt, iEnd - i);
+      StoreTransposed(&dstLocal[i][0], TransformPointsBatch(pt, rotT, trans), iEnd - i);
     }
   };
   if constexpr (kSingleThreaded) {
@@ -292,24 +323,26 @@ inline void ArrayTransformDisplacements_MatT(
     using V = Simd<T>;
     // Benchmarking shows no benefit to larger-than-native batch sizes for both NEON and AVX2.
     int constexpr kBatchSize = Simd<T>::kSize;
+    // Vectorize rotation and translation. Ignore the right column of the matrix.
+    auto const rotT = Broadcast3x3<V>(matT); // 3x3xN
+    auto const trans = Broadcast3<V>(matT[3]); // 3xN
+    // Local spans stay in registers. Reading them through the captures reloads them after stores.
+    auto const refLocal = refCoords;
+    auto const srcLocal = srcDisplacements;
+    auto const dstLocal = dstDisplacements;
     int i = iBegin;
-    if (i + kBatchSize <= iEnd) {
-      // Vectorize rotation and translation. Ignore the right column of the matrix.
-      auto const rotT = Broadcast3x3<V>(matT); // 3x3xN
-      auto const trans = Broadcast3<V>(matT[3]); // 3xN
-      for (; i + kBatchSize <= iEnd; i += kBatchSize) {
-        NdArray<V, 3> ref, pt;
-        LoadTransposed(&refCoords[i][0], ref);
-        LoadTransposed(&srcDisplacements[i][0], pt);
-        auto result = DotVecMat(pt + ref, rotT) + trans - ref;
-        StoreTransposed(&dstDisplacements[i][0], result);
-      }
+    for (; i + kBatchSize <= iEnd; i += kBatchSize) {
+      NdArray<V, 3> ref, pt;
+      LoadTransposed(&refLocal[i][0], ref);
+      LoadTransposed(&srcLocal[i][0], pt);
+      StoreTransposed(&dstLocal[i][0], TransformPointsBatch(pt + ref, rotT, trans) - ref);
     }
-    for (; i < iEnd; ++i) {
-      auto ref = Load<3, Simd<T, 4>>(refCoords[i].data());
-      auto pt = Load<3, Simd<T, 4>>(srcDisplacements[i].data());
-      pt = DotVecMat4x4(ToSimdPoint(pt + ref), matT) - ref;
-      Store<3>(dstDisplacements[i].data(), pt);
+    // Process the tail as a partial batch, so every point's result is independent of its index.
+    if (i < iEnd) {
+      NdArray<V, 3> ref, pt;
+      LoadTransposed(&refLocal[i][0], ref, iEnd - i);
+      LoadTransposed(&srcLocal[i][0], pt, iEnd - i);
+      StoreTransposed(&dstLocal[i][0], TransformPointsBatch(pt + ref, rotT, trans) - ref, iEnd - i);
     }
   };
   if constexpr (kSingleThreaded) {
@@ -375,21 +408,22 @@ void ArrayRotateVectors_MatT(
     using V = Simd<T>;
     // Benchmarking shows no benefit to larger-than-native batch sizes for both NEON and AVX2.
     int constexpr kBatchSize = Simd<T>::kSize;
+    // Vectorize rotation. Ignore the right column of the matrix.
+    auto const rotT = Broadcast3x3<V>(matT); // 3x3xN
+    // Local spans stay in registers. Reading them through the captures reloads them after stores.
+    auto const srcLocal = src;
+    auto const dstLocal = dst;
     int i = iBegin;
-    if (i + kBatchSize <= iEnd) {
-      // Vectorize rotation. Ignore the right column of the matrix.
-      auto const rotT = Broadcast3x3<V>(matT); // 3x3xN
-      for (; i + kBatchSize <= iEnd; i += kBatchSize) {
-        NdArray<V, 3> pt;
-        LoadTransposed(&src[i][0], pt);
-        auto result = DotVecMat(pt, rotT);
-        StoreTransposed(&dst[i][0], result);
-      }
+    for (; i + kBatchSize <= iEnd; i += kBatchSize) {
+      NdArray<V, 3> pt;
+      LoadTransposed(&srcLocal[i][0], pt);
+      StoreTransposed(&dstLocal[i][0], RotateVectorsBatch(pt, rotT));
     }
-    for (; i < iEnd; ++i) {
-      auto pt = Load<3, Simd<T, 4>>(&src[i][0]);
-      auto result = DotVecMat3x3(pt, matT);
-      Store<3>(&dst[i][0], result);
+    // Process the tail as a partial batch, so every point's result is independent of its index.
+    if (i < iEnd) {
+      NdArray<V, 3> pt;
+      LoadTransposed(&srcLocal[i][0], pt, iEnd - i);
+      StoreTransposed(&dstLocal[i][0], RotateVectorsBatch(pt, rotT), iEnd - i);
     }
   };
   if constexpr (kSingleThreaded) {
@@ -526,6 +560,60 @@ inline T MaxAbs(Span<T const, SZ> a) {
   return max;
 }
 
+template <int kStride>
+inline real MaxPackedVector3Norm(Span<real const> values) {
+  static_assert(kStride >= 3, "Packed 3D vector stride must be at least three.");
+  MOCHI_ASSERT_VERBOSE(
+      isize(values) % kStride == 0, "Packed vector size must be divisible by its stride.");
+  real const* const ptr = values.data();
+  int const count = isize(values) / kStride;
+  if constexpr (kStride == 3) {
+    using V = Simd<real>;
+    V maxNormSqr = SimdZero<V>();
+    NdArray<V, 3> pt MOCHI_NO_INIT;
+    int i = 0;
+    for (; i + V::kSize <= count; i += V::kSize) {
+      LoadTransposed(ptr + 3 * i, pt);
+      maxNormSqr = Max(maxNormSqr, NormSqr(pt));
+    }
+    // Process the tail as a partial batch, with zeros in the unused lanes.
+    if (i < count) {
+      LoadTransposed(ptr + 3 * i, pt, count - i);
+      maxNormSqr = Max(maxNormSqr, NormSqr(pt));
+    }
+    return Sqrt(HMax(maxNormSqr));
+  } else {
+    // LoadTransposed only supports 3-tuples. Instead, load one point per vector and transpose 4
+    // points at a time, ignoring the components after the 3rd.
+    using V = Simd<real, 4>;
+    auto loadPoint = [ptr](int iPoint)
+                         MOCHI_FORCE_INLINE_LAMBDA { return Load<V>(ptr + kStride * iPoint); };
+    auto normSqr4 = [](V a, V b, V c, V d) MOCHI_FORCE_INLINE_LAMBDA {
+      auto const t = Transpose4x4(NdArray<V, 4>{a, b, c, d});
+      return NormSqr(NdArray<V, 3>{t[0], t[1], t[2]});
+    };
+    V maxNormSqr = SimdZero<V>();
+    int i = 0;
+    for (; i + V::kSize <= count; i += V::kSize) {
+      maxNormSqr = Max(
+          maxNormSqr, normSqr4(loadPoint(i), loadPoint(i + 1), loadPoint(i + 2), loadPoint(i + 3)));
+    }
+    // Process the tail as a partial batch, with zeros in the unused lanes.
+    if (i < count) {
+      V const zero = SimdZero<V>();
+      int const numTail = count - i;
+      maxNormSqr =
+          Max(maxNormSqr,
+              normSqr4(
+                  loadPoint(i),
+                  numTail > 1 ? loadPoint(i + 1) : zero,
+                  numTail > 2 ? loadPoint(i + 2) : zero,
+                  zero));
+    }
+    return Sqrt(HMax(maxNormSqr));
+  }
+}
+
 template <typename T, typename SZ>
 inline T MaxAbsDifference(Span<T const, SZ> a, Span<T const, SZ> b) {
   MOCHI_ASSERT(a.size() == b.size());
@@ -559,7 +647,10 @@ T HSum(Span<T, SZ> a) {
   if constexpr (VT::kIsSupported) {
     int constexpr kNumBlocks = 4; // Large enough to hide latency
     int constexpr kBlockStride = VT::kSize * kNumBlocks;
-    VT block[kNumBlocks] = {};
+    VT block[kNumBlocks] MOCHI_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
+    for (int k = 0; k < kNumBlocks; ++k) {
+      block[k] = SimdZero<VT>();
+    }
     if (n >= kBlockStride) {
       for (; i + kBlockStride <= n; i += kBlockStride) {
         auto tmp0 = Load<VT>(&a[i + VT::kSize * 0]);

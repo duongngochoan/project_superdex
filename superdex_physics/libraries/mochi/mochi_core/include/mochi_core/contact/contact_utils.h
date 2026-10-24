@@ -23,18 +23,22 @@
 #include <mochi_core/geometry/bvh_tree.h>
 #include <mochi_core/geometry/geometry_utils.h>
 #include <mochi_core/geometry/grid_sdf.h>
+#include <mochi_core/geometry/sdf_bv.h>
 #include <mochi_core/geometry/tetrahedral_mesh.h>
 #include <mochi_core/geometry/triangular_mesh.h>
 #include <mochi_core/linear_algebra/matrix.h>
 #include <mochi_core/utils/activations.h>
 #include <mochi_core/utils/batch_types.h>
+#include <mochi_core/utils/constants.h>
 #include <mochi_core/utils/decomposition_utils.h>
 #include <mochi_core/utils/differentiability.h>
 #include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/eval_params.h>
+#include <mochi_core/utils/matrix_utils.h>
 #include <mochi_core/utils/nd_array_utils.h>
 #include <mochi_core/utils/no_copy.h>
 #include <mochi_core/utils/profile.h>
+#include <mochi_core/utils/rigid_body_size.h>
 #include <mochi_core/utils/spmat_utils.h>
 #include <mochi_core/utils/task_scheduler.h>
 
@@ -56,6 +60,55 @@ namespace mochi {
 // Forward declarations
 class BaseMap;
 
+/// @brief Cached recipe for summing duplicate DoF columns of a wide contact-skin Jacobian.
+///
+/// Elements are contact-surface elements. The source (uncoalesced) row of a contact has one
+/// equal-width source block of columns per element node, holding that node's skinning Jacobian
+/// entries in CSR order. The block width varies per query, so source columns are computed at use;
+/// the map stores only each entry's destination (coalesced) column.
+struct ContactJacColumnCoalescingMap {
+  // Source blocks per row, i.e., nodes per element.
+  int sourceBlockCount = 0;
+  int samplesPerElement = 0;
+  // CSR over elements: sorted unique actor-local DoFs, one per destination column.
+  DynamicArray<int> elementDofOffsets;
+  DynamicArray<int> elementDofIndices;
+  // CSR over (element, source block) pairs: destination column of each skinning Jacobian entry.
+  DynamicArray<int> elementSourceContributionOffsets;
+  DynamicArray<int> elementSourceContributionDstColumns;
+
+  [[nodiscard]] bool IsInitialized() const {
+    return sourceBlockCount > 0 && samplesPerElement > 0 && !elementDofOffsets.empty() &&
+        !elementSourceContributionOffsets.empty();
+  }
+
+  [[nodiscard]] int NumElements() const {
+    MOCHI_ASSERT_VERBOSE(!elementDofOffsets.empty(), "Element DoF offsets are not initialized.");
+    return isize(elementDofOffsets) - 1;
+  }
+
+  [[nodiscard]] Span<int const> ElementDofIndices(int elementIndex) const {
+    MOCHI_ASSERT_VERBOSE(elementIndex >= 0 && elementIndex < NumElements());
+    int const begin = elementDofOffsets[elementIndex];
+    int const end = elementDofOffsets[elementIndex + 1];
+    MOCHI_ASSERT_VERBOSE(begin >= 0 && begin <= end && end <= isize(elementDofIndices));
+    return {elementDofIndices.data() + begin, static_cast<size_t>(end - begin)};
+  }
+
+  [[nodiscard]] Span<int const> SourceContributionDstColumns(int elementIndex, int sourceBlock)
+      const {
+    MOCHI_ASSERT_VERBOSE(elementIndex >= 0 && elementIndex < NumElements());
+    MOCHI_ASSERT_VERBOSE(sourceBlock >= 0 && sourceBlock < sourceBlockCount);
+    int const flattenedBlock = elementIndex * sourceBlockCount + sourceBlock;
+    MOCHI_ASSERT_VERBOSE(flattenedBlock + 1 < isize(elementSourceContributionOffsets));
+    int const begin = elementSourceContributionOffsets[flattenedBlock];
+    int const end = elementSourceContributionOffsets[flattenedBlock + 1];
+    MOCHI_ASSERT_VERBOSE(
+        begin >= 0 && begin <= end && end <= isize(elementSourceContributionDstColumns));
+    return {elementSourceContributionDstColumns.data() + begin, static_cast<size_t>(end - begin)};
+  }
+};
+
 /*
 Jacobian of contact points wrt state DoFs. Notation:
 - pi: position of each contact point.
@@ -67,8 +120,13 @@ contacts for efficiency. The dpi/dz only store non-zero values, with the corresp
 stored in 'inds'. If dz/dx is identity (i.e., there's no intermediate state), then it is not stored
 and dpi/dz = dpi/dx. The Jacobians are packed in a single matrix [dp0/dz, dp1/dz, ...].
 *
+If present, dz/dx is the 6 x nDoFsState Jacobian of a rigid transform z wrt the state DoFs x (e.g.,
+the transform of an articulated link wrt the articulation DoFs). It requires shared DoFs, and
+nDoFsInternal is 6. Otherwise, nDoFsInternal equals nDoFsState. Resize() always produces a Jacobian
+without dz/dx, and SetJacAux() then re-expresses a rigid Jacobian dpi/dz wrt x.
+*
 DoF indices can be accessed in two ways:
-- Inds(i) returns all affected DoF indices of the i-th contact (always nDoFsInternal entries).
+- Inds(i) returns all affected DoF indices of the i-th contact (always nDoFsState entries).
 - IndGroups(i) returns the affected DoF indices of the i-th contact in consecutive groups. This is
 convenient for assembly operations into sparse matrices. Different contacts may produce different
 numbers of groups (e.g. skinned contact where skinning connectivity varies per contact),
@@ -91,13 +149,17 @@ Example (uniform group counts):
 Example (variable group counts; e.g. skinned contact with variable connectivity):
 - Contact 0 acts on DoFs: 15, 16, 17, 21, 22, 23, 33, 34, 35 — 3 disjoint runs.
 - Contact 1 acts on DoFs: 12, 13, 14, 15, 16, 17, 12, 13, 14 — only 2 distinct runs (the 12-14
-  triplet is repeated as padding because every row of _inds has nDoFsInternal entries).
+  triplet is repeated as padding because every row of _inds has nDoFsState entries).
 - _indGroupCounts = {3, 2}.
 - _indGroups storage is rectangular with maxGroups columns; row 1's trailing slot is unused.
 - IndGroups(0) returns 3 groups, IndGroups(1) returns 2 — the trailing slot of row 1 is hidden
   by the per-row count.
 */
 struct ContactJac {
+  /// @brief View of an auxiliary Jacobian dz/dx: the row-major 6 x nDoFsState Jacobian of a rigid
+  /// transform wrt the state DoFs.
+  using AuxView = RowMatrixView<real const, RigidSize::kDAll>;
+
  private:
   // The ContactJac of a pair of actors is recycled across assemblies until the actors are no longer
   // in contact. For performance reasons, a matrix view to a DynamicArray is used for each resizable
@@ -125,9 +187,9 @@ struct ContactJac {
   // store 1 block.
   MatrixView<real, 3> _jac;
 
-  // Auxiliary Jacobian dz/dx (optional), with no ownership. Size nDoFsInternal x nDoFsState if
-  // there is an auxiliary Jacobian and empty otherwise.
-  MatrixView<real const> _jacAux = {};
+  // Auxiliary Jacobian dz/dx (optional), with no ownership. Size 6 x nDoFsState if there is an
+  // auxiliary Jacobian and empty otherwise.
+  AuxView _jacAux = {};
 
  public:
   static constexpr int kDofsPerNode = 3;
@@ -136,6 +198,8 @@ struct ContactJac {
   bool hasSharedJacs = false; // if all contacts of the actor share the same Jacobian.
   int nDoFsState = 0; // nnzs per row of dpi/dx
   int nDoFsInternal = 0; // nnzs per row of dpi/dz
+  // Offset of z in the full DoFs that dz/dx maps to. Set iff there is an auxiliary Jacobian.
+  int internalDofOffset = kSentinelIndex;
   int nContacts = 0;
 
   ContactJac() = default;
@@ -157,6 +221,7 @@ struct ContactJac {
     hasSharedJacs = other.hasSharedJacs;
     nDoFsState = other.nDoFsState;
     nDoFsInternal = other.nDoFsInternal;
+    internalDofOffset = other.internalDofOffset;
     nContacts = other.nContacts;
     return *this;
   }
@@ -194,24 +259,20 @@ struct ContactJac {
   }
 
   /// @brief Constant view of the auxiliary Jacobian. Empty if there is no auxiliary Jacobian.
-  MatrixView<real const> JacAux() const {
+  AuxView JacAux() const {
     return _jacAux;
   }
 
-  /// @brief Set the auxiliary Jacobian view.
-  void SetJacAuxView(MatrixView<real const> jacAux) {
-    MOCHI_ASSERT_VERBOSE(jacAux.Rows() == nDoFsInternal && jacAux.Cols() == nDoFsState);
-    _jacAux.Reset(jacAux);
-  }
-
-  /// @brief Initialize the sizes of the internal data structures (except for the index groups)
-  void
-  Resize(bool sharedDoFs, bool sharedJacs, int _nDoFsInternal, int _nDoFsState, int _nContacts) {
+  /// @brief Initialize the sizes of the internal data structures (except for the index groups),
+  /// without auxiliary Jacobian.
+  void Resize(bool sharedDoFs, bool sharedJacs, int nDoFs, int nContactsIn) {
     hasSharedDoFs = sharedDoFs;
     hasSharedJacs = sharedJacs;
-    nDoFsInternal = _nDoFsInternal;
-    nDoFsState = _nDoFsState;
-    nContacts = _nContacts;
+    nDoFsInternal = nDoFs;
+    nDoFsState = nDoFs;
+    internalDofOffset = kSentinelIndex;
+    nContacts = nContactsIn;
+    _jacAux.Reset(AuxView{});
     // jac has only 1 block if jacs are shared by all contacts
     _data.jac.resize_noinit(3 * (hasSharedJacs ? 1 : nContacts) * nDoFsInternal);
     _jac.Reset(_data.jac.data(), 3, (hasSharedJacs ? 1 : nContacts) * nDoFsInternal);
@@ -221,10 +282,58 @@ struct ContactJac {
     groupsInitialized = false;
   }
 
+  /// @brief Re-express the Jacobian of a rigid transform z wrt the state DoFs x through the
+  /// auxiliary Jacobian dz/dx. The Jacobian blocks dpi/dz are kept, and the DoF indices are
+  /// replaced.
+  ///
+  /// @param[in] jacAux Auxiliary Jacobian dz/dx, of size 6 x isize(dofsAux). The owner must outlive
+  /// this Jacobian.
+  /// @param[in] dofOffset Offset added to all entries of dofsAux.
+  /// @param[in] dofsAux DoF indices of x, relative to dofOffset.
+  /// @param[in] internalDofOffsetIn Offset of z in the full DoFs that jacAux maps to.
+  ///
+  /// @pre Resized with shared DoFs and 6 DoFs, and index groups not initialized.
+  void SetJacAux(AuxView jacAux, int dofOffset, Span<int const> dofsAux, int internalDofOffsetIn) {
+    MOCHI_ASSERT_VERBOSE(hasSharedDoFs && _jacAux.empty(), "Expected a rigid Jacobian.");
+    MOCHI_ASSERT_VERBOSE(
+        nDoFsInternal == RigidSize::kDAll && nDoFsState == RigidSize::kDAll,
+        "Expected a rigid Jacobian.");
+    MOCHI_ASSERT_VERBOSE(!groupsInitialized, "Index groups must not be initialized.");
+    MOCHI_ASSERT_VERBOSE(!jacAux.empty() && jacAux.Cols() == isize(dofsAux));
+    MOCHI_ASSERT_VERBOSE(internalDofOffsetIn != kSentinelIndex);
+    nDoFsState = isize(dofsAux);
+    internalDofOffset = internalDofOffsetIn;
+    _jacAux.Reset(jacAux);
+    // Clear first, so that growing the capacity does not copy the overwritten rigid DoF indices.
+    _data.inds.clear();
+    _data.inds.resize_noinit(nDoFsState);
+    _inds.Reset(_data.inds.data(), 1, nDoFsState);
+    Span<int> const inds = Inds(0);
+    for (int i = 0; i < nDoFsState; ++i) {
+      inds[i] = dofOffset + dofsAux[i];
+    }
+  }
+
   /// @brief Set to zero all the Jacobian blocks.
   void SetZero() {
     _jac.SetZero();
   }
+
+  /// @brief Sum duplicate DoF columns of a wide contact-skin Jacobian using a cached map.
+  ///
+  /// @param[in] mapping Coalescing map; see @ref ContactJacColumnCoalescingMap for the row layout.
+  /// @param[in] sampleIndices Contact-surface sample index of each contact.
+  /// @param[in] dofOffset Actor's DoF offset within the island.
+  ///
+  /// @pre Per-contact DoFs and Jacobians, no auxiliary Jacobian, nDoFsInternal == nDoFsState, index
+  /// groups not initialized, and rows in the source layout of @ref ContactJacColumnCoalescingMap.
+  ///
+  /// @post The width is the largest DoF count among the contacts' elements. Each row lists its
+  /// element's DoFs in increasing order, padded with zero columns that repeat the first index.
+  void CoalesceColumnsByCachedMapping(
+      ContactJacColumnCoalescingMap const& mapping,
+      Span<int const> sampleIndices,
+      int dofOffset);
 
   /// @brief Initialize the index groups from the indices.
   void CompressIndices();
@@ -254,8 +363,8 @@ struct ContactDetectionResult {
 
   /**
    * @brief Position of the contact point in the collider's local space at stage start.
-   * @note Empty after current-time collision detection; 1-to-1 with sampleIndices after stage-start
-   * collision detection.
+   * @note 1-to-1 with sampleIndices after current-time collision detection; empty after far-SDF
+   * detection, and after stage-start collision detection, whose posColliding is at stage start.
    */
   DynamicArray<Real3> posCollidingStageStart = {};
 
@@ -494,11 +603,19 @@ struct ContactEvalConfig {
 // Maximum batch size for collision force and dforce computation.
 inline constexpr int kCollResponseMaxBatchSize = 8;
 
+// Batch of force derivatives: symmetric for GradTarget::Current, non-symmetric for
+// GradTarget::Previous.
+template <int kBatchSize, GradTarget kGradTarget>
+using BatchDForce = std::conditional_t<
+    kGradTarget == GradTarget::Current,
+    BatchSymMatrix3x3<kBatchSize>,
+    BatchReal3x3<kBatchSize>>;
+
 template <int kBatchSize>
 MOCHI_FORCE_INLINE void ComputeBatchContactPenaltyForceDForce(
     BatchDouble<kBatchSize>& outEnergy,
     BatchReal3<kBatchSize>& outForce,
-    BatchReal6<kBatchSize>& outDForce,
+    BatchSymMatrix3x3<kBatchSize>& outDForce,
     BatchReal<kBatchSize>& outForceNorm,
     BatchReal<kBatchSize> const& d,
     BatchReal3<kBatchSize> const& sdfGrad,
@@ -520,7 +637,6 @@ MOCHI_FORCE_INLINE void ComputeBatchContactPenaltyForceDForce(
 
   using V = BatchReal<kBatchSize>;
   using Vd = BatchDouble<kBatchSize>;
-  using V3 = BatchReal3<kBatchSize>;
 
   auto const penaltyCoeff = V{params.penaltyCoefficient};
   auto const penaltyThr = V{params.GetPenaltyThresholdDist(config.addPadding)};
@@ -559,13 +675,7 @@ MOCHI_FORCE_INLINE void ComputeBatchContactPenaltyForceDForce(
     V dForceNorm = -penaltyCoeff * (dPenalty * dPenalty + penalty * ddPenalty);
     MOCHI_ASSERT_VERBOSE(AllTrue(dForceNorm <= 0_r), "dForceNorm must not be positive.");
 
-    V3 auxDForce = dForceNorm * sdfGrad;
-    outDForce[0] = auxDForce[0] * sdfGrad[0]; // xx
-    outDForce[1] = auxDForce[1] * sdfGrad[1]; // yy
-    outDForce[2] = auxDForce[2] * sdfGrad[2]; // zz
-    outDForce[3] = auxDForce[0] * sdfGrad[1]; // xy
-    outDForce[4] = auxDForce[0] * sdfGrad[2]; // xz
-    outDForce[5] = auxDForce[1] * sdfGrad[2]; // yz
+    outDForce = OuterSym(dForceNorm * sdfGrad, sdfGrad);
   }
 }
 
@@ -615,14 +725,6 @@ MOCHI_FORCE_INLINE void ComputeBatchContactPenaltyForceNormDForceNorm(
   }
 }
 
-// Batch storage of dForce: 6 entries for GradTarget::Current (symmetric) or 9 entries for
-// GradTarget::Previous (non-symmetric).
-template <int kBatchSize, GradTarget kGradTarget>
-using BatchDForce = std::conditional_t<
-    kGradTarget == GradTarget::Current,
-    BatchReal6<kBatchSize>,
-    BatchReal9<kBatchSize>>;
-
 template <int kBatchSize, GradTarget kGradTarget>
 MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
     BatchDouble<kBatchSize>& outEnergy,
@@ -662,27 +764,35 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
     normal = sdfGrad;
     real constexpr kNormalIsZeroThreshold = 100_r * kDefaultNearEqualEpsilon<real>;
     [[maybe_unused]] real constexpr kNormalIsUnitThreshold = 10_r * kDefaultNearEqualEpsilon<real>;
+#if MOCHI_ASSERT_VERBOSE_ENABLED
+    V isZeroNormal{};
+#endif
     if (!isSdfGradUnitary) {
       V norm = Norm(normal);
       normal *= 1_r / norm;
 
       V isNearZero = norm < kNormalIsZeroThreshold;
-      if (AnyTrue(isNearZero))
-        MOCHI_UNLIKELY {
-          // TODO: Support member-wise Select with NdArray
-          if (config.validCollidingNormals) {
-            normal[0] = Select(isNearZero, -nColliding[0], normal[0]);
-            normal[1] = Select(isNearZero, -nColliding[1], normal[1]);
-            normal[2] = Select(isNearZero, -nColliding[2], normal[2]);
-          } else {
-            normal[0] = Select(isNearZero, V{0_r}, normal[0]);
-            normal[1] = Select(isNearZero, V{0_r}, normal[1]);
-            normal[2] = Select(isNearZero, V{0_r}, normal[2]);
-          }
+      if (AnyTrue(isNearZero)) MOCHI_UNLIKELY {
+        // TODO: Support member-wise Select with NdArray
+        if (config.validCollidingNormals) {
+          normal[0] = Select(isNearZero, -nColliding[0], normal[0]);
+          normal[1] = Select(isNearZero, -nColliding[1], normal[1]);
+          normal[2] = Select(isNearZero, -nColliding[2], normal[2]);
+        } else {
+          // No direction is available: a zero normal makes the tangent plane projection the
+          // identity, so friction acts in all directions and normal viscous damping vanishes.
+          normal[0] = Select(isNearZero, V{0_r}, normal[0]);
+          normal[1] = Select(isNearZero, V{0_r}, normal[1]);
+          normal[2] = Select(isNearZero, V{0_r}, normal[2]);
+#if MOCHI_ASSERT_VERBOSE_ENABLED
+          isZeroNormal = isNearZero;
+#endif
         }
+      }
     }
     MOCHI_ASSERT_VERBOSE(
-        (NearEqual<kBatchSize, real, V::kSize, real>(Norm(normal), V{1_r}, kNormalIsUnitThreshold)),
+        AllTrue<kBatchSize>(
+            VNearEqual(Norm(normal), V{1_r}, V{kNormalIsUnitThreshold}) | isZeroNormal),
         "Collider normal must be unitary.");
   } else {
     normal = -nColliding;
@@ -894,17 +1004,12 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
       eigN = -eigN;
     }
     V eigDeltaN = eigN - eigP;
-    V3 auxN = eigDeltaN * normal;
-    outDForce[0] += eigP + auxN[0] * normal[0]; // xx
-    outDForce[1] += eigP + auxN[1] * normal[1]; // yy
-    outDForce[2] += eigP + auxN[2] * normal[2]; // zz
-    outDForce[3] += auxN[0] * normal[1]; // xy
-    outDForce[4] += auxN[0] * normal[2]; // xz
-    outDForce[5] += auxN[1] * normal[2]; // yz
-    if constexpr (kGradTarget == GradTarget::Previous) {
-      outDForce[6] += auxN[0] * normal[1]; // yx
-      outDForce[7] += auxN[0] * normal[2]; // zx
-      outDForce[8] += auxN[1] * normal[2]; // zy
+    BatchSymMatrix3x3<kBatchSize> dForceN = OuterSym(eigDeltaN * normal, normal);
+    AddToDiagonalSym3x3(dForceN, eigP);
+    if constexpr (kGradTarget == GradTarget::Current) {
+      outDForce += dForceN;
+    } else {
+      outDForce += SymToFull3x3(dForceN);
     }
 
     // Extra pass for tangent contribution (Coulomb unfitted only)
@@ -913,17 +1018,11 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
         // Flip the sign of the eigenvalues
         eigDeltaT = -eigDeltaT;
       }
-      V3 auxT = eigDeltaT * tangent;
-      outDForce[0] += auxT[0] * tangent[0];
-      outDForce[1] += auxT[1] * tangent[1];
-      outDForce[2] += auxT[2] * tangent[2];
-      outDForce[3] += auxT[0] * tangent[1];
-      outDForce[4] += auxT[0] * tangent[2];
-      outDForce[5] += auxT[1] * tangent[2];
-      if constexpr (kGradTarget == GradTarget::Previous) {
-        outDForce[6] += auxT[0] * tangent[1];
-        outDForce[7] += auxT[0] * tangent[2];
-        outDForce[8] += auxT[1] * tangent[2];
+      BatchSymMatrix3x3<kBatchSize> const dForceT = OuterSym(eigDeltaT * tangent, tangent);
+      if constexpr (kGradTarget == GradTarget::Current) {
+        outDForce += dForceT;
+      } else {
+        outDForce += SymToFull3x3(dForceT);
       }
     }
   }
@@ -941,21 +1040,23 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
       outForce += dFPenaltyTimesEnergyFactor * sdfGrad;
     }
     if (assemDForce) {
-      V3 const row0 = dFPenalty * dEnergyFactor[0] * sdfGrad;
-      V3 const row1 = dFPenalty * dEnergyFactor[1] * sdfGrad;
-      V3 const row2 = dFPenalty * dEnergyFactor[2] * sdfGrad;
-      outDForce[0] += row0[0]; // xx
-      outDForce[1] += row1[1]; // yy
-      outDForce[2] += row2[2]; // zz
-      outDForce[3] += row0[1]; // xy
-      outDForce[4] += row0[2]; // xz
-      outDForce[5] += row1[2]; // yz
-      outDForce[6] += row1[0]; // yx
-      outDForce[7] += row2[0]; // zx
-      outDForce[8] += row2[1]; // zy
+      outDForce += Outer(dFPenalty * dEnergyFactor, sdfGrad);
     }
   }
 }
+
+/**
+ * @brief Collision response (energy, force, and force derivative) of a batch of contact points.
+ *
+ * @note Quantities not requested from @ref ComputeBatchCollisionResponse are left uninitialized.
+ * Lanes beyond @p kBatchSize hold unspecified values.
+ */
+template <int kBatchSize, GradTarget kGradTarget>
+struct BatchCollisionResponse {
+  BatchDouble<kBatchSize> energy;
+  BatchReal3<kBatchSize> force;
+  BatchDForce<kBatchSize, kGradTarget> dForce;
+};
 
 /**
  * @brief Compute collision response (energy, force, and force derivative) for a batch of contact
@@ -970,10 +1071,8 @@ MOCHI_FORCE_INLINE void ComputeBatchContactDissipationForceDForce(
  * @tparam kGradTarget Indicates whether the energy gradient is for the current state (i.e. the
  * force) or the previous state
  *
- * @param[out] outEnergy Output collision energies (size kBatchSize, written if assemEnergy)
- * @param[out] outForce Output collision forces (size kBatchSize, written if assemForce)
- * @param[out] outDForce Output collision force derivatives (size kBatchSize, written if
- * assemDForce)
+ * @param[out] outResponse Output collision response. Energies, forces and force derivatives are
+ * written if assemEnergy, assemForce and assemDForce, respectively.
  * @param[in] distance Signed distances at contact points (negative = penetration)
  * @param[in] distanceGrad Gradient of signed distance at current state
  * @param[in] distanceStageStart Signed distances at stage start (used only with explicit normals)
@@ -1000,10 +1099,8 @@ MOCHI_NO_INLINE
 #else
 MOCHI_FORCE_INLINE
 #endif
-    void ComputeBatchCollisionForceDForce(
-        Span<double> outEnergy,
-        Span<Real3> outForce,
-        Span<VMatrix3x3r> outDForce,
+    void ComputeBatchCollisionResponse(
+        BatchCollisionResponse<kBatchSize, kGradTarget>& outResponse,
         Span<real const> distance,
         Span<Real3 const> distanceGrad,
         Span<real const> distanceStageStart,
@@ -1026,9 +1123,6 @@ MOCHI_FORCE_INLINE
       kGradTarget == GradTarget::Current || kGradTarget == GradTarget::Previous,
       "Contact assembly should be called only for GradTarget::Current or GradTarget::Previous");
 
-  MOCHI_ASSERT_VERBOSE(!assemEnergy || (outEnergy.size() == kBatchSize));
-  MOCHI_ASSERT_VERBOSE(!assemForce || (outForce.size() == kBatchSize));
-  MOCHI_ASSERT_VERBOSE(!assemDForce || (outDForce.size() == kBatchSize));
   MOCHI_ASSERT_VERBOSE(
       distance.size() == kBatchSize && distanceGrad.size() == kBatchSize &&
       posColliding.size() == kBatchSize && posCollidingStageStart.size() == kBatchSize);
@@ -1053,13 +1147,11 @@ MOCHI_FORCE_INLINE
       "GradTarget::Previous requires implicitNormalForceForDissipation = false and explicitNormals = true.");
 
   using V = BatchReal<kBatchSize>;
-  using Vd = BatchDouble<kBatchSize>;
   using V3 = BatchReal3<kBatchSize>;
 
-  // Create SIMD locals for outputs
-  Vd energy MOCHI_NO_INIT;
-  V3 force MOCHI_NO_INIT;
-  BatchDForce<kBatchSize, kGradTarget> dForce MOCHI_NO_INIT;
+  auto& energy = outResponse.energy;
+  auto& force = outResponse.force;
+  auto& dForce = outResponse.dForce;
   V fPenalty MOCHI_NO_INIT;
   V dFPenalty MOCHI_NO_INIT;
 
@@ -1190,40 +1282,89 @@ MOCHI_FORCE_INLINE
         isSdfGradUnitary);
   }
 
+  // NOTE: dForce is expected to be PSD. If it is not, a projection onto the PSD cone must be added
+  // here.
+}
+
+/**
+ * @brief Compute collision response (energy, force, and force derivative) for a batch of contact
+ * points and store it in per-point arrays. See @ref ComputeBatchCollisionResponse.
+ *
+ * @param[out] outEnergy Output collision energies (size kBatchSize, written if assemEnergy)
+ * @param[out] outForce Output collision forces (size kBatchSize, written if assemForce)
+ * @param[out] outDForce Output collision force derivatives (size kBatchSize, written if
+ * assemDForce)
+ */
+template <int kBatchSize, GradTarget kGradTarget>
+MOCHI_FORCE_INLINE void ComputeBatchCollisionForceDForce(
+    Span<double> outEnergy,
+    Span<Real3> outForce,
+    Span<VMatrix3x3r> outDForce,
+    Span<real const> distance,
+    Span<Real3 const> distanceGrad,
+    Span<real const> distanceStageStart,
+    Span<Real3 const> distanceGradStageStart,
+    Span<Real3 const> normalColliding,
+    Span<Real3 const> posColliding,
+    Span<Real3 const> posCollidingStageStart,
+    ContactParams const& params,
+    ContactEvalConfig const& config,
+    real dtFactor,
+    bool assemEnergy,
+    bool assemForce,
+    bool assemDForce,
+    bool isSdfGradUnitary) {
+  MOCHI_ASSERT_VERBOSE(!assemEnergy || (outEnergy.size() == kBatchSize));
+  MOCHI_ASSERT_VERBOSE(!assemForce || (outForce.size() == kBatchSize));
+  MOCHI_ASSERT_VERBOSE(!assemDForce || (outDForce.size() == kBatchSize));
+
+  BatchCollisionResponse<kBatchSize, kGradTarget> response MOCHI_NO_INIT;
+  ComputeBatchCollisionResponse<kBatchSize, kGradTarget>(
+      response,
+      distance,
+      distanceGrad,
+      distanceStageStart,
+      distanceGradStageStart,
+      normalColliding,
+      posColliding,
+      posCollidingStageStart,
+      params,
+      config,
+      dtFactor,
+      assemEnergy,
+      assemForce,
+      assemDForce,
+      isSdfGradUnitary);
+
   // Store outputs to Spans
   if (assemEnergy) {
-    Store<kBatchSize>(outEnergy.data(), energy);
+    Store<kBatchSize>(outEnergy.data(), response.energy);
   }
 
   if (assemForce) {
-    StoreTransposed<kBatchSize>(&outForce[0][0], force);
+    StoreTransposed<kBatchSize>(&outForce[0][0], response.force);
   }
 
   if (assemDForce) {
+    auto const& dForce = response.dForce;
     // TODO: outDForce should be either:
     //   1. Nine dense arrays of real, in which case this loop would be 9 vector Stores.
     //   2. A dense array of Matrix3x3, in which case this loop would still be needed.
     for (int i = 0; i < kBatchSize; ++i) {
       if constexpr (kGradTarget == GradTarget::Current) {
-        // outDForce is symmetric and stored in a 6-value array.
         outDForce[i] = VMatrix3x3r{
-            Vec4r{dForce[0][i], dForce[3][i], dForce[4][i]}, // xx, xy, xz
-            Vec4r{dForce[3][i], dForce[1][i], dForce[5][i]}, // xy, yy, yz
-            Vec4r{dForce[4][i], dForce[5][i], dForce[2][i]}}; // xz, yz, zz
+            Vec4r{dForce[0][i], dForce[3][i], dForce[4][i]},
+            Vec4r{dForce[3][i], dForce[1][i], dForce[5][i]},
+            Vec4r{dForce[4][i], dForce[5][i], dForce[2][i]}};
       } else {
-        // outDForce is asymmetric and stored in a 9-value array.
         outDForce[i] = VMatrix3x3r{
-            Vec4r{dForce[0][i], dForce[3][i], dForce[4][i]}, // xx, xy, xz
-            Vec4r{dForce[6][i], dForce[1][i], dForce[5][i]}, // yx, yy, yz
-            Vec4r{dForce[7][i], dForce[8][i], dForce[2][i]}}; // zx, zy, zz
+            Vec4r{dForce[0][0][i], dForce[0][1][i], dForce[0][2][i]},
+            Vec4r{dForce[1][0][i], dForce[1][1][i], dForce[1][2][i]},
+            Vec4r{dForce[2][0][i], dForce[2][1][i], dForce[2][2][i]}};
       }
     }
-    // NOTE: outDForce is expected to be PSD. If it is not, a projection onto the PSD cone must be
-    // added here.
   }
 }
-
-#undef MOCHI_SIMD_FROM_STRUCT_MEMBER_INDEXED
 
 template <GradTarget kGradTarget>
 void ComputeCollisionResponseRange(
@@ -1259,6 +1400,207 @@ void ComputeCollisionResponse(
       assemDForce,
       outResponse);
 }
+
+/**
+ * @brief Sums of the collision response of contact points and of its moments about a reference
+ * point, from which the contact contribution of rigid bodies (e.g. rigid actors or articulated
+ * links) to the energy, gradient and Hessian is assembled.
+ *
+ * @details With w the weight of a contact point, e, f and D its collision energy, force and force
+ * derivative, s its lever arm from the reference point (e.g. a center of mass), and S(s) the
+ * skew-symmetric matrix of s, all expressed in the collider's local space:
+ * - @ref energy = sum(w e)
+ * - @ref force = sum(w f)
+ * - @ref torque = sum(S(s) w f)
+ * - @ref dForce = sum(w D)
+ * - @ref skewDForce = sum(S(s) w D)
+ * - @ref skewDForceSkew = sum(S(s) w D S(s))
+ */
+struct RigidContactSums {
+  double energy = 0.0;
+  Vec4r force = {};
+  Vec4r torque = {};
+  VMatrix3x3r dForce = {};
+  VMatrix3x3r skewDForce = {};
+  VMatrix3x3r skewDForceSkew = {};
+};
+
+/**
+ * @brief Compute the @ref RigidContactSums of a range of contact points, without storing their
+ * per-point collision response.
+ *
+ * @details Equivalent to summing the per-point response of @ref ComputeCollisionResponseRange, but
+ * faster. Collider integration weights are not supported. The lever arms s point from
+ * @p origin to the contact points at the time step of @p kGradTarget: @ref
+ * ContactDetectionResult::posColliding for @ref GradTarget::Current, @ref
+ * ContactDetectionResult::posCollidingStageStart for @ref GradTarget::Previous.
+ *
+ * @tparam kGradTarget Indicates whether the energy gradient is for the current state (i.e. the
+ * force) or the previous state
+ *
+ * @param[in] pointRange Range of contact points in @p contactQuery.
+ * @param[in] contactQuery Contact detection result.
+ * @param[in] params Contact parameters.
+ * @param[in] config Contact evaluation configuration.
+ * @param[in] dtStage Time step factor of the stage.
+ * @param[in] weights Weights of the contact samples, indexed by @ref
+ * ContactDetectionResult::sampleIndices.
+ * @param[in] origin Reference point of the lever arms, in the collider's local space.
+ * @param[in] assemEnergy Whether to compute @ref RigidContactSums::energy.
+ * @param[in] assemForce Whether to compute @ref RigidContactSums::force and @ref
+ * RigidContactSums::torque.
+ * @param[in] assemDForce Whether to compute @ref RigidContactSums::dForce, @ref
+ * RigidContactSums::skewDForce and @ref RigidContactSums::skewDForceSkew. Requires
+ * @ref GradTarget::Current.
+ * @param[out] outForce Optional collision forces of the contact points, as computed by @ref
+ * ComputeCollisionResponseRange. Indexed like the contact points; only @p pointRange is written.
+ * Requires @p assemForce.
+ * @return The sums. Quantities not requested are zero.
+ */
+template <GradTarget kGradTarget>
+RigidContactSums ComputeRigidContactSums(
+    Interval<int> pointRange,
+    ContactDetectionResult const& contactQuery,
+    ContactParams const& params,
+    ContactEvalConfig const& config,
+    real dtStage,
+    Span<real const> weights,
+    Vec4r origin,
+    bool assemEnergy,
+    bool assemForce,
+    bool assemDForce,
+    Span<Real3> outForce = {});
+
+/**
+ * @brief Rigid-form Jacobian slices of the contact points of a skinned actor's partition, read by
+ * @ref ComputeSkinnedContactSums.
+ *
+ * @details Each slice a has the rigid form J_a = [s_a Q, -S(r_a) Q], with Q the collider-from-world
+ * rotation, and s_a and r_a expressed in the collider's local space. The slices are one per bone,
+ * in the order of @ref boneRotations, optionally followed by a rigid-collider slice:
+ * - Bone j: (rho_j, s_j) is read from @ref points, and r_j = M_j rho_j.
+ * - Rigid-collider slice: s = 1 and r = p - @ref rigidColliderOrigin, with p the contact point.
+ */
+struct SkinnedContactSlices {
+  /** @brief Offset in @ref points of the points of each sample, indexed by sample index. */
+  Span<int const> pointOffsets;
+  /** @brief Weighted homogeneous point (rho, s) of each sample in the frame of each bone, in the
+   * order of @ref boneRotations. */
+  Span<Vec4r const> points;
+  /** @brief Rotation M_j to the collider's local space from the frame of rho_j, for each bone. */
+  Span<VMatrix3x3r const> boneRotations;
+  /** @brief If set, there is a rigid-collider slice after the bone slices, and this is the
+   * reference point of its lever arms, in the collider's local space. */
+  std::optional<Vec4r> rigidColliderOrigin;
+
+  [[nodiscard]] int NumSlices() const {
+    return isize(boneRotations) + (rigidColliderOrigin ? 1 : 0);
+  }
+};
+
+/**
+ * @brief Sums of the collision response of contact points over the rigid-form Jacobian slices of
+ * @ref SkinnedContactSlices, from which the contact contribution of those slices to the energy,
+ * gradient and Hessian is assembled.
+ *
+ * @details With w the weight of a contact point, e, f and D its collision energy, force and force
+ * derivative, and S(r) the skew-symmetric matrix of r, all expressed in the collider's local space:
+ * - @ref energy = sum(w e)
+ * - @ref force [a] = sum(w s_a f)
+ * - @ref torque [a] = sum(S(r_a) w f)
+ * - @ref dForce [p] = sum(w s_a s_b D)
+ * - @ref skewBDForce [p] = sum(w s_a S(r_b) D)
+ * - @ref skewADForce [p] = sum(w s_b S(r_a) D)
+ * - @ref skewDForceSkew [p] = sum(S(r_a) w D S(r_b))
+ * where p = @ref PairIndex (a, b), for slices a <= b. For a single rigid-collider slice, these
+ * match @ref RigidContactSums.
+ *
+ * @note The arrays are allocated once at construction, from the given allocator, and never grow, so
+ * the allocator may be a FILO allocator. Arrays of quantities not requested are empty.
+ */
+struct SkinnedContactSums {
+  int const numSlices;
+  double energy = 0.0;
+  DynamicArray<Vec4r> force;
+  DynamicArray<Vec4r> torque;
+  DynamicArray<VMatrix3x3r> dForce;
+  DynamicArray<VMatrix3x3r> skewBDForce;
+  DynamicArray<VMatrix3x3r> skewADForce;
+  DynamicArray<VMatrix3x3r> skewDForceSkew;
+
+  // Zero-initialize the arrays of the requested quantities.
+  SkinnedContactSums(int numSlicesIn, bool assemForce, bool assemDForce, Allocator* allocator)
+      : numSlices(numSlicesIn),
+        force(allocator),
+        torque(allocator),
+        dForce(allocator),
+        skewBDForce(allocator),
+        skewADForce(allocator),
+        skewDForceSkew(allocator) {
+    if (assemForce) {
+      force.resize(numSlices, Vec4r{});
+      torque.resize(numSlices, Vec4r{});
+    }
+    if (assemDForce) {
+      int const numPairs = NumPairs(numSlices);
+      dForce.resize(numPairs, VMatrix3x3r{});
+      skewBDForce.resize(numPairs, VMatrix3x3r{});
+      skewADForce.resize(numPairs, VMatrix3x3r{});
+      skewDForceSkew.resize(numPairs, VMatrix3x3r{});
+    }
+  }
+
+  /** @brief Number of slice pairs a <= b. */
+  [[nodiscard]] static int NumPairs(int numSlices) {
+    return numSlices * (numSlices + 1) / 2;
+  }
+
+  /** @brief Index of the slice pair (a, b), with a <= b, in the pair arrays. */
+  [[nodiscard]] int PairIndex(int a, int b) const {
+    MOCHI_ASSERT_VERBOSE(0 <= a && a <= b && b < numSlices);
+    return a * numSlices - a * (a - 1) / 2 + (b - a);
+  }
+};
+
+/**
+ * @brief Compute the @ref SkinnedContactSums of a range of contact points, without storing their
+ * per-point collision response.
+ *
+ * @details Equivalent to summing the per-point response of @ref ComputeCollisionResponseRange
+ * at @ref GradTarget::Current multiplied by the slices, but faster. Other gradient targets and
+ * collider integration weights are not supported.
+ *
+ * @param[in] pointRange Range of contact points in @p contactQuery.
+ * @param[in] contactQuery Contact detection result.
+ * @param[in] params Contact parameters.
+ * @param[in] config Contact evaluation configuration.
+ * @param[in] dtStage Time step factor of the stage.
+ * @param[in] weights Weights of the contact samples, indexed by @ref
+ * ContactDetectionResult::sampleIndices.
+ * @param[in] slices Jacobian slices. Every sample in @p pointRange must have one point per bone.
+ * @param[in] assemEnergy Whether to compute @ref SkinnedContactSums::energy.
+ * @param[in] assemForce Whether to compute @ref SkinnedContactSums::force and @ref
+ * SkinnedContactSums::torque.
+ * @param[in] assemDForce Whether to compute the force derivative sums.
+ * @param[in] scratch FILO allocator for the returned sums and for temporary data.
+ * @param[out] outForce Optional collision forces of the contact points, as computed by @ref
+ * ComputeCollisionResponseRange. Indexed like the contact points; only @p pointRange is written.
+ * Requires @p assemForce.
+ * @return The sums, allocated from @p scratch.
+ */
+SkinnedContactSums ComputeSkinnedContactSums(
+    Interval<int> pointRange,
+    ContactDetectionResult const& contactQuery,
+    ContactParams const& params,
+    ContactEvalConfig const& config,
+    real dtStage,
+    Span<real const> weights,
+    SkinnedContactSlices const& slices,
+    bool assemEnergy,
+    bool assemForce,
+    bool assemDForce,
+    Allocator* scratch,
+    Span<Real3> outForce = {});
 
 /*************************************************************************************************/
 
@@ -1308,10 +1650,8 @@ class MeshColliderBvh {
 
   explicit MeshColliderBvh(std::shared_ptr<TriangularMesh const> const& mesh) : _mesh(mesh) {}
 
-  virtual ~MeshColliderBvh() = default;
-
   /** @brief Initialize the internal data structures. */
-  virtual void Initialize(bool allowRefitting = false) {
+  void Initialize() {
     MOCHI_PROFILE_SCOPE();
     MOCHI_ASSERT_VERBOSE(_mesh != nullptr, "Invalid collider _mesh pointer");
 
@@ -1319,32 +1659,20 @@ class MeshColliderBvh {
     _halfEdge = _mesh->GenerateHalfEdgeStructure();
     bool closed = mochi::IsMeshClosed(_halfEdge);
     if (!closed) {
-      // If refitting is not allowed, we can try to stitch the mesh. In this way, the MeshCollider
-      // supports meshes with vertex multiplicity. This is useful for the generation of SDFs for
-      // rigid actors.
-      if (!allowRefitting) {
-        if (auto stitchedMesh = TriangularMeshFromClusteredVertices(
-                _mesh->GetNodeCoordinates(), _mesh->GetElementConnectivity())) {
-          _mesh = std::move(stitchedMesh);
-          _halfEdge = _mesh->GenerateHalfEdgeStructure();
-          closed = mochi::IsMeshClosed(_halfEdge);
-        }
+      // Try to stitch the mesh. In this way, the MeshCollider supports meshes with vertex
+      // multiplicity. This is useful for the generation of SDFs for rigid actors.
+      if (auto stitchedMesh = TriangularMeshFromClusteredVertices(
+              _mesh->GetNodeCoordinates(), _mesh->GetElementConnectivity())) {
+        _mesh = std::move(stitchedMesh);
+        _halfEdge = _mesh->GenerateHalfEdgeStructure();
+        closed = mochi::IsMeshClosed(_halfEdge);
       }
     }
     _isMeshClosed = closed;
 
     // Initialize node coordinates and primitive normals.
-    if (allowRefitting) {
-      _deformedNodeCoordinates = {
-          _mesh->GetNodeCoordinates().begin(), _mesh->GetNodeCoordinates().end()};
-      _deformedElementNormals = {
-          _mesh->GetElementNormals().begin(), _mesh->GetElementNormals().end()};
-      _nodeCoordinates = _deformedNodeCoordinates;
-      _elementNormals = _deformedElementNormals;
-    } else {
-      _nodeCoordinates = _mesh->GetNodeCoordinates();
-      _elementNormals = _mesh->GetElementNormals();
-    }
+    _nodeCoordinates = _mesh->GetNodeCoordinates();
+    _elementNormals = _mesh->GetElementNormals();
     _nodeNormals.resize(_mesh->GetNumNodes());
     _edgeNormals.resize(_mesh->GetNumEdges());
     _mesh->ComputeNodeNormals(_nodeCoordinates, _elementNormals, _nodeNormals);
@@ -1378,26 +1706,6 @@ class MeshColliderBvh {
     return _halfEdge;
   }
 
-  // Dynamic refit function. Virtual to allow other implementations in subclasses.
-  virtual void Refit(ColumnVectorView<real const> displacements, Error& error) {
-    MOCHI_ERROR_RETURN(error);
-
-    MOCHI_ERROR_IF(
-        _deformedNodeCoordinates.empty(),
-        error,
-        "Trying to refit MeshCollider created with allowRefitting = false");
-    MOCHI_ERROR_RETURN(error);
-
-    MOCHI_ASSERT(
-        displacements.size() == 3 * _nodeCoordinates.size(),
-        "Size of displacements does not match mesh");
-    _nodeDisplacements = Unflatten<Real3 const>(displacements);
-
-    RefitGeometry();
-
-    _bvhTree->Refit();
-  }
-
   // Main collision detection query
   bool QueryPoint(
       Vec4r position,
@@ -1407,13 +1715,6 @@ class MeshColliderBvh {
       Vec4r& outSdfGrad) const;
 
  protected:
-  void RefitGeometry() {
-    _mesh->ComputeNodeCoordinates(_nodeDisplacements, _deformedNodeCoordinates);
-    _mesh->ComputeElementNormals(_deformedNodeCoordinates, _deformedElementNormals);
-    _mesh->ComputeNodeNormals(_deformedNodeCoordinates, _deformedElementNormals, _nodeNormals);
-    _mesh->ComputeEdgeNormals(_halfEdge, _deformedElementNormals, _edgeNormals);
-  }
-
   int FindClosestFaceBruteForce(Vec4r position, real& outDistSqr) const;
 
   // Source information.
@@ -1426,19 +1727,12 @@ class MeshColliderBvh {
       _bvhTreeObject; // unique_ptr is used here because bvhTree points to bvhTreeObject. If this
                       // MeshCollider is move constructed, the two members still need to point to
                       // each other.
-  Span<Real3 const> _nodeCoordinates; // Points to _deformedNodeCoordinates if the collider is
-                                      // refit, and to _mesh->GetNodeCoordinates() otherwise.
-  Span<Real3 const> _elementNormals; // Points to _deformedElementNormals if the collider is refit,
-                                     // and to _mesh->GetElementNormals() otherwise.
+  Span<Real3 const> _nodeCoordinates; // Points to _mesh->GetNodeCoordinates().
+  Span<Real3 const> _elementNormals; // Points to _mesh->GetElementNormals().
   std::vector<Real3> _nodeNormals;
   std::vector<Real3> _edgeNormals;
   bool _initialized = false;
   bool _isMeshClosed = true;
-
-  // Dynamic information
-  Span<Real3 const> _nodeDisplacements; // Points to an external container.
-  std::vector<Real3> _deformedNodeCoordinates; // Reserved only upon refitting.
-  std::vector<Real3> _deformedElementNormals; // Reserved only upon refitting.
 };
 
 using MeshCollider = MeshColliderBvh<Aabb>;
@@ -1517,8 +1811,13 @@ inline void FindPointContactsParallel(
     return;
   }
 
-  // If we don't have enough points for multiple tasks, then forward to FindPointContactsT.
-  if (isize(points) <= minPointsPerTask) {
+  int const numOtherThreads = TaskScheduler::StaticGetNumOtherThreads();
+  int const maxTasks = 2 * (1 + numOtherThreads);
+  int const numTasks = Clamp(isize(points) / minPointsPerTask, 1, maxTasks);
+  MOCHI_ASSERT_VERBOSE(numTasks >= 1);
+
+  // If parallel execution is unavailable or unnecessary, forward to FindPointContactsT.
+  if (numOtherThreads == 0 || numTasks == 1) {
     FindPointContactsT(
         points,
         collider,
@@ -1530,10 +1829,6 @@ inline void FindPointContactsParallel(
         outIsSdfGradUnitary);
     return;
   }
-
-  int maxTasks = 2 * (1 + TaskScheduler::StaticGetNumOtherThreads());
-  int numTasks = Clamp(isize(points) / minPointsPerTask, 1, maxTasks);
-  MOCHI_ASSERT_VERBOSE(numTasks >= 1);
 
   // Show the scope name in the profiler if we're actually doing parallel work
   MOCHI_PROFILE_SCOPE();

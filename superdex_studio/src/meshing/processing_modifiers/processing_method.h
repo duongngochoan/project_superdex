@@ -27,6 +27,7 @@
 // (enums serialize as their string names, keeping the files human-readable/editable).
 
 #include <mochi_core/geometry/mesh_data.h>
+#include <mochi_core/utils/dynamic_string.h>
 #include <mochi_core/utils/error.h>
 #include <mochi_core/utils/nd_array.h>
 #include <mochi_core/utils/quaternion.h>
@@ -38,6 +39,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -47,9 +49,6 @@ class value;
 } // namespace picojson
 
 namespace superdex::studio {
-
-class SuperDexStudio;
-class AssetManager;
 
 // Everything a method's Run may need beyond its own params and input, supplied by the editor.
 struct ModifierRunContext {
@@ -67,12 +66,49 @@ struct ModifierRunContext {
 // Hover-tooltip helper injected by the editor so a method can annotate its widgets consistently.
 using ModifierTooltip = std::function<void(char const*)>;
 
-// GUI services a method may need to render its parameters (asset slots for file sources / exports,
-// the reference dropdown for edge flip). Most methods use only `tooltip`.
+// The model types a source method's own file slot can hold.
+enum class ModelSlotType { CadModel, RenderModel, MochiModel };
+
+// The app's widgets and services, for the methods whose parameters need more than Dear ImGui. The
+// editor implements it; without the app ModifierGuiContext::host is null and methods leave those
+// widgets out.
+class ModifierHost {
+ public:
+  virtual ~ModifierHost() = default;
+
+  // Asset slot showing and accepting a model file of @p type, bound to @p path.
+  virtual void ModelSlot(char const* id, mochi::DynamicString& path, ModelSlotType type) = 0;
+  // Native save dialog opened at @p defaultPath. Returns the chosen path, or empty on cancel.
+  virtual std::string SaveFileDialog(
+      char const* title,
+      std::span<char const* const> filters,
+      char const* filterDescription,
+      std::string const& defaultPath) = 0;
+  // Editor for every field of the reflected struct at @p value. Returns true when a field changed.
+  virtual bool ReflectedStruct(SReflect::StructTypeInfo const& type, void* value) = 0;
+  // Per-axis drag for @p value, moving @p speed per pixel and shown with the printf @p format, and
+  // a rotation + translation editor. Return true on change.
+  virtual bool DragXYZ(char const* label, mochi::Real3& value, float speed, char const* format) = 0;
+  virtual bool
+  DragTransformRT(char const* label, mochi::Quaternion& rotation, mochi::Real3& translation) = 0;
+  // The stable color the app derives from a file path, so a default matches the models' colors.
+  virtual mochi::Real3 PathColor(std::string_view path) = 0;
+  // Runs @p work on a worker thread behind the app's progress modal, then @p onDone on the main
+  // thread. Returns false when no task could start.
+  virtual bool RunBackgroundTask(
+      char const* title,
+      char const* label,
+      std::function<bool()> work,
+      std::function<void()> onDone) = 0;
+  // True while a background task is running; only one runs at a time.
+  virtual bool IsBackgroundTaskRunning() const = 0;
+};
+
+// What the editor hands each method's ShowParams. Methods draw with Dear ImGui and reach the app
+// only through @ref host, so they never depend on it.
 struct ModifierGuiContext {
   ModifierTooltip tooltip;
-  SuperDexStudio* studio = nullptr;
-  AssetManager const* assetManager = nullptr;
+  ModifierHost* host = nullptr;
   // File path of the stack's first (source) modifier, used to pre-populate export default paths.
   std::string sourceFilePath;
   // Folder of the model this editor was opened for. Used only as the Browse dialog's starting point
@@ -141,9 +177,10 @@ class MeshProcessingMethod {
 
   // JSON (de)serialization of this method's parameters. ReflectedMethod implements these from a
   // reflected Props struct; the unknown-placeholder method implements them by hand to round-trip
-  // raw captured data.
+  // raw captured data. DeserializeProps returns how many fields and values of @p in it could not
+  // read (unknown fields and enum values, values of the wrong type), which keep their defaults.
   virtual void SerializeProps(picojson::value& out) const = 0;
-  virtual void DeserializeProps(picojson::value const& in) = 0;
+  virtual int DeserializeProps(picojson::value const& in) = 0;
   // A compact string encoding every parameter that affects this method's output, used by the
   // editor's generation cascade to detect changes. @p ctx lets source methods fold in their
   // external inputs (slotted file path / CAD transform).
@@ -201,6 +238,9 @@ class MeshProcessingMethod {
   // never serialized (see SerializeProps on the export methods), so it cannot dirty the saved
   // snapshot or a future undo/redo state no matter how often it moves.
   virtual void RefreshAutoExportPath(std::string const& /*sourceFilePath*/) {}
+  // Points the export at @p path instead of this method's own setting, turning Auto off. Used to
+  // collect a headless run's exports in one folder; not serialized unless the pipeline is saved.
+  virtual void OverrideExportPath(std::string const& /*path*/) {}
   // Optional override for the color the editor shows this method's output surface with. Most
   // methods return nullopt (the editor derives a hashed stage color); the Export Mesh File method
   // returns its configured material color so its viewport preview matches the color it will write.
@@ -238,9 +278,10 @@ class ReflectedMethod : public MeshProcessingMethod {
   void SerializeProps(picojson::value& out) const override {
     SReflect::ToJsonValue(_props, out);
   }
-  void DeserializeProps(picojson::value const& in) override {
+  int DeserializeProps(picojson::value const& in) override {
     int numIssues = 0;
     SReflect::FromJsonValue(_props, in, SReflect::DeserializeFlags::Default, numIssues);
+    return numIssues;
   }
   std::string PropsSignature(ModifierRunContext const& /*ctx*/) const override {
     return SReflect::ToJsonString(_props, /*pretty=*/false);

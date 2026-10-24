@@ -57,10 +57,9 @@ inline void TransformBatch(
   MOCHI_ASSERT_VERBOSE(input.Rows() == output.Rows());
   MOCHI_ASSERT_VERBOSE(input.Rows() % RigidSize::kDim == 0);
   MOCHI_ASSERT_VERBOSE(IsUnique(nodesSubset));
-  if (input.Rows() == 0)
-    MOCHI_UNLIKELY {
-      return;
-    }
+  if (input.Rows() == 0) MOCHI_UNLIKELY {
+    return;
+  }
 
   // Full transform (postTransform * transform * preTransform)^T
   auto preTransformT = ToVMatrix4x4Transpose(preTransform);

@@ -23,6 +23,8 @@
 #include "mochi_ecs_utils.h"
 #include "mochi_island.h"
 #include "mochi_rod.h"
+#include "mochi_scene.h"
+#include "mochi_sleep.h"
 #include "mochi_soft_rom_systems.h"
 
 #include <mochi_core/linear_algebra/krylov_interop.h>
@@ -41,13 +43,11 @@
 
 namespace mochi {
 
-static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& data, Error& error);
-
 SceneRecorder::SceneRecorder(
     std::unique_ptr<GroupWriter> writer,
-    entt::registry& registry,
-    RecordingParams const& params)
-    : _registry(registry), _writer(std::move(writer)), _params(params) {
+    SceneImpl& scene,
+    experimental::RecordingParams const& params)
+    : _scene(scene), _registry(scene.GetRegistry()), _writer(std::move(writer)), _params(params) {
   // Create a scope called "events" at the root of the file. Every new event will be added as a
   // sub-group. Note that groups can remember the order in which their members were created, so they
   // can be iterated in the same order later. The root of an HDF5 file does not appear to have this
@@ -66,6 +66,9 @@ SceneRecorder::SceneRecorder(
   // Show that recording is enabled by adding a tag to the global ECS context
   _registry.set<TagSceneRecordingEnabled>();
   _registry.set<CRecordingParams>(_params);
+
+  // Sleeping islands are not recorded, so no island sleeps while recording.
+  sleep::WakeAll(_registry);
 }
 
 SceneRecorder::~SceneRecorder() {
@@ -129,17 +132,18 @@ void SceneRecorder::OnCreateActor(entt::registry& reg, entt::entity e) {
     constexpr bool kComputeImmediately = false;
     if (_params.recordContactPoints) {
       Error ignore; // Some actors may not support this query. Just skip it.
-      auto query = RegisterQuery(reg, e, QueryType::ContactPoints, kComputeImmediately, ignore);
+      auto query = _scene.RegisterQuery(e, QueryType::ContactPoints, kComputeImmediately, ignore);
       _queries.emplace_back(e, query);
     }
     if (_params.recordNodeContactForces) {
       Error ignore; // Some actors may not support this query. Just skip it.
-      auto query = RegisterQuery(reg, e, QueryType::NodeContactForces, kComputeImmediately, ignore);
+      auto query =
+          _scene.RegisterQuery(e, QueryType::NodeContactForces, kComputeImmediately, ignore);
       _queries.emplace_back(e, query);
     }
     if (_params.recordSdfDistances) {
       Error ignore; // Some actors may not support this query. Just skip it.
-      auto query = RegisterQuery(reg, e, QueryType::SdfDistances, kComputeImmediately, ignore);
+      auto query = _scene.RegisterQuery(e, QueryType::SdfDistances, kComputeImmediately, ignore);
       _queries.emplace_back(e, query);
     }
   }
@@ -269,9 +273,7 @@ void SceneRecorder::AddCreateActorEvents() {
         MOCHI_ASSERT(refPos.size() % 3 == 0);
         size_t const posDims[2] = {refPos.size() / 3, 3};
         _writer->AddDataSet("surfRefPositions", refPos, MakeSpan(posDims), _error);
-      }
-
-      if (auto const* polylineMesh = _registry.try_get<CPolylineMesh>(e)) {
+      } else if (auto const* polylineMesh = _registry.try_get<CPolylineMesh>(e)) {
         int const numNodes = isize(polylineMesh->nodes);
 
         // For rod actors, all nodes are "surface" nodes
@@ -329,25 +331,6 @@ void SceneRecorder::AddCreateActorEvents() {
             "elementOffsets", local2Global->GetElementOffsets(), elementOffsetsDim, _error);
       }
     }
-
-    if (_params.recordActorMassMatrix) {
-      auto const* massMatrix = _registry.try_get<CMassMatrix const>(e);
-      auto const* fullSparsity = _registry.try_get<CFullSparsityPattern const>(e);
-      if (massMatrix && fullSparsity) {
-        int numRows = fullSparsity->graph.size();
-        int numCols = numRows;
-        CRecordingData massMatrixRecording;
-        RecordDatasetSparseMatrixCSR<real>(
-            "massMatrix",
-            numRows,
-            numCols,
-            fullSparsity->graph.GetPointers(),
-            fullSparsity->graph.GetTargets(),
-            MakeConstSpan(massMatrix->values),
-            massMatrixRecording);
-        WriteActorRecordingData(*_writer, massMatrixRecording, _error);
-      }
-    }
   }
 
   _createdActors.clear();
@@ -379,25 +362,23 @@ static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& d
   enum class DataPass { GlobalAttributes, Rest };
 
   // Returns true if we should write the given entry during the pass
-  auto passFilter = [](DataPass pass, std::string const& name, CRecordingData::Entry const& entry) {
-    bool isGlobalAttrib = entry.isAttribute && (name.find_first_of('/') == std::string::npos);
+  auto passFilter = [](DataPass pass, CRecordingData::Entry const& entry) {
     switch (pass) {
       case DataPass::GlobalAttributes: {
-        return isGlobalAttrib;
+        return entry.isAttribute;
       }
       default: {
-        return !isGlobalAttrib;
+        return !entry.isAttribute;
       }
     }
   };
 
   // Writes a single pass
   auto writeDataPass = [&](DataPass pass) {
-    std::string prevDatasetName;
     // Iterate over the entries in alphabetically sorted order.
     for (auto const& [name, entry] : data.entries) {
       // Only write things that we need to write during this pass
-      if (passFilter(pass, name, entry)) {
+      if (passFilter(pass, entry)) {
         // Get the value size from the type enum
         size_t valueSize = 0;
         switch (entry.type) {
@@ -430,22 +411,6 @@ static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& d
             (entry.dims.size() <= 1) || !entry.isAttribute,
             "Multi-dimensional attribute data not supported. Must be a data set instead.");
 
-        std::string datasetName = entry.isAttribute ? "" : name;
-        std::string attributeName = entry.isAttribute ? name : "";
-
-        // If the name contains a slash, then it must be of the form
-        // "<dataset_name>/<attribute_name>". Since entries are enumerated in sorted order, these
-        // attributes should come immediately after the dataset that they describe.
-        auto slash = name.find_first_of('/');
-        if (slash != std::string::npos) {
-          MOCHI_ASSERT(
-              entry.isAttribute,
-              "Only attributes are allowed to contains a forward slash character");
-          datasetName = name.substr(0, slash);
-          attributeName = name.substr(slash + 1);
-          MOCHI_ASSERT(prevDatasetName == datasetName, "Dataset not found for attribute");
-        }
-
         // The number of values stored in the byte array
         size_t const valueCount = isize(entry.data) / valueSize;
 
@@ -454,13 +419,10 @@ static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& d
           case CRecordingData::Type::Double:
             if (entry.isAttribute) {
               writer.AddAttribute(
-                  attributeName,
-                  reinterpret_cast<double const*>(entry.data.data()),
-                  valueCount,
-                  error);
+                  name, reinterpret_cast<double const*>(entry.data.data()), valueCount, error);
             } else {
               writer.AddDataSet(
-                  datasetName,
+                  name,
                   Span{reinterpret_cast<double const*>(entry.data.data()), valueCount},
                   Span{entry.dims.data(), entry.dims.size()},
                   error);
@@ -469,13 +431,10 @@ static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& d
           case CRecordingData::Type::Float:
             if (entry.isAttribute) {
               writer.AddAttribute(
-                  attributeName,
-                  reinterpret_cast<float const*>(entry.data.data()),
-                  valueCount,
-                  error);
+                  name, reinterpret_cast<float const*>(entry.data.data()), valueCount, error);
             } else {
               writer.AddDataSet(
-                  datasetName,
+                  name,
                   Span{reinterpret_cast<float const*>(entry.data.data()), valueCount},
                   Span{entry.dims.data(), entry.dims.size()},
                   error);
@@ -484,13 +443,10 @@ static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& d
           case CRecordingData::Type::Int:
             if (entry.isAttribute) {
               writer.AddAttribute(
-                  attributeName,
-                  reinterpret_cast<int const*>(entry.data.data()),
-                  valueCount,
-                  error);
+                  name, reinterpret_cast<int const*>(entry.data.data()), valueCount, error);
             } else {
               writer.AddDataSet(
-                  datasetName,
+                  name,
                   Span{reinterpret_cast<int const*>(entry.data.data()), valueCount},
                   Span{entry.dims.data(), entry.dims.size()},
                   error);
@@ -499,8 +455,6 @@ static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& d
           default:
             break;
         }
-
-        prevDatasetName = std::move(datasetName);
       }
     }
   };
@@ -514,7 +468,7 @@ static void WriteActorRecordingData(GroupWriter& writer, CRecordingData const& d
 static void WriteActorStepEvent(
     GroupWriter& writer,
     std::optional<GroupWriter::ScopeGuard>& actorListScope,
-    RecordingParams const& params,
+    experimental::RecordingParams const& params,
     entt::registry const& reg,
     entt::entity e,
     CActorInfo const& info,

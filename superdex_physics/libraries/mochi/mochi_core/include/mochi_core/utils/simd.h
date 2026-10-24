@@ -209,85 +209,93 @@ using Vec8f = Simd<float, 8>;
 using Vec8i = Simd<int, 8>;
 using Vec8l = Simd<int64_t, 8>;
 using Vec8r = Simd<real, 8>;
+using Vec16d = Simd<double, 16>;
+using Vec16f = Simd<float, 16>;
+using Vec16i = Simd<int, 16>;
+using Vec16l = Simd<int64_t, 16>;
+using Vec16r = Simd<real, 16>;
 
 // clang-format off
 /***********************************************************************************************
                      Native SIMD Function Support Matrix (please keep up-to-date)
-                     Functions supporting Simd<T, N> also support Simd<T, MultipleOfN>
+                     Functions supporting Simd<T, N> also support composable wider sizes when
+                     every native component supports the function.
 
-                     For Simd<Half, N> (Vec8h, Vec16h), include half.h.
+                     For Simd<Half, N> (Vec8h, Vec16h, Vec32h), include half.h.
 
 ************************************************************************************************
 
-                     | Vec2d | Vec2l | Vec4d | Vec4f | Vec4i | Vec4l | Vec8f | Vec8i | Vec8h | Vec16h |
-                 Abs | x     |       | x     | x     |       |       | x     |       |       |        |
-                ACos | x     |       | x     | x     |       |       | x     |       |       |        |
-             AllTrue | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-             AnyTrue | x     |       | x     | x     | x     |       | x     | x     | x     | x      |
-                ASin | x     |       | x     | x     |       |       | x     |       |       |        |
-                ATan | x     |       | x     | x     |       |       | x     |       |       |        |
-               Blend | x     | x     | x     | x     | x     |       |       |       |       |        |
-           Broadcast | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-               Clamp | x     |       | x     | x     |       |       | x     |       |       |        |
-                 Cos | x     |       | x     | x     |       |       | x     |       |       |        |
-              Cross3 |       |       | x     | x     |       |       |       |       |       |        |
-                 Dot | x     |       | x     | x     |       |       | x     |       |       |        |
-            (V)Equal | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-                 Exp | x     |       | x     | x     |       |       | x     |       |       |        |
-           FastRound | x     |       | x     | x     |       |       | x     |       |       |        |
-               Floor | x     |       | x     | x     |       |       | x     |       |       |        |
-                 Get | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-                Get0 | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-             GetHalf |       |       | x     |       |       | x     | x     | x     |       | x      |
-                HMax | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-                HMin | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-               HProd | x     |       | x     | x     |       |       |       |       |       |        |
-                HSum | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-         (V)IsFinite | x     |       | x     | x     |       |       | x     |       |       |        |
-              IsTrue | x     |       | x     | x     | x     |       | x     | x     |       |        |
-                Lerp | x     |       | x     | x     |       |       | x     |       |       |        |
-                  Ln | x     |       | x     | x     |       |       | x     |       |       |        |
-                Load | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-         LoadIndexed | x     |       | x     | x     |       |       | x     |       |       |        |
-      LoadTransposed | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-                 Max | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-                 Min | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-              MulAdd | x     |       | x     | x     |       |       | x     |       |       |        |
-              MulSub | x     |       | x     | x     |       |       | x     |       |       |        |
-        (V)NearEqual | x     |       | x     | x     |       |       | x     |       |       |        |
-         (V)NearZero | x     |       | x     | x     |       |       | x     |       |       |        |
-       Neg (4 bools) |       |       | x     | x     |       |       |       |       |       |        |
-           NegMulAdd | x     |       | x     | x     |       |       | x     |       |       |        |
-           NegMulSub | x     |       | x     | x     |       |       | x     |       |       |        |
-             (V)Norm | x     |       | x     | x     |       |       | x     |       |       |        |
-           Normalize | x     |       | x     | x     |       |       | x     |       |       |        |
-         (V)NotEqual | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-   OrthogonalVector3 |       |       | x     | x     |       |       |       |       |       |        |
-           RcpApprox | x     |       | x     | x     |       |       | x     |       |       |        |
-       RcpSqrtApprox | x     |       | x     | x     |       |       | x     |       |       |        |
-              Select | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-                 Set | x     |       | x     | x     | x     |       | x     | x     |       |        |
-            Sequence |       | x     |       |       | x     | x     |       | x     |       |        |
-          ShiftRight |       | x     |       |       | x     | x     |       | x     |       |        |
-     Shuffle (1 arg) | x     | x     | x     | x     | x     | x     |       |       |       |        |
-     Shuffle (2 arg) |       |       | x     | x     | x     | x     |       |       |       |        |
-                Sign | x     |       | x     | x     |       |       | x     |       |       |        |
-          SignedSqrt | x     |       | x     | x     |       |       | x     |       |       |        |
-     SimdBasisVector |       |       | x     | x     |       |       |       |       |       |        |
-            SimdMask | x     |       | x     | x     | x     |       | x     | x     |       |        |
-            SimdZero | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-                 Sin | x     |       | x     | x     |       |       | x     |       |       |        |
-              SinCos | x     |       | x     | x     |       |       | x     |       |       |        |
-                 Sqr | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-                Sqrt | x     |       | x     | x     |       |       |       |       |       |        |
-               Store | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      |
-       StoreSelected | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-     StoreTransposed | x     | x     | x     | x     | x     | x     | x     | x     |       |        |
-                 Tan | x     |       | x     | x     |       |       | x     |       |       |        |
-                Tanh | x     |       | x     | x     |       |       | x     |       |       |        |
-              ToSimd | x     |       | x     | x     | x     |       | x     | x     |       |        |
-     ToSimdDirection |       |       | x     | x     |       |       |       |       |       |        |
-         ToSimdPoint |       |       | x     | x     |       |       |       |       |       |        |
+                     | Vec2d | Vec2l | Vec4d | Vec4f | Vec4i | Vec4l | Vec8d | Vec8f | Vec8h | Vec8i | Vec8l | Vec16f | Vec16h | Vec16i | Vec32h |
+                 Abs | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                ACos | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+             AllTrue | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+             AnyTrue | x     |       | x     | x     | x     |       | x     | x     | x     | x     |       | x      | x      | x      | x      |
+                ASin | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                ATan | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+               Blend | x     | x     | x     | x     | x     |       |       |       |       |       |       |        |        |        |        |
+           Broadcast | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+               Clamp | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                 Cos | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+              Cross3 |       |       | x     | x     |       |       |       |       |       |       |       |        |        |        |        |
+                 Dot | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+            (V)Equal | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+                 Exp | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+           FastRound | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+               Floor | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                 Get | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+                Get0 | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+             GetHalf |       |       | x     |       |       | x     | x     | x     |       | x     | x     | x      | x      | x      | x      |
+                HMax | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+                HMin | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+               HProd | x     |       | x     | x     |       |       | x     |       |       |       |       |        |        |        |        |
+                HSum | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+            HSumEach | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+         (V)IsFinite | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+              IsTrue | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+                Lerp | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                  Ln | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                Load | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+         LoadIndexed | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+      LoadTransposed | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+                 Max | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+                 Min | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+              MulAdd | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+              MulSub | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+        (V)NearEqual | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+         (V)NearZero | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+       Neg (4 bools) |       |       | x     | x     |       |       |       |       |       |       |       |        |        |        |        |
+           NegMulAdd | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+           NegMulSub | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+             (V)Norm | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+           Normalize | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+            NotEqual | x     |       | x     | x     | x     |       | x     | x     | x     | x     |       | x      | x      | x      | x      |
+           VNotEqual | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+   OrthogonalVector3 |       |       | x     | x     |       |       |       |       |       |       |       |        |        |        |        |
+           RcpApprox | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+       RcpSqrtApprox | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+              Select | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+                 Set | x     |       | x     | x     | x     |       | x     | x     |       | x     |       | x      |        | x      |        |
+            Sequence |       | x     |       |       | x     | x     |       |       |       | x     | x     |        |        | x      |        |
+          ShiftRight |       | x     |       |       | x     | x     |       |       |       | x     | x     |        |        | x      |        |
+     Shuffle (1 arg) | x     | x     | x     | x     | x     | x     |       |       |       |       |       |        |        |        |        |
+     Shuffle (2 arg) |       |       | x     | x     | x     | x     |       |       |       |       |       |        |        |        |        |
+                Sign | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+          SignedSqrt | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+     SimdBasisVector |       |       | x     | x     |       |       |       |       |       |       |       |        |        |        |        |
+            SimdMask | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+            SimdZero | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+                 Sin | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+              SinCos | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                 Sqr | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+                Sqrt | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+               Store | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x     | x      | x      | x      | x      |
+       StoreSelected | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+     StoreTransposed | x     | x     | x     | x     | x     | x     | x     | x     |       | x     | x     | x      |        | x      |        |
+                 Tan | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+                Tanh | x     |       | x     | x     |       |       | x     | x     |       |       |       | x      |        |        |        |
+              ToSimd |       |       | x     | x     | x     | x     |       |       |       |       |       |        |        |        |        |
+     ToSimdDirection |       |       | x     | x     |       |       |       |       |       |       |       |        |        |        |        |
+         ToSimdPoint |       |       | x     | x     |       |       |       |       |       |       |       |        |        |        |        |
 
 ***********************************************************************************************/
 // clang-format on
@@ -347,11 +355,11 @@ MOCHI_ANY MOCHI_FORCE_INLINE V ToSimdDirection(V a);
 template <class V, MOCHI_CONCEPT(IsSimd<V>)>
 MOCHI_ANY MOCHI_FORCE_INLINE V Load(typename V::Scalar const* ptr);
 
-// Read N scalars from the specified address into a vector.
+// Read N scalars from the specified address into a vector. Lanes [N, V::kSize) are zero.
 template <int N, class V, MOCHI_CONCEPT(IsSimd<V>)>
 MOCHI_ANY MOCHI_FORCE_INLINE V Load(typename V::Scalar const* ptr);
 
-// Read n scalars from the specified address into a vector.
+// Read n scalars from the specified address into a vector. Lanes [n, V::kSize) are zero.
 // Prefer Load<N, V> if the number is a constexpr.
 template <class V, MOCHI_CONCEPT(IsSimd<V>)>
 MOCHI_ANY MOCHI_FORCE_INLINE V Load(typename V::Scalar const* ptr, int n);
@@ -363,7 +371,7 @@ MOCHI_ANY MOCHI_FORCE_INLINE V
 LoadIndexed(typename V::Scalar const* ptr, Simd<I, V::kSize> indices);
 
 // Load (kTupleCount * 3) values from memory. Deinterleave into 3 output vectors.
-// By default (kTupleCount == N).
+// By default (kTupleCount == N). Lanes [kTupleCount, N) are zero.
 //
 // If the memory order was:
 //    {x0, y0, z0, x1, y1, z1, x2, y2, z2, x3, y3, z3}
@@ -375,6 +383,13 @@ template <int kTupleCount = -1, class T, int N>
 MOCHI_ANY MOCHI_FORCE_INLINE void
 LoadTransposed(T const* ptr, Simd<T, N>& out0, Simd<T, N>& out1, Simd<T, N>& out2);
 
+// Load (count * 3) values from memory, deinterleaved like LoadTransposed<kTupleCount>, for a
+// runtime count in [0, N]. Lanes [count, N) are zero. Prefer LoadTransposed<kTupleCount> if the
+// count is a constexpr.
+template <class T, int N>
+MOCHI_ANY MOCHI_FORCE_INLINE void
+LoadTransposed(T const* ptr, Simd<T, N>& out0, Simd<T, N>& out1, Simd<T, N>& out2, int count);
+
 // Return the first component of a vector (e.g. a[0])
 template <class T, int N>
 MOCHI_ANY MOCHI_FORCE_INLINE T Get0(Simd<T, N> v);
@@ -382,10 +397,6 @@ MOCHI_ANY MOCHI_FORCE_INLINE T Get0(Simd<T, N> v);
 // Return the ith component of a vector (e.g a[i]), when the index is a constexpr
 template <int i, class T, int N>
 MOCHI_ANY MOCHI_FORCE_INLINE T Get(Simd<T, N> v);
-
-// Return the ith component of a vector (e.g. a[i]).
-template <class T, int N>
-MOCHI_ANY MOCHI_FORCE_INLINE T Get(Simd<T, N> v, int i);
 
 // Return the low or high half of a vector via GetHalf<0>(a) or GetHalf<1>(a)
 template <int iHalf, class T, int N>
@@ -443,6 +454,12 @@ MOCHI_ANY MOCHI_FORCE_INLINE int StoreSelected(T* ptr, Simd<MaskT, N> condition,
 template <int kTupleCount = -1, class T, int N>
 MOCHI_ANY MOCHI_FORCE_INLINE void StoreTransposed(T* ptr, Simd<T, N> a, Simd<T, N> b, Simd<T, N> c);
 
+// Store (count * 3) values to memory, interleaved like StoreTransposed<kTupleCount>, for a runtime
+// count in [0, N]. Prefer StoreTransposed<kTupleCount> if the count is a constexpr.
+template <class T, int N>
+MOCHI_ANY MOCHI_FORCE_INLINE void
+StoreTransposed(T* ptr, Simd<T, N> a, Simd<T, N> b, Simd<T, N> c, int count);
+
 // Return result[i] = conditionalMask[i] ? a[i] : b[i]
 // where conditionMask[i] is 0x00000000 (false) or 0xFFFFFFFF (true).
 // Example: Select(a <= b, a, b) is equivalent to Min(a, b)
@@ -450,9 +467,11 @@ template <class T, int N, class MaskT>
 MOCHI_ANY MOCHI_FORCE_INLINE Simd<T, N>
 Select(Simd<MaskT, N> conditionMask, Simd<T, N> a, Simd<T, N> b);
 
-// Special bit shift operations
+// Return a right-shifted integer vector.
+// Signed integer vectors use arithmetic/sign-extending right shift.
+// Unsigned integer vectors are not currently supported.
 template <int kShift, class T, int N>
-MOCHI_ANY MOCHI_FORCE_INLINE Simd<T, N> ShiftRight(Simd<T, N> a); // return (a >> kShift)
+MOCHI_ANY MOCHI_FORCE_INLINE Simd<T, N> ShiftRight(Simd<T, N> a);
 
 // Shuffle elements in a vector. Returns: {a[i0], a[i1], ... }
 template <int x = 0, int y = 1, class T>
@@ -503,6 +522,23 @@ MOCHI_ANY MOCHI_FORCE_INLINE Simd<T, N> FastRound(Simd<T, N> a);
 // NOT FAST: Horizontal sum of first COUNT elements of a vector. COUNT of -1 means "all".
 template <int COUNT = -1, class T, int N>
 MOCHI_ANY MOCHI_FORCE_INLINE T HSum(Simd<T, N> a);
+
+/// @brief Returns {HSum(a), HSum(b)}. Native SIMD backends compute both sums together, in fewer
+/// instructions than two @ref HSum calls.
+template <class T>
+MOCHI_ANY MOCHI_FORCE_INLINE Simd<T, 2> HSumEach(Simd<T, 2> a, Simd<T, 2> b);
+
+/// @brief True if @ref HSumEach of four vectors of type V is supported.
+template <class V>
+inline constexpr bool kHasHSumEach = false;
+template <class T, int N>
+inline constexpr bool kHasHSumEach<Simd<T, N>> = N >= 4 && IsPowerOfTwo(N);
+
+/// @brief Returns {HSum(a), HSum(b), HSum(c), HSum(d)}. Native SIMD backends compute the four sums
+/// together, in fewer instructions than four @ref HSum calls. Requires @ref kHasHSumEach.
+template <class T, int N>
+MOCHI_ANY MOCHI_FORCE_INLINE Simd<T, 4>
+HSumEach(Simd<T, N> a, Simd<T, N> b, Simd<T, N> c, Simd<T, N> d);
 
 // NOT FAST: Horizontal product of first COUNT elements of a vector. COUNT of -1 means "all".
 template <int COUNT = -1, class T, int N>
@@ -571,13 +607,15 @@ MOCHI_ANY MOCHI_FORCE_INLINE Simd<T, N> Ln(Simd<T, N> a);
 //  MOCHI_ASSERT(a == Vec4i{0xFFFFFFFF, 0, 0xFFFFFFFF, 0});
 //
 
-// Return true if ALL of the first COUNT elements have a non-zero bit pattern. COUNT of -1 means
-// "all". Example: AllTrue<2>(a < b) returns true iff ((a[0] < b[0]) && (a[1] < b[1]))
+// Return true if ALL of the first COUNT elements are logical true. All N elements must be either
+// all-bits-0 (false) or all-bits-1 (true). COUNT of -1 means "all". Example: AllTrue<2>(a < b)
+// returns true iff ((a[0] < b[0]) && (a[1] < b[1]))
 template <int COUNT = -1, class T, int N>
 MOCHI_ANY MOCHI_FORCE_INLINE bool AllTrue(Simd<T, N> a);
 
-// Return true if ANY of the first COUNT elements have a non-zero bit pattern. COUNT of -1 means
-// "all". Example: AnyTrue<2>(a < b) returns true iff ((a[0] < b[0]) || (a[1] < b[1]))
+// Return true if ANY of the first COUNT elements is logical true. All N elements must be either
+// all-bits-0 (false) or all-bits-1 (true). COUNT of -1 means "all". Example: AnyTrue<2>(a < b)
+// returns true iff ((a[0] < b[0]) || (a[1] < b[1]))
 template <int COUNT = -1, class T, int N>
 MOCHI_ANY MOCHI_FORCE_INLINE bool AnyTrue(Simd<T, N> a);
 

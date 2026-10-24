@@ -215,6 +215,30 @@ namespace CADRobotExporter.CAD.NX
             return null;
         }
 
+        /// <summary>
+        /// Whether the work part is still usable. Reading a tag may also throw.
+        /// </summary>
+        public override bool IsDocumentValid
+        {
+            get
+            {
+                if (workPart == null)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    return workPart.Tag != NXOpen.Tag.Null;
+                }
+                catch (Exception e)
+                {
+                    logger.Warning($"Work part is no longer usable: {e.Message}");
+                    return false;
+                }
+            }
+        }
+
         public override string GetDocumentTitle()
         {
             if (workPart == null)
@@ -259,23 +283,25 @@ namespace CADRobotExporter.CAD.NX
             return configurationFeature;
         }
 
-        public override void SaveConfigurationFromTree(
+        public override ConfigSaveResult SaveConfigurationFromTree(
             ExporterConfiguration config,
             LinkNode baseNode,
             bool warnUser,
-            string featureNameOverride = null)
+            string featureNameOverride = null,
+            bool allowCancel = false)
         {
-            if (workPart == null)
+            // For NX, we always save unless the part/assembly is invalid/closed
+            if (!IsDocumentValid)
             {
                 logger.Warning("Cannot save configuration - no work part");
-                return;
+                return ConfigSaveResult.NotNeeded;
             }
 
             Link baseLink = baseNode?.Link;
             if (baseLink == null)
             {
                 logger.Warning("Cannot save configuration - no base link");
-                return;
+                return ConfigSaveResult.NotNeeded;
             }
 
             string featureName = featureNameOverride;
@@ -313,15 +339,16 @@ namespace CADRobotExporter.CAD.NX
                     configurationFeature = newFeature;
                     exporterConfiguration = config;
                     logger.Information($"Saved configuration to feature: {newFeature.Name}");
+                    return ConfigSaveResult.Saved;
                 }
-                else
-                {
-                    logger.Error("Failed to save configuration feature");
-                }
+
+                logger.Error("Failed to save configuration feature");
+                return ConfigSaveResult.NotNeeded;
             }
             catch (Exception ex)
             {
                 logger.Error($"Error saving configuration: {ex.Message}");
+                return ConfigSaveResult.NotNeeded;
             }
         }
 
@@ -388,9 +415,9 @@ namespace CADRobotExporter.CAD.NX
         }
 
 
-        public override void SelectLinkComponents(LinkNode node)
+        public override void SelectLinkComponents(Link link)
         {
-            if (node?.Link == null)
+            if (link == null)
                 return;
 
             try
@@ -400,10 +427,10 @@ namespace CADRobotExporter.CAD.NX
                     body.Unhighlight();
                 }
 
-                List<string> handles = node.Link.NXVisualBodiesHandles;
+                List<string> handles = link.NXVisualBodiesHandles;
                 List<Body> bodies = ResolveBodiesToList(handles);
 
-                handles = node.Link.NXInertialBodiesHandles;
+                handles = link.NXInertialBodiesHandles;
                 bodies.AddRange(ResolveBodiesToList(handles));
 
                 foreach (var body in bodies)
@@ -413,7 +440,7 @@ namespace CADRobotExporter.CAD.NX
 
                 highlightedBodies = bodies;
 
-                HighlightJointAxisAndCsys(node.Link);
+                HighlightJointAxisAndCsys(link);
 
                 workPart.Views.Refresh();
             }
@@ -423,9 +450,9 @@ namespace CADRobotExporter.CAD.NX
             }
         }
 
-        public override void SelectJointComponents(LinkNode node)
+        public override void SelectJointComponents(Link link)
         {
-            SelectLinkComponents(node);
+            SelectLinkComponents(link);
         }
 
         public void HighlightJointAxisAndCsys(Link link)
@@ -458,13 +485,21 @@ namespace CADRobotExporter.CAD.NX
 
         public override void UnselectAll()
         {
-            foreach (var body in highlightedBodies)
+            // Gaurd against closed part while form still open
+            try
             {
-                body.Unhighlight();
-            }
+                foreach (var body in highlightedBodies)
+                {
+                    body.Unhighlight();
+                }
 
-            highlightedCsys?.Unhighlight();
-            highlightedAxis?.Unhighlight();
+                highlightedCsys?.Unhighlight();
+                highlightedAxis?.Unhighlight();
+            }
+            catch (Exception ex)
+            {
+                logger.Warning($"Failed to clear highlights: {ex.Message}");
+            }
         }
 
         public override void RestoreHostForeground()
@@ -503,7 +538,7 @@ namespace CADRobotExporter.CAD.NX
                     GetModelBoundingBox(out cachedBoundingBox);
                 }
                 if (IsShowingJointGizmo && CurrentNodeShown != null &&
-                    CurrentNodeShown.Link.Joint != null)
+                    CurrentNodeShown.Joint != null)
                 {
                     DrawJointGizmo_Internal();
                 }
@@ -533,7 +568,7 @@ namespace CADRobotExporter.CAD.NX
 
         private void DrawJointGizmo_Internal()
         {
-            var joint = CurrentNodeShown.Link.Joint;
+            var joint = CurrentNodeShown.Joint;
 
             double[] center = GetJointOriginInModelSpace(joint);
             double[] axis = GetJointAxisInModelSpace(joint);
@@ -554,7 +589,7 @@ namespace CADRobotExporter.CAD.NX
             double scale = JointGizmoScale > 0 ? JointGizmoScale : 0.5;
             double radius = scale * averageLength;
 
-            double[] referenceDirection = GetCoMReferenceDirection(CurrentNodeShown.Link, center);
+            double[] referenceDirection = GetCoMReferenceDirection(CurrentNodeShown, center);
 
             if (joint.Type == "revolute")
             {
@@ -673,7 +708,7 @@ namespace CADRobotExporter.CAD.NX
 
         private void DrawInertialGizmo_Internal()
         {
-            var link = CurrentLinkNodeShown.Link;
+            var link = CurrentLinkNodeShown;
             if (link.Inertial == null || link.Inertial.Mass.Value <= 1e-10)
                 return;
             if (link.Joint == null || string.IsNullOrEmpty(link.Joint.CoordinateSystemName))

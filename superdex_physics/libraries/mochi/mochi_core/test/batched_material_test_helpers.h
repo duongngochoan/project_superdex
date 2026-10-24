@@ -308,6 +308,12 @@ inline void ExpectTensorNear(
       Norm(expectedFlat - actualFlat), Max(kBatchedMaterialRelTol * Norm(expectedFlat), absTol));
 }
 
+// Reference norm for PSD-projected tangent tolerances: the eigensystem rounds at the scale of the
+// unprojected tangent, while clamping can shrink the projected norm arbitrarily below it.
+[[nodiscard]] inline real GetTangentTolScale(Tensor3x3x3x3r const& unprojectedTangent) {
+  return Norm(reinterpret_cast<NdArray<real, 81> const&>(unprojectedTangent));
+}
+
 template <typename Spec, int kBS, BatchedParamLayout kLayout>
 void VerifyBatchedMatchesSingleLaneBatched(NdArray<int, kBS> const& indices) {
   for (auto psdStrategy : Spec::kSupportedPsdStrategies) {
@@ -328,6 +334,8 @@ void VerifyBatchedMatchesSingleLaneBatched(NdArray<int, kBS> const& indices) {
               expectedFs,
               BatchedParamLayout::Homogeneous,
               projectPsd);
+          auto const unprojected = EvalBatchedFull<Spec, 1>(
+              expectedParams, expectedIndices, expectedFs, BatchedParamLayout::Homogeneous, false);
 
           ExpectEnergyNear(expected.energy[0], actual.energy[lane], GetEnergyAbsTol(laneParams));
           ExpectMatrixNear(
@@ -335,7 +343,11 @@ void VerifyBatchedMatchesSingleLaneBatched(NdArray<int, kBS> const& indices) {
               GetPk1Lane(actual.pk1, lane),
               GetPk1AbsTol<Spec>(laneParams));
           ExpectTensorNear(
-              GetTangentLane(expected.tangent, 0), GetTangentLane(actual.tangent, lane));
+              GetTangentLane(expected.tangent, 0),
+              GetTangentLane(actual.tangent, lane),
+              Max(kBatchedMaterialAbsTol,
+                  kBatchedMaterialRelTol *
+                      GetTangentTolScale(GetTangentLane(unprojected.tangent, 0))));
         }
       }
     }
@@ -597,11 +609,12 @@ void VerifyBatchedAnalyticPsdProjection(real relTol) {
       auto const projected = EvalBatchedFull<Spec, kBS>(params, indices, Fs, kLayout, true);
       for (int lane = 0; lane < kBS; ++lane) {
         auto ref = GetTangentLane(unprojected.tangent, lane);
+        real const tolScale = GetTangentTolScale(ref);
         EigenProjectPsd(ref, psdStrategy);
         auto const actual = GetTangentLane(projected.tangent, lane);
         auto const& refFlat = reinterpret_cast<NdArray<real, 81> const&>(ref);
         auto const& actualFlat = reinterpret_cast<NdArray<real, 81> const&>(actual);
-        EXPECT_LE(Norm(refFlat - actualFlat), relTol * Norm(refFlat));
+        EXPECT_LE(Norm(refFlat - actualFlat), relTol * tolScale);
       }
     }
   }

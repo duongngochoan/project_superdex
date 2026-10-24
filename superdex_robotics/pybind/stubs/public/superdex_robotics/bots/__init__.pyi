@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pyre-strict
-
 from typing import Any, Callable, Iterator, Optional, Sequence, overload
 import numpy as np
 import numpy.typing as npt
@@ -651,6 +649,11 @@ class BotPrefab:
         self,
         value: mochi_physics.ArrayLikeArticulatedCycleJointParams,
     ) -> None: ...
+    skin: Optional[mochi_physics.prefab.ArticulatedSkinPrefab]
+    """Optional deformable skin skinned over the articulation's links, acting as a
+    contact collidee. When present, produces the mochi::ArticulatedActorParams::skin
+    at instantiation time.
+    """
     @overload
     def __init__(self) -> None: ...
     @overload
@@ -665,6 +668,7 @@ class BotPrefab:
         spatial_tendons: ArrayLikeBotSpatialTendonPrefab = ...,
         contact_overrides: ArrayLikeBotContactOverride = ...,
         cycles: mochi_physics.ArrayLikeArticulatedCycleJointParams = ...,
+        skin: Optional[mochi_physics.prefab.ArticulatedSkinPrefab] = ...,
     ) -> None: ...
 
 class RoboticsContext:
@@ -1782,12 +1786,12 @@ class ControllerBasicJscPdParams:
     """Joint-space PD controller parameters."""
     @property
     def kp(self) -> mochi_physics.DynamicArrayReal:
-        """The position gain [Nm/rad]"""
+        """The position gain [N/m or Nm/rad]"""
     @kp.setter
     def kp(self, value: mochi_physics.ArrayLikeReal) -> None: ...
     @property
     def kd(self) -> mochi_physics.DynamicArrayReal:
-        """The position damping gain [Nms/rad]"""
+        """The position damping gain [Ns/m or Nms/rad]"""
     @kd.setter
     def kd(self, value: mochi_physics.ArrayLikeReal) -> None: ...
     @property

@@ -198,10 +198,15 @@ inline void AddSingleDofFriction(
   }
 }
 
-// Function to add single-dof external-force terms.
-inline void AddSingleDofExternalForce(real pos, real force, double* outEnergy, real* outGradient) {
+// Function to add single-dof external-force terms. The energy is relative to the stage start.
+inline void AddSingleDofExternalForce(
+    real currentPos,
+    real stageStartPos,
+    real force,
+    double* outEnergy,
+    real* outGradient) {
   if (outEnergy) {
-    (*outEnergy) -= pos * force;
+    (*outEnergy) -= (currentPos - stageStartPos) * force;
   }
 
   if (outGradient) {

@@ -951,14 +951,15 @@ class StdVariantTypeInfo final : public SReflect::VariantTypeInfo {
   // Static function table such that kEmplaceFnTable[i](var) emplaces a default constructed object
   // of type index i into the variant.
   using EmplaceFn = bool (*)(VariantT&);
-  static constexpr std::array<EmplaceFn, sizeof...(Types)> kEmplaceDefault{+[](VariantT& v) {
-    if constexpr (std::is_default_constructible_v<Types>) {
-      v.template emplace<Types>();
-      return true;
-    } else {
-      return false;
-    }
-  }...};
+  static constexpr std::array<EmplaceFn, sizeof...(Types)> kEmplaceDefault{
+      +[]([[maybe_unused]] VariantT& v) {
+        if constexpr (std::is_default_constructible_v<Types>) {
+          v.template emplace<Types>();
+          return true;
+        } else {
+          return false;
+        }
+      }...};
 };
 } // namespace SReflect
 
@@ -1037,10 +1038,12 @@ struct SReflectTypeTraits<std::string> {
 // T[N] c-style array
 /////////////////////////////////////////////////////////////////////////////
 template <typename T, size_t N>
+// NOLINTNEXTLINE(facebook-hte-CArray, modernize-avoid-c-arrays): Supports raw-array reflection.
 struct SReflectTypeTraits<T[N]> {
   static constexpr SReflect::CoreType coreType = SReflect::CoreType::CT_array;
   static SReflect::ArrayTypeInfo const& GetTypeInfo() {
     static auto* s_typeInfo = []() {
+      // NOLINTNEXTLINE(facebook-hte-CArray, modernize-avoid-c-arrays): Preserves raw-array RTTI.
       using OuterType = T[N];
       auto const& inner = SReflect::GetTypeInfo<T>();
       auto* ti = SReflect::detail::MakeFixedArrayTypeInfoImpl(

@@ -113,7 +113,7 @@ inline void Allocator::deallocate(void* ptr, std::size_t sizeInBytes, std::size_
 }
 
 inline bool Allocator::is_equal(Allocator const& other) const noexcept {
-  return do_is_equal(other);
+  return this == &other || do_is_equal(other);
 }
 
 /*********************************************************************************************
@@ -121,7 +121,7 @@ inline bool Allocator::is_equal(Allocator const& other) const noexcept {
 */
 
 inline void* DefaultAllocator::do_allocate(size_t sizeInBytes, size_t alignment) {
-#if MOCHI_PMR_USES_JEMALLOC
+#if MOCHI_PMR_ENABLE_JEMALLOC_COMPATIBILITY
   // Some fbcode build modes use jemalloc to implement operators new and delete, and thus
   // std::prm::new_delete_resource. The problem is that jemalloc always rounds up to a minimum size
   // of 16 bytes. We have to do the same or the following can happen:
@@ -163,7 +163,7 @@ inline void DefaultAllocator::do_deallocate(
     void* ptr,
     [[maybe_unused]] size_t sizeInBytes,
     [[maybe_unused]] size_t alignment) {
-#if MOCHI_PMR_USES_JEMALLOC
+#if MOCHI_PMR_ENABLE_JEMALLOC_COMPATIBILITY
   // See comment in do_allocate.
   sizeInBytes = Max(sizeInBytes, size_t(16));
 #endif

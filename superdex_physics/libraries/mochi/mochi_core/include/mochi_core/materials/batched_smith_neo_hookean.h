@@ -61,14 +61,15 @@ enum struct MaterialPsdOracle {
   None,
 
   /**
-   * @brief Evaluate the true indefiniteness condition. Slower but always produces the correct
-   * answer.
+   * @brief Evaluate the true indefiniteness condition. Hessians indefinite only by rounding error,
+   * such as those at rest or under rotations, count as positive semidefinite for Poisson's ratios
+   * up to about 0.499.
    */
   Correct,
 
   /**
-   * @brief Approximate the condition to evaluate it faster. Conservative: can project more often
-   * than necessary, but does not miss required projections.
+   * @brief Approximate the condition with a cheaper test. Conservative: can project more often
+   * than necessary, e.g. every element near rest, but does not miss required projections.
    */
   Conservative,
 

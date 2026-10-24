@@ -26,6 +26,7 @@
 #if MOCHI_USE_OCCT
 
 #include "occ_shape_meshing.h"
+#include "step_face_colors.h"
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -74,8 +75,11 @@
 #include <filesystem>
 #include <iostream>
 #include <numeric>
+#include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -462,14 +466,6 @@ TopoDS_Shape NormalizeShape(TopoDS_Shape const& shape) {
   return result;
 }
 
-// Target uniform 3D edge length [mm] for the shape, from an explicit value or its bounding box.
-double ComputeTargetEdgeLength(TopoDS_Shape const& shape, StepMeshBodyParams const& params) {
-  Bnd_Box bbox;
-  BRepBndLib::Add(shape, bbox);
-  return occ::ResolveTargetEdgeLength(
-      bbox, params.targetEdgeLength, params.targetEdgeLengthFraction);
-}
-
 // Runs the isotropic meshing pipeline in place on the shape: the CGAL per-face mesher and the
 // uniform edge discretizer. Faces the CGAL mesher cannot handle are retried with OCCT's Delabella
 // mesher and recorded in @p fallbackStats. Returns the OCCT mesh status flags.
@@ -477,6 +473,7 @@ IMeshData_Status RunIsotropicMeshing(
     TopoDS_Shape const& shape,
     StepMeshBodyParams const& params,
     double targetEdgeLength,
+    occ::FaceSizingMap faceSizing,
     occ::FaceMeshFallbackStats& fallbackStats) {
   occ::ShapeMeshingParams meshingParams;
   meshingParams.faceMesher = occ::FaceMesher::Isotropic;
@@ -484,7 +481,64 @@ IMeshData_Status RunIsotropicMeshing(
   meshingParams.angularDeflection = params.angularDeflection;
   meshingParams.targetEdgeLength = targetEdgeLength;
   meshingParams.edgeSampling = params.edgeSampling;
+  meshingParams.faceSizing = std::move(faceSizing);
   return occ::MeshShape(shape, meshingParams, &fallbackStats);
+}
+
+// Faces of the STEP file with their resolved colors, read through XCAF because STEPControl_Reader
+// drops styles.
+std::vector<occ::StyledFace> LoadStyledFaces(std::string const& path, CliError& error) {
+  Handle(TDocStd_Document) document;
+  if (!occ::LoadStepDocument(path, document, error)) {
+    return {};
+  }
+  std::vector<occ::StyledFace> faces = occ::CollectStyledFaces(document);
+  occ::CloseStepDocument(document);
+  return faces;
+}
+
+// Sizing for every face of @p shape whose color has an entry in @p colorSizing. An entry's target
+// edge length is its explicit length, else its fraction of @p modelBox's diagonal (resolved as the
+// global target is), else that of @p defaults; its deflections <= 0 inherit @p defaults. Colors are
+// matched geometrically against @p styledFaces, the faces as authored, since combining and
+// normalizing rebuilt every face.
+occ::FaceSizingMap BuildFaceSizing(
+    TopoDS_Shape const& shape,
+    std::span<occ::StyledFace const> styledFaces,
+    std::span<StepFaceColorSizing const> colorSizing,
+    Bnd_Box const& modelBox,
+    occ::FaceSizing const& defaults) {
+  auto const orDefault = [](double value, double fallback) {
+    return value > 0.0 ? value : fallback;
+  };
+  std::unordered_map<uint32_t, occ::FaceSizing> byColor;
+  for (StepFaceColorSizing const& entry : colorSizing) {
+    bool const sizesLength = entry.targetEdgeLength > 0.0 || entry.targetEdgeLengthFraction > 0.0;
+    byColor[entry.rgb] = {
+        sizesLength ? occ::ResolveTargetEdgeLength(
+                          modelBox, entry.targetEdgeLength, entry.targetEdgeLengthFraction)
+                    : defaults.targetEdgeLength,
+        orDefault(entry.linearDeflection, defaults.linearDeflection),
+        orDefault(entry.angularDeflection, defaults.angularDeflection)};
+  }
+
+  std::unordered_map<uint32_t, int> matchedFaces;
+  occ::FaceSizingMap sizing;
+  occ::FaceColorMap const colors = occ::MatchFaceColors(shape, styledFaces);
+  for (occ::FaceColorMap::Iterator it(colors); it.More(); it.Next()) {
+    auto const found = byColor.find(it.Value());
+    if (found != byColor.end()) {
+      sizing.Bind(it.Key(), found->second);
+      ++matchedFaces[it.Value()];
+    }
+  }
+  for (StepFaceColorSizing const& entry : colorSizing) {
+    if (matchedFaces[entry.rgb] == 0) {
+      MOCHI_MESH_CLI_LOG_WARNING(
+          "No face has color #%06X; its sizing is unused", static_cast<unsigned>(entry.rgb));
+    }
+  }
+  return sizing;
 }
 
 // Extracts every face's triangulation into a single unwelded triangle soup in meters. Shared-edge
@@ -548,25 +602,55 @@ MeshData mochi::mesh::cli::MeshStepBody(
       !(params.linearDeflection > 0.0) || !(params.angularDeflection > 0.0),
       error,
       "STEP tessellation deflections must be positive.");
+  std::unordered_set<uint32_t> sizedColors;
+  for (StepFaceColorSizing const& entry : params.faceColorSizing) {
+    MOCHI_MESH_CLI_ERROR_IF(
+        !(entry.targetEdgeLength >= 0.0) || !(entry.linearDeflection >= 0.0) ||
+            !(entry.angularDeflection >= 0.0) || !(entry.targetEdgeLengthFraction >= 0.0),
+        error,
+        "Face color sizing values must be non-negative (0 inherits the global value).");
+    MOCHI_MESH_CLI_ERROR_IF(
+        !sizedColors.insert(entry.rgb).second, error, "Face color sizing lists a color twice.");
+  }
   MOCHI_MESH_CLI_ERROR_RETURN(error, {});
 
+  std::string const path(stepFilePath);
   TopoDS_Shape shape;
-  if (!LoadStepShape(std::string(stepFilePath), shape, error)) {
+  if (!LoadStepShape(path, shape, error)) {
     return {};
   }
 
   // OpenCascade reports failures by raising Standard_Failure; catch it so a meshing failure becomes
   // a clean error rather than crashing the helper (which would corrupt the framed response).
   try {
+    std::vector<occ::StyledFace> styledFaces;
+    if (!params.faceColorSizing.empty()) {
+      styledFaces = LoadStyledFaces(path, error);
+      MOCHI_MESH_CLI_ERROR_RETURN(error, {});
+    }
+
     if (params.combineTouchingSolids) {
       shape = CombineSolids(shape, kCombineProximityTolerance);
     }
     shape = NormalizeShape(shape);
 
-    double const targetEdgeLength = ComputeTargetEdgeLength(shape, params);
+    // The global target and every face color's fraction are relative to this one box.
+    Bnd_Box modelBox;
+    BRepBndLib::Add(shape, modelBox);
+    double const targetEdgeLength = occ::ResolveTargetEdgeLength(
+        modelBox, params.targetEdgeLength, params.targetEdgeLengthFraction);
+    occ::FaceSizingMap faceSizing;
+    if (!params.faceColorSizing.empty()) {
+      faceSizing = BuildFaceSizing(
+          shape,
+          styledFaces,
+          params.faceColorSizing,
+          modelBox,
+          {targetEdgeLength, params.linearDeflection, params.angularDeflection});
+    }
     occ::FaceMeshFallbackStats fallbackStats;
     IMeshData_Status const status =
-        RunIsotropicMeshing(shape, params, targetEdgeLength, fallbackStats);
+        RunIsotropicMeshing(shape, params, targetEdgeLength, std::move(faceSizing), fallbackStats);
 
     if (fallbackStats.FailedCount() > 0) {
       MOCHI_MESH_CLI_LOG_WARNING(

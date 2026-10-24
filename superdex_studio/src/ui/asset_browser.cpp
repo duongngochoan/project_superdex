@@ -17,6 +17,10 @@
 #include "ui/asset_browser.h"
 #include "app/app.h"
 #include "assets/asset.h"
+#if MOCHI_INTERNAL
+#include "assets/bot_task_utils.h"
+#include "editors/bot_scene_editor.h"
+#endif
 
 #include <mochi_physics/utils/mochi_prefab.h>
 #include <superdex_robotics/utils/file_utils.h>
@@ -26,7 +30,9 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <filesystem>
 #include <string>
+#include <system_error>
 #include <unordered_set>
 #include <utility>
 
@@ -163,7 +169,8 @@ void AssetBrowser::TryRefreshDirectoryTree() {
   if (_rootPaths.empty()) {
     auto const& saved = _studio->GetAppSettings().assetBrowser.rootPaths;
     for (auto const& s : saved) {
-      if (!s.empty() && std::filesystem::exists(s)) {
+      std::error_code error;
+      if (!s.empty() && std::filesystem::exists(s, error)) {
         _rootPaths.emplace_back(s);
       }
     }
@@ -392,7 +399,8 @@ void AssetBrowser::ShowFilter(float width) {
   // Real-type swatches (Unknown handled separately so Importable can precede it).
   for (int i = 0; i < kUnknownIndex; ++i) {
 #if !MOCHI_INTERNAL
-    if (static_cast<AssetType>(i) == AssetType::BotScene) {
+    if (static_cast<AssetType>(i) == AssetType::BotScene ||
+        static_cast<AssetType>(i) == AssetType::BotTask) {
       continue;
     }
 #endif
@@ -764,7 +772,9 @@ void AssetBrowser::ShowItemContextMenuContents(TileItem const& item, Asset const
       if (selAsset->GetReferenceCount() != 0) {
         allUnloadable = false;
       }
-    } else if (ClassifyAssetTypeByFilename(selPath.GetFilename()) != AssetType::Unknown) {
+    } else if (AssetType const fileType = ClassifyAssetTypeByFilename(selPath.GetFilename());
+               fileType != AssetType::Unknown && fileType != AssetType::BotTask) {
+      // Tasks are classified for browsing but have no asset to load.
       ++unloadedFileCount;
     }
   }
@@ -809,6 +819,21 @@ void AssetBrowser::ShowItemContextMenuContents(TileItem const& item, Asset const
     }
     showedAssetActions = true;
   }
+#if MOCHI_INTERNAL
+  if (selectedCount == 1 && folderCount == 0 &&
+      item.fullPath.GetFilename().ends_with(superdex::robotics::kBotSceneExtension)) {
+    bool const unsaved = asset != nullptr && asset->IsDirty();
+    ImGui::BeginDisabled(unsaved);
+    if (ImGui::IconSelectable("Create Scene Archive...", ICON_FA_FILE_ARCHIVE)) {
+      _studio->CreateSceneArchive(item.fullPath);
+    }
+    ImGui::EndDisabled();
+    if (unsaved && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+      ImGui::SetTooltip("Save the scene before archiving it.");
+    }
+    showedAssetActions = true;
+  }
+#endif // MOCHI_INTERNAL
   if (showedAssetActions) {
     ImGui::Separator(ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
   }
@@ -1773,10 +1798,26 @@ void AssetBrowser::TryApplyPendingAssetAction() {
       break;
     case PendingAssetAction::Reload:
       for (auto const& path : paths) {
-        if (_assetManager->FindAssetByPath(path)) {
-          _assetManager->UnloadAssetByPath(path);
-          _assetManager->LoadAsset(path);
+        Asset* const existing = _assetManager->FindAssetByPath(path);
+        if (existing == nullptr) {
+          continue;
         }
+        // Referenced elsewhere: UnloadAssetByPath would refuse to unload (ref count > 0) and the
+        // subsequent LoadAsset would hand back the stale cached asset. Re-read into the existing
+        // object in place instead, which refreshes every consumer at once. Matches
+        // ModelEditor::PollSlotFileChanges.
+        if (_assetManager->GetPathReferenceCount(path) != 0) {
+          if (!existing->ReloadFromDisk()) {
+            MOCHI_LOG_WARNING(
+                "Reload: '%s' is still referenced and could not be reloaded in place; keeping the "
+                "cached copy.",
+                path.ToString().c_str());
+          }
+          continue;
+        }
+        _assetManager->UnloadAssetByPath(path);
+        _assetManager->LoadAsset(path);
+        _assetManager->InvalidateShapeCachesForPath(path);
       }
       break;
     case PendingAssetAction::Delete:
@@ -2172,6 +2213,15 @@ void AssetBrowser::ShowWindow(bool* open) {
           _studio->BeginImport(item.file->importer, item.fullPath);
         } else if (asset) {
           assetToOpen = asset;
+#if MOCHI_INTERNAL
+        } else if (item.file->type == AssetType::BotTask) {
+          if (auto* sceneEditor = dynamic_cast<BotSceneEditor*>(_studio->GetActiveAssetEditor())) {
+            sceneEditor->OpenTask(item.fullPath);
+          } else {
+            MOCHI_LOG_WARNING(
+                "Open a bot scene to load task '%s' into it.", item.fullPath.ToString().c_str());
+          }
+#endif
         } else {
           if (auto* loaded = _assetManager->LoadAsset(item.fullPath)) {
             assetToOpen = loaded;
@@ -2323,6 +2373,30 @@ void AssetBrowser::ShowWindow(bool* open) {
             botScene->Save();
           }
         });
+      }
+      if (ImGui::Selectable("Task...")) {
+        std::string const extension{superdex::robotics::kBotTaskExtension};
+        std::string const taskName = MakeUniqueFileName("Task", _currentPath, extension);
+        auto const newPath = _currentPath / (taskName + extension);
+        if (std::string error; !CreateBotTaskFile(newPath.ToString(), taskName, error)) {
+          MOCHI_LOG_ERROR(
+              "Failed to create task '%s': %s", newPath.ToString().c_str(), error.c_str());
+        } else {
+          BeginRenaming(newPath, taskName, [this](std::string const& newName) {
+            if (!RenameAsset(_renamingPath, newName)) {
+              return;
+            }
+            auto const renamedPath = _renamingPath.GetParentPath() /
+                (newName + std::string(superdex::robotics::kBotTaskExtension));
+            if (std::string renameError;
+                !SetBotTaskName(renamedPath.ToString(), newName, renameError)) {
+              MOCHI_LOG_ERROR(
+                  "Renamed task '%s' but failed to update its name: %s",
+                  renamedPath.ToString().c_str(),
+                  renameError.c_str());
+            }
+          });
+        }
       }
 #endif // MOCHI_INTERNAL
       ImGui::EndMenu();

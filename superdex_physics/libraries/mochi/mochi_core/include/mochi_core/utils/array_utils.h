@@ -120,6 +120,33 @@ template <int N, typename T>
 void ArrayAddTriplesN(T* vec, Span<int const> const& indices, T const* values);
 
 /**
+  Rotate a batch of 3D vectors, stored as one SIMD vector per coordinate, such that:
+    result[j] = src[0] * rotT[0][j] + src[1] * rotT[1][j] + src[2] * rotT[2][j]
+  where rotT is a TRANSPOSED rotation matrix broadcast by Broadcast3x3.
+
+  The multiply-adds are explicitly fused in a fixed order rather than left to compiler contraction,
+  so within a build, an element's result has the same bits regardless of the SIMD width, its
+  position in an array, or the call site. The array rotations and transforms below use these
+  helpers for every element. Use them wherever results must match those functions bit for bit.
+*/
+template <typename V>
+[[nodiscard]] MOCHI_FORCE_INLINE NdArray<V, 3> RotateVectorsBatch(
+    NdArray<V, 3> const& src,
+    NdArray<V, 3, 3> const& rotT);
+
+/**
+  Transform a batch of 3D points, stored as one SIMD vector per coordinate, such that:
+    result = RotateVectorsBatch(src, rotT) + trans
+  where rotT = Broadcast3x3(matT) and trans = Broadcast3(matT[3]) for a TRANSPOSED 4x4 matrix matT.
+  The translation is added last, which is more accurate when it dominates the rotated point.
+*/
+template <typename V>
+[[nodiscard]] MOCHI_FORCE_INLINE NdArray<V, 3> TransformPointsBatch(
+    NdArray<V, 3> const& src,
+    NdArray<V, 3, 3> const& rotT,
+    NdArray<V, 3> const& trans);
+
+/**
   Transform an array of 3D positions using a TransformSRT such that:
     dst[i] = transform.TransformPoint(src[i])
 
@@ -218,6 +245,10 @@ template <typename T, typename SZ>
 // Return the maximum value of abs(a[i])
 template <typename T, typename SZ>
 [[nodiscard]] T MaxAbs(Span<T const, SZ> a);
+
+// Return the maximum Euclidean norm of packed 3D vectors whose first components are stride apart.
+template <int kStride>
+[[nodiscard]] real MaxPackedVector3Norm(Span<real const> values);
 
 // Given two Span of equal length, return the max value of abs(a[i] - b[i]) for all i.
 template <typename T, typename SZ>

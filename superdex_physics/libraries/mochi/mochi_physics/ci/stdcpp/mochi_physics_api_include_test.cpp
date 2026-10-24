@@ -16,3 +16,4 @@
 
 // Simply include the mochi_physics API from a C++ file.
 #include <mochi_physics/mochi_physics.h>
+#include <mochi_physics/utils/mochi_prefab.h>

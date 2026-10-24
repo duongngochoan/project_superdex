@@ -17,6 +17,7 @@
 #include "mochi_articulated_body.h"
 
 #include "mochi_actor_convergence.h"
+#include "mochi_blended.h"
 #include "mochi_capture.h"
 #include "mochi_compound.h"
 #include "mochi_constraint.h"
@@ -31,12 +32,14 @@
 #include "mochi_island.h"
 #include "mochi_pose_controller.h"
 #include "mochi_simulation.h"
-#include "mochi_skinning.h"
+#include "mochi_soft_skinned.h"
 
+#include <mochi_core/articulated_body/articulated_body_hessian.h>
 #include <mochi_core/contact/contact_partition.h>
-#include <mochi_core/contact/dmap.h>
 #include <mochi_core/geometry/geometry_utils.h>
+#include <mochi_core/geometry/model_utils.h>
 #include <mochi_core/linear_algebra/matrix.h>
+#include <mochi_core/memory/filo_allocator.h>
 #include <mochi_core/utils/log.h>
 #include <mochi_core/utils/rigid_body_assembly.h>
 #include <mochi_core/utils/single_dof_assembly.h>
@@ -56,22 +59,59 @@
 
 using namespace mochi;
 using namespace mochi::articulated;
-using namespace mochi::dmap;
 
 static constexpr real kDResRegularizationCoefficient = 1e-6_r;
 
-/*
- * Pipeline to resolve current skinning displacements for all nodes, including inactive nodes when
- * subsampling is enabled.
- */
-static void ResolveAllNodeSkinningDisplacementsPipeline(
+// Resolve skinned local displacements.
+template <TimeStep kStep, bool kForceUseAllNodes = false>
+static void ResolveSkinning(
+    CRootTransform const& rootTransform,
+    CArticulatedLinkTransforms<kStep> const& linkTransforms,
+    CArticulatedSkinningData const& skinningData,
+    CActiveUniqueNodes const* activeNodes,
+    CDisplacementSlice<real, kStep, DisplacementLayer::Skinned>& outDisplacements) {
+  MOCHI_PROFILE_SCOPE();
+  Span<int const> nodeSpan;
+  if (activeNodes && !kForceUseAllNodes) {
+    nodeSpan = activeNodes->ViewIds();
+    if (nodeSpan.empty()) {
+      return;
+    }
+  }
+
+  // Compute local-frame link transforms if rootFromWorld is not identity.
+  Span<TransformRT const> linkTransformsSpan = linkTransforms;
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 256 * sizeof(TransformRT));
+  DynamicArray<TransformRT> rootFromLinkTransforms(&allocator);
+  if (rootTransform.worldFromLocal != TransformRT{}) {
+    rootFromLinkTransforms.reserve(linkTransforms.size());
+    auto const rootFromWorld = Invert(rootTransform.worldFromLocal);
+    for (auto const& worldFromBone : linkTransforms) {
+      rootFromLinkTransforms.emplace_back(rootFromWorld * worldFromBone);
+    }
+    linkTransformsSpan = rootFromLinkTransforms;
+  }
+
+  // Compute skinning displacements in the local frame
+  skinningData.skinningTransform.Transform(
+      linkTransformsSpan, skinningData.restCoords, outDisplacements.value, nodeSpan);
+  if (!nodeSpan.empty()) {
+    auto const rest3 = Unflatten<Real3 const>(MakeConstSpan(skinningData.restCoords));
+    auto displacements3 = Unflatten<Real3>(MakeSpan(outDisplacements.value));
+    for (int node : nodeSpan) {
+      displacements3[node] -= rest3[node];
+    }
+    return;
+  }
+  outDisplacements.value -= skinningData.restCoords;
+}
+
+void articulated::compound::ResolveAllNodeSkinningDisplacementsPipeline(
     entt::registry& reg,
     Span<entt::entity const> entities) {
   MOCHI_PROFILE_SCOPE();
   ecs::InvokeForEach(
-      &articulated::compound::ResolveSkinning<TimeStep::Current, /* kForceUseAllNodes */ true>,
-      reg,
-      entities);
+      &ResolveSkinning<TimeStep::Current, /* kForceUseAllNodes */ true>, reg, entities);
 }
 
 // Set full pose from internal rigid actors' state
@@ -140,23 +180,130 @@ static void SetFullPoseFromReducedPose(
       outFullPose.value);
 }
 
-// Recompute state derived from the reduced-pose except skinning: full/joint/link transforms,
-// (optional) the internal rigid links' state and root transforms, and the Jacobian. Assumes
-// CArticulatedReducedPose<Current> is already set. Shared by all external state-setting paths
-// (set-pose, set-link-transforms, init, and the post-restore fixup) so they update exactly the same
-// derived state. The post-restore fixup does not update links as they are state-captured.
-template <bool kUpdateLinks>
+// Recompute state derived from the reduced-pose: full/joint/link transforms, the internal rigid
+// links' state and root transforms, the Jacobian, skinning and blending. Assumes the current pose
+// is already set. Shared by all external state-setting paths (set-pose, set-link-transforms, init,
+// and the post-restore fixup) so they update exactly the same derived state.
 static void UpdateDerivedStateFromPose(
     entt::registry& reg,
     entt::entity e,
     ecs::RequiredTag<TagArticulatedActor>,
-    [[maybe_unused]] CGroupMembers const& members) {
+    CGroupMembers const& members,
+    CBlendedComposition const* composition) {
   ecs::InvokeOnEntity(&SetFullPoseFromReducedPose, reg, e);
-  if constexpr (kUpdateLinks) {
-    ecs::InvokeForEach(&articulated::rigid::EntitySetSolution, reg, members.actors);
-    ecs::InvokeForEach(&mochi::rigid::ComputeRootTransformCurrent, reg, members.actors);
-  }
+  ecs::InvokeForEach(&articulated::rigid::EntitySetSolution, reg, members.actors);
+  ecs::InvokeForEach(&mochi::rigid::ComputeRootTransformCurrent, reg, members.actors);
   ecs::InvokeOnEntity(&articulated::compound::UpdateJacobianState<TimeStep::Current>, reg, e);
+  articulated::compound::ResolveAllNodeSkinningDisplacementsPipeline(
+      reg, MakeSingletonConstSpan(e));
+  if (composition) {
+    skinned::ResolveAllNodeSkinningDisplacementsPipeline(reg, MakeConstSpan(composition->soft));
+    blended::ResolveAllNodeBlendingDisplacementsPipeline(reg, MakeSingletonConstSpan(e));
+  }
+}
+
+// Copy each active joint's velocity into the reduced-DoF layout, skipping cycle joints.
+void articulated::compound::GetArticulatedJointVelocities(
+    Span<ArticulatedJointType const> jointTypes,
+    Span<Real3 const> jointAxes,
+    Span<ArticulatedDofInfo const> jointDofInfo,
+    Span<RigidBodyVel const> jointVels,
+    ColumnVectorView<real> outVel) {
+  for (int i = 0; i < isize(jointTypes); ++i) {
+    if (jointTypes[i] == ArticulatedJointType::Cycle) {
+      continue;
+    }
+    auto const& jointVel = jointVels[i];
+    auto const& dofInfo = jointDofInfo[i];
+    switch (jointTypes[i]) {
+      case ArticulatedJointType::Free:
+        Store(&outVel[dofInfo.GetTransOffset()], jointVel.GetVCom());
+        [[fallthrough]];
+      case ArticulatedJointType::Spherical: {
+        Store<RigidSize::kDRot>(&outVel[dofInfo.GetRotOffset()], jointVel.GetOmegaAndVSym().first);
+      } break;
+      case ArticulatedJointType::Revolute: {
+        outVel[dofInfo.GetRotOffset()] =
+            Dot(ToReal3(jointVel.GetOmegaAndVSym().first), jointAxes[i]);
+      } break;
+      case ArticulatedJointType::Prismatic:
+        outVel[dofInfo.GetTransOffset()] = Dot(ToReal3(jointVel.GetVCom()), jointAxes[i]);
+        break;
+      case ArticulatedJointType::Hard:
+      case ArticulatedJointType::Cycle:
+      case ArticulatedJointType::Count:
+        AssertJointTypeCount<6>();
+        break;
+    }
+  }
+}
+
+// Recompute rigid-link velocities and skinning velocities from the current joint velocities.
+static void UpdateDerivedVelocityFromJointVelocities(
+    entt::registry& reg,
+    CArticulatedProps const& props,
+    CArticulatedBodyShape const& bodyShape,
+    CArticulatedJointVels<TimeStep::Current> const& jointVels,
+    CArticulatedJacobian const& jacobian,
+    CGroupMembers const& members,
+    CBlendedComposition const* composition,
+    CArticulatedLinkVels& outLinkVels) {
+  // Stack memory for up to 512 DoFs and 256 links.
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, (512 + 256 * RigidSize::kDAll) * sizeof(real));
+  auto const* joints = bodyShape.shape->GetJointsData();
+  ColumnVector<real> velReduced(props.reducedDofsDim, &allocator);
+  articulated::compound::GetArticulatedJointVelocities(
+      joints->jointTypes, joints->jointAxes, joints->dofInfo, jointVels.value, velReduced);
+
+  // Link velocities are differential variables, but they are invalidated after a pose reset.
+  ColumnVector<real> velFull(props.fullDofsDim, &allocator);
+  velFull = jacobian.value * velReduced;
+  for (int i = 0; i < isize(members.actors); ++i) {
+    entt::entity const link = members.actors[i];
+    int const offset = reg.get<CDofOffset const>(link).dofsOffset;
+    auto const velocity =
+        AsConstView(velFull).template MiddleRows<RigidSize::kDAll>(offset, RigidSize::kDAll);
+    auto& linkVelocity = reg.get<CRigidVel<TimeStep::Current>>(link).value;
+    linkVelocity.SetVCom(Load<RigidSize::kDTrans, Vec4r>(&velocity[0]));
+    linkVelocity.SetOmega(Load<RigidSize::kDRot, Vec4r>(&velocity[RigidSize::kDTrans]));
+    outLinkVels[i] = linkVelocity;
+  }
+  ecs::InvokeForEach(&mochi::rigid::UpdateRigidVelocity_Dynamic, reg, members.actors);
+
+  // The skinned velocities of nested soft actors may be differential variables, but they are
+  // invalidated after a pose reset. The skinned and/or blending velocity is not updated.
+  if (composition) {
+    ecs::InvokeForEach<ecs::policy::AllowReadWriteSameComponent>(
+        &skinned::UpdateSkinningVelocity</*kIsState*/ true>, reg, composition->soft);
+  }
+}
+
+static void InvalidateArticulatedActorStepHistory(
+    entt::registry& reg,
+    entt::entity e,
+    CGroupMembers const& members,
+    CBlendedComposition const* composition) {
+  for (auto const link : members.actors) {
+    InvalidateActorStepHistory(reg, link);
+  }
+  InvalidateActorStepHistory(reg, e);
+  if (composition) {
+    for (auto const soft : composition->soft) {
+      InvalidateActorStepHistory(reg, soft);
+    }
+  }
+}
+
+static void SynchronizeAfterExternalPoseChange(entt::registry& reg, entt::entity e) {
+  MOCHI_ASSERT_VERBOSE(
+      reg.all_of<TagArticulatedActor>(e),
+      "SynchronizeAfterExternalPoseChange requires an articulated actor.");
+
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(UpdateDerivedStateFromPose, reg, e);
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      UpdateDerivedVelocityFromJointVelocities, reg, e);
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      InvalidateArticulatedActorStepHistory, reg, e);
 }
 
 void articulated::compound::SetArticulatedPoseFromLinks(entt::registry& reg, entt::entity e) {
@@ -166,16 +313,9 @@ void articulated::compound::SetArticulatedPoseFromLinks(entt::registry& reg, ent
   ecs::InvokeOnEntity(&SetFullPoseFromBones, reg, e);
   ecs::InvokeOnEntity(&SetReducedPoseFromFullPose, reg, e);
 
-  // Recompute derived state from the projected reduced pose, snapping the links onto the joint
-  // manifold so they stay consistent with it.
-  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
-      UpdateDerivedStateFromPose</*kUpdateLinks*/ true>, reg, e);
-
-  // External state changes invalidate step history.
-  InvalidateActorStepHistory(reg, e);
-  for (auto const& link : reg.get<CGroupMembers const>(e).actors) {
-    InvalidateActorStepHistory(reg, link);
-  }
+  // Recompute derived state and velocity from the projected reduced pose, snapping the links onto
+  // the joint manifold so they stay consistent with it.
+  SynchronizeAfterExternalPoseChange(reg, e);
 }
 
 void articulated::compound::SetArticulatedBodyPose(
@@ -193,15 +333,8 @@ void articulated::compound::SetArticulatedBodyPose(
   // Copy the pose to the actor's component
   current = AsConstView(pose);
 
-  // Recompute all pose-derived state (transforms, link states, Jacobian) from the reduced pose.
-  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
-      UpdateDerivedStateFromPose</*kUpdateLinks*/ true>, reg, e);
-
-  // External state changes invalidate step history.
-  InvalidateActorStepHistory(reg, e);
-  for (auto const& link : reg.get<CGroupMembers const>(e).actors) {
-    InvalidateActorStepHistory(reg, link);
-  }
+  // Recompute derived state and velocity from the reduced pose and velocity.
+  SynchronizeAfterExternalPoseChange(reg, e);
 }
 
 void articulated::compound::SetArticulatedRootTransform(
@@ -211,15 +344,8 @@ void articulated::compound::SetArticulatedRootTransform(
   // The link world transforms depend on the root transform via forward kinematics.
   reg.get<CRootTransform>(e).worldFromLocal = worldFromRoot;
 
-  // Recompute all pose-derived state (transforms, link states, Jacobian) with the new root.
-  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
-      UpdateDerivedStateFromPose</*kUpdateLinks*/ true>, reg, e);
-
-  // External state changes invalidate step history.
-  InvalidateActorStepHistory(reg, e);
-  for (auto const& link : reg.get<CGroupMembers const>(e).actors) {
-    InvalidateActorStepHistory(reg, link);
-  }
+  // Recompute derived state and velocity from the reduced pose and velocity.
+  SynchronizeAfterExternalPoseChange(reg, e);
 }
 
 void articulated::compound::GetLinkTransforms(
@@ -235,18 +361,6 @@ void articulated::compound::GetLinkTransforms(
   for (int i = 0; i < outWorldFromLink.size(); ++i) {
     outWorldFromLink[i] = reg.get<CRootTransform const>(members.actors[i]).worldFromLocal;
   }
-}
-
-// Set the velocity of rigid actors
-static void SetArticulatedRigidVelocity(
-    ColumnVectorView<real const> fullDofsVel,
-    ecs::RequiredTag<TagArticulatedLinkActor>,
-    CDofOffset const& rigidDofOffset,
-    CRigidVel<TimeStep::Current>& outCurrVel) {
-  auto vel = fullDofsVel.template MiddleRows<RigidSize::kDAll>(
-      rigidDofOffset.dofsOffset, RigidSize::kDAll);
-  outCurrVel.value.SetVCom(Load<RigidSize::kDTrans, Vec4r>(&vel[0]));
-  outCurrVel.value.SetOmega(Load<RigidSize::kDRot, Vec4r>(&vel[RigidSize::kDTrans]));
 }
 
 void articulated::compound::SetArticulatedJointVelocities(
@@ -265,7 +379,7 @@ void articulated::compound::SetArticulatedJointVelocities(
   auto& jointVels = reg.get<CArticulatedJointVels<TimeStep::Current>>(e).value;
   for (int i = 0; i < props.numLinks; ++i) {
     auto const& dofInfo = joints->dofInfo[i];
-    auto& jointVel = jointVels[i].value;
+    auto& jointVel = jointVels[i];
     switch (joints->jointTypes[i]) {
       case ArticulatedJointType::Free:
         jointVel.SetVCom(Load<3, Vec4r>(&vel[dofInfo.GetTransOffset()]));
@@ -274,7 +388,7 @@ void articulated::compound::SetArticulatedJointVelocities(
         jointVel.SetOmega(Load<3, Vec4r>(&vel[dofInfo.GetRotOffset()]));
       } break;
       case ArticulatedJointType::Revolute: {
-        jointVel.SetOmega(vel[dofInfo.GetRotOffset()] * ToSimd(joints->jointAxes[i]));
+        jointVel.SetOmegaWithZeroVSym(vel[dofInfo.GetRotOffset()] * ToSimd(joints->jointAxes[i]));
       } break;
       case ArticulatedJointType::Prismatic:
         jointVel.SetVCom(vel[dofInfo.GetTransOffset()] * ToSimd(joints->jointAxes[i]));
@@ -285,24 +399,11 @@ void articulated::compound::SetArticulatedJointVelocities(
     }
   }
 
-  // Compute the full-dof velocity. The Jacobian is up to date.
-  auto const& jacobian = reg.get<CArticulatedJacobian const>(e);
-  ColumnVector<real> velFull = jacobian.value * AsConstView(vel);
-
-  // Update the velocity of the rigid actors within the articulated body.
-  ecs::InvokeForEach(
-      &SetArticulatedRigidVelocity,
-      reg,
-      reg.get<CGroupMembers const>(e).actors,
-      AsConstView(velFull));
-  ecs::InvokeForEach(
-      &mochi::rigid::UpdateRigidVelocity_Dynamic, reg, reg.get<CGroupMembers const>(e).actors);
-
-  // External state changes invalidate step history.
-  InvalidateActorStepHistory(reg, e);
-  for (auto const& link : reg.get<CGroupMembers const>(e).actors) {
-    InvalidateActorStepHistory(reg, link);
-  }
+  // Recompute derived velocity from the reduced velocity.
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      UpdateDerivedVelocityFromJointVelocities, reg, e);
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
+      InvalidateArticulatedActorStepHistory, reg, e);
 }
 
 static void RootLinkTransformsToCoMLinkTransforms(
@@ -394,38 +495,6 @@ void articulated::compound::GetLinkTransformsComFromPose(
       outLinkTransformsCom);
 }
 
-// Copy the current velocity of active joints.
-static void GetArticulatedJointVelocitiesImpl(
-    CArticulatedProps const& props,
-    Span<ArticulatedJointType const> jointTypes,
-    Span<Real3 const> jointAxes,
-    Span<ArticulatedDofInfo const> jointDofInfo,
-    CArticulatedJointVels<TimeStep::Current> const& jointVels,
-    ColumnVectorView<real> outVel) {
-  for (int i = 0; i < props.numLinks; ++i) {
-    auto const& jointVel = jointVels.value[i].value;
-    auto const& dofInfo = jointDofInfo[i];
-    switch (jointTypes[i]) {
-      case ArticulatedJointType::Free:
-        Store(&outVel[dofInfo.GetTransOffset()], jointVel.GetVCom());
-        [[fallthrough]];
-      case ArticulatedJointType::Spherical: {
-        Store<RigidSize::kDRot>(&outVel[dofInfo.GetRotOffset()], jointVel.GetOmegaAndVSym().first);
-      } break;
-      case ArticulatedJointType::Revolute: {
-        outVel[dofInfo.GetRotOffset()] =
-            Dot(ToReal3(jointVel.GetOmegaAndVSym().first), jointAxes[i]);
-      } break;
-      case ArticulatedJointType::Prismatic:
-        outVel[dofInfo.GetTransOffset()] = Dot(ToReal3(jointVel.GetVCom()), jointAxes[i]);
-        break;
-      default:
-        AssertJointTypeCount<6>();
-        break;
-    }
-  }
-}
-
 void articulated::compound::GetArticulatedJointVelocities(
     entt::registry const& reg,
     entt::entity e,
@@ -438,8 +507,8 @@ void articulated::compound::GetArticulatedJointVelocities(
 
   auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
   auto const& jointVels = reg.get<CArticulatedJointVels<TimeStep::Current> const>(e);
-  GetArticulatedJointVelocitiesImpl(
-      props, joints->jointTypes, joints->jointAxes, joints->dofInfo, jointVels, AsView(outVel));
+  GetArticulatedJointVelocities(
+      joints->jointTypes, joints->jointAxes, joints->dofInfo, jointVels.value, AsView(outVel));
 }
 
 static void AddConstraints(
@@ -591,6 +660,10 @@ void articulated::compound::AddPoseController(
     WarnOnIgnoredJointTrackingParams(joints->jointTypes, params.jointTracking, isize(links));
   }
 
+  for (auto const& constraint : info) {
+    reg.get<CConstraintInfo>(GetEntityUnchecked(constraint.handle)).isActorOwned = true;
+  }
+
   // Emplace component with all pose constraints
   reg.emplace<CControllerConstraints>(e, std::move(info), std::move(impl));
 
@@ -678,7 +751,8 @@ static void SetControllerTargets(
   }
 }
 
-static void SetTargetPoseImpl(
+// Returns whether the stored target changed.
+static bool SetTargetPoseImpl(
     entt::registry& reg,
     entt::entity e,
     Span<real const> pose,
@@ -688,7 +762,10 @@ static void SetTargetPoseImpl(
 
   // Update the local target pose and link transforms
   auto& target = reg.get<CControllerTarget<TimeStep::Current>>(e);
+  bool const changed =
+      pose != MakeConstSpan(target.JointPose()) || linkTransformsCom != target.LinkTransformsCom();
   target.Set(AsConstView(pose), linkTransformsCom);
+  return changed;
 }
 
 static void InitializeOldTargetImpl(entt::registry& reg, entt::entity e) {
@@ -721,14 +798,14 @@ void articulated::compound::GetTargetLinkTransforms(
   ComLinkTransformsToRootLinkTransforms(reg, e, linksCom, outWorldFromTarget);
 }
 
-void articulated::compound::SetTargetLinkTransforms(
+bool articulated::compound::SetTargetLinkTransforms(
     entt::registry& reg,
     entt::entity e,
     Span<TransformRT const> worldFromTarget,
     Error& error) {
   auto const& props = reg.get<CArticulatedProps const>(e);
   MOCHI_ERROR_IF(worldFromTarget.size() != props.numLinks, error, "Invalid number of transforms");
-  MOCHI_ERROR_RETURN(error);
+  MOCHI_ERROR_RETURN(error, false);
 
   // Reserve stack memory for 128 transforms and pose (up to 256 joints with 4 values per joint).
   MOCHI_FILO_STACK_ALLOCATOR(allocator, sizeof(TransformRT) * 128 + sizeof(real) * 4 * 256);
@@ -744,7 +821,7 @@ void articulated::compound::SetTargetLinkTransforms(
   pose.resize_noinit(props.reducedPoseDim);
   GetPoseFromLinkTransformsCom(reg, e, linkTransformsCom, pose);
 
-  SetTargetPoseImpl(reg, e, pose, linkTransformsCom);
+  return SetTargetPoseImpl(reg, e, pose, linkTransformsCom);
 }
 
 void articulated::compound::CombinePoseAndLinkTargets(
@@ -815,14 +892,14 @@ void articulated::compound::CombinePoseAndLinkTargets(
   ComLinkTransformsToRootLinkTransforms(reg, e, outLinkTransforms, outLinkTransforms);
 }
 
-void articulated::compound::SetTargetPose(
+bool articulated::compound::SetTargetPose(
     entt::registry& reg,
     entt::entity e,
     Span<real const> pose,
     Error& error) {
   auto const& props = reg.get<CArticulatedProps const>(e);
   MOCHI_ERROR_IF(pose.size() != props.reducedPoseDim, error, "Invalid pose size");
-  MOCHI_ERROR_RETURN(error);
+  MOCHI_ERROR_RETURN(error, false);
 
   // Reserve stack memory for the transforms (up to 256 links).
   MOCHI_FILO_STACK_ALLOCATOR(allocator, sizeof(TransformRT) * 256);
@@ -830,7 +907,7 @@ void articulated::compound::SetTargetPose(
   linkTransformsCom.resize_noinit(props.numLinks);
   GetLinkTransformsComFromPose(reg, e, pose, linkTransformsCom);
 
-  SetTargetPoseImpl(reg, e, pose, linkTransformsCom);
+  return SetTargetPoseImpl(reg, e, pose, linkTransformsCom);
 }
 
 static void SetZeroTargetJointVelocity(entt::registry& reg, entt::entity e, Error& error) {
@@ -988,6 +1065,12 @@ void articulated::compound::SetPoseControllerParams(
   auto const& props = reg.get<CArticulatedProps const>(e);
   int const numLinks = static_cast<int>(props.numLinks);
 
+  // Validate every entry before the first write so an error leaves the controller unchanged.
+  ValidatePoseTrackingParams(params.jointTracking, numLinks, error);
+  ValidatePoseTrackingParams(params.linkPosTracking, numLinks, error);
+  ValidatePoseTrackingParams(params.linkRotTracking, numLinks, error);
+  MOCHI_ERROR_RETURN(error);
+
   // All three constraint types are always present (see AddPoseController). An empty array is
   // treated as a single default-constructed PoseTrackingParams (zero gains) broadcast to all
   // links, matching the behavior at controller creation.
@@ -998,20 +1081,6 @@ void articulated::compound::SetPoseControllerParams(
                                                       : MakeConstSpan(params.linkRotTracking);
   auto const joint = params.jointTracking.empty() ? MakeSingletonConstSpan(paramsZero)
                                                   : MakeConstSpan(params.jointTracking);
-
-  MOCHI_ERROR_IF(
-      isize(linkPos) != 1 && isize(linkPos) != numLinks,
-      error,
-      "linkPosTracking size must be empty, 1, or numLinks");
-  MOCHI_ERROR_IF(
-      isize(linkRot) != 1 && isize(linkRot) != numLinks,
-      error,
-      "linkRotTracking size must be empty, 1, or numLinks");
-  MOCHI_ERROR_IF(
-      isize(joint) != 1 && isize(joint) != numLinks,
-      error,
-      "jointTracking size must be empty, 1, or numLinks");
-  MOCHI_ERROR_RETURN(error);
 
   auto const* joints = reg.get<CArticulatedBodyShape const>(e).shape->GetJointsData();
   WarnOnIgnoredJointTrackingParams(joints->jointTypes, params.jointTracking, numLinks);
@@ -1027,10 +1096,9 @@ void articulated::compound::SetPoseControllerParams(
     }
 
     int const idx = isize(source) == 1 ? 0 : constraints.info[i].link;
-    constraints.impl[i].constraint->SetStiffness(source[idx].stiffness, error);
-    constraints.impl[i].constraint->SetDamping(source[idx].damping, error);
-    constraints.impl[i].constraint->SetSaturation(source[idx].saturation, error);
-    MOCHI_ERROR_RETURN(error);
+    constraints.impl[i].constraint->SetStiffness(source[idx].stiffness, ErrorAssert{});
+    constraints.impl[i].constraint->SetDamping(source[idx].damping, ErrorAssert{});
+    constraints.impl[i].constraint->SetSaturation(source[idx].saturation, ErrorAssert{});
   }
 }
 
@@ -1095,38 +1163,38 @@ Span<real const> articulated::compound::GetPoseControllerForce(
   return query->force;
 }
 
-static ArticulatedSkinningData CreateArticulatedSkinningData(
-    Span<Real3 const> restCoordsSpan,
-    SkinningData const& skinningData,
-    SkinningParams const& skinningParams,
-    int numReducedDofs) {
+static void EmplaceArticulatedSkinningData(
+    entt::registry& reg,
+    entt::entity entity,
+    entt::entity articulated,
+    Span<Real3 const> restCoords,
+    SkinningData const& skinningData) {
   MOCHI_PROFILE_SCOPE();
-  int numSkinnedNodes = isize(skinningData.weights) / skinningData.weightsPerNode;
 
-  // Consistency checks for input data
-  MOCHI_ASSERT(
-      isize(skinningData.weights) == isize(skinningData.indices),
-      "Indices and weights have different sizes");
+  // Fetch root-link-from-bone-CoM transforms while the rigid actors are in their reference pose.
+  // These encode each bone's reference orientation and center-of-mass offset from the root link.
+  auto const& groupMembers = reg.get<CGroupMembers const>(articulated);
+  int const numActors = isize(groupMembers.actors);
+  DynamicArray<TransformRT> preTransforms;
+  preTransforms.reserve(numActors);
+  TransformRT const rootLinkFromWorld =
+      Invert(reg.get<CRootTransform const>(groupMembers.actors[0]).worldFromLocal);
+  for (entt::entity const actor : groupMembers.actors) {
+    TransformRT const& worldFromBoneCenterOfMass =
+        reg.get<CRigidState<TimeStep::Current> const>(actor).value;
+    TransformRT const rootLinkFromBoneCenterOfMass = rootLinkFromWorld * worldFromBoneCenterOfMass;
+    preTransforms.emplace_back(Invert(rootLinkFromBoneCenterOfMass));
+  }
 
-  // Create components for resolution of skinning coordinates
-  ColumnVector<real> restCoords =
-      ColumnVectorView<real const>(Flatten(restCoordsSpan).data(), numSkinnedNodes * 3);
-  Error error;
-  auto skinningTransform = skinning::CreateSkinningTransform(skinningData, skinningParams, error);
-  MOCHI_ASSERT(error.IsOK(), "Error creating skinning transform");
-
-  // Create components for resolution of skinning Jacobians
-  auto jacobianDJoints = CreateJacobianStorage(restCoords.Rows(), numReducedDofs);
-  auto jacobianDBones = skinningTransform.CreateDBones();
-
-  // Create and return skinning data component
-  SkinningData skinningDataCopy(skinningData);
-  return ArticulatedSkinningData{
-      .restCoords = std::move(restCoords),
-      .skinningData = std::move(skinningDataCopy),
-      .skinningTransform = std::move(skinningTransform),
-      .jacobianDBones = std::move(jacobianDBones),
-      .jacobianDJoints = std::move(jacobianDJoints)};
+  // Emplace skinning data component
+  auto& outSkinningData = reg.emplace<CArticulatedSkinningData>(entity);
+  outSkinningData.restCoords = AsConstView(Flatten(restCoords));
+  outSkinningData.skinningData = skinningData;
+  outSkinningData.skinningTransform = DSkinningTransform(
+      skinningData.indices,
+      skinningData.weights,
+      skinningData.weightsPerNode,
+      std::move(preTransforms));
 }
 
 void mochi::InitSkinnedMesh(
@@ -1162,6 +1230,10 @@ void mochi::InitSkinnedMesh(
   }
   auto const& skinningData = shape->GetMeshSkinning();
   MOCHI_ERROR_IF_NOT(skinningData, error, "Skinning data not available");
+  MOCHI_ERROR_RETURN(error);
+
+  auto const& actors = reg.get<CGroupMembers const>(articulated).actors;
+  model::ValidateSkinning(*skinningData, mesh->GetNumNodes(), isize(actors), error);
   MOCHI_ERROR_RETURN(error);
 
   // Create mesh and basic transform components if not present
@@ -1206,14 +1278,11 @@ void mochi::InitSkinnedMesh(
 
   // Emplace skinning data component. Some data is fetched from the articulated entity, some data
   // from this entity (possibly different).
-  SkinningParams skinningParams =
-      articulated::compound::CreateSkinningParams(reg, articulated, true, error);
-  MOCHI_ERROR_RETURN(error);
   auto const restCoords = mesh->GetNodeCoordinates();
-  int numReducedDofs = reg.get<CArticulatedProps const>(articulated).reducedDofsDim;
-  reg.emplace<CArticulatedSkinningData>(
-      entity,
-      CreateArticulatedSkinningData(restCoords, *skinningData, skinningParams, numReducedDofs));
+  EmplaceArticulatedSkinningData(reg, entity, articulated, restCoords, *skinningData);
+
+  reg.emplace<CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>>(
+      entity, kSpaceDim3 * mesh->GetNumNodes());
 }
 
 int mochi::InitDiscretizationSkinMesh(
@@ -1246,17 +1315,14 @@ int mochi::InitDiscretizationSkinMesh(
 
   // Branch on the runtime skin-mesh type.
   if (tetShape) {
-    // Emplace low vol discretization.
+    // Emplace the volume discretization.
     // IMPORTANT: It MUST be emplaced because CFemBoundaryDiscretization references it.
     auto const& tetMesh = tetShape->GetMesh();
     auto& femVolDisc = reg.emplace<CFemVolumeDiscretizationP1Q1>(e);
     femVolDisc.femElements.reserve(tetMesh->GetNumElements());
     for (int i = 0; i < tetMesh->GetNumElements(); ++i) {
       femVolDisc.femElements.emplace_back(
-          i,
-          tetMesh->GetNodeCoordinates(),
-          tetMesh->GetElementConnectivity(),
-          tetrahedral::kTetrahedralQuadrature1);
+          i, tetMesh->GetNodeCoordinates(), tetMesh->GetElementConnectivity());
     }
 
     // Emplace the boundary discretization.
@@ -1293,6 +1359,63 @@ int mochi::InitDiscretizationSkinMesh(
   }
 }
 
+namespace {
+
+// Initialize the bone points of all contact samples from the rest positions
+template <typename DiscretizationT>
+void InitContactSampleBonePoints(
+    DiscretizationT const& discretization,
+    CArticulatedSkinningData const& skinningData,
+    CContactPartitions const& contactPartitions,
+    CContactSampleBonePoints& outPoints) {
+  int const numSamples = discretization.GetNumQuadPoints();
+  outPoints.offsets.resize_noinit(numSamples + 1);
+  outPoints.offsets[0] = 0;
+  for (int sample = 0; sample < numSamples; ++sample) {
+    auto const& partition = contactPartitions[contactPartitions.SampleIdxToPartitionIdx(sample)];
+    int const numBones = isize(std::get<DynamicArray<int>>(partition.GetDofDescriptors()[0]));
+    outPoints.offsets[sample + 1] = outPoints.offsets[sample] + numBones;
+  }
+  outPoints.points.resize_noinit(outPoints.offsets.back());
+
+  auto const restPositions = Unflatten<Real3 const>(MakeConstSpan(skinningData.restCoords));
+  auto const& skinningTransform = skinningData.skinningTransform;
+  discretization.Visit([&](auto const& discretizationImpl) {
+    using ElementT = typename std::decay_t<decltype(discretizationImpl)>::ElementT;
+    Span<ElementT const> const femElements = discretizationImpl.femElements;
+    for (int sample = 0; sample < numSamples; ++sample) {
+      int const offset = outPoints.offsets[sample];
+      auto points =
+          MakeSpan(outPoints.points).subspan(offset, outPoints.offsets[sample + 1] - offset);
+      auto const& partition = contactPartitions[contactPartitions.SampleIdxToPartitionIdx(sample)];
+      auto const boneIds =
+          MakeConstSpan(std::get<DynamicArray<int>>(partition.GetDofDescriptors()[0]));
+      MOCHI_ASSERT_VERBOSE(points.size() == boneIds.size());
+      std::fill(points.begin(), points.end(), Vec4r{});
+      auto const nodes = GetNodeInfo(femElements, sample);
+      NdArray<real, ElementT::kNumNodes> const quadratureWeights =
+          GetWeightInfo(femElements, sample);
+      for (int k = 0; k < ElementT::kNumNodes; ++k) {
+        Vec4r const position = ToSimd(restPositions[nodes[k]]);
+        for (auto const& [boneId, weight] : skinningTransform.perVertexBones[nodes[k]]) {
+          // Bones without DoFs are not in the partition.
+          auto const bone = std::lower_bound(boneIds.begin(), boneIds.end(), boneId);
+          if (bone == boneIds.end() || *bone != boneId) {
+            continue;
+          }
+          // The lever arm about the link origin in the link frame, and 1 in the last lane, so that
+          // the last lane accumulates the weight.
+          Vec4r const leverArm =
+              skinningTransform.GetBonePreTransform(boneId).TransformPoint(position);
+          points[bone - boneIds.begin()] += (quadratureWeights[k] * weight) * ToSimdPoint(leverArm);
+        }
+      }
+    }
+  });
+}
+
+} // namespace
+
 void mochi::InitCollidingSkinMesh(
     entt::registry& reg,
     entt::entity e,
@@ -1305,19 +1428,32 @@ void mochi::InitCollidingSkinMesh(
 
   // Needed for skinned contact assembly.
   reg.emplace<CSkinnedContactSnle>(e);
+  reg.emplace<CArticulatedAsyncContactLinkResidual>(
+      e, static_cast<int>(reg.get<CArticulatedProps const>(articulated).fullDofsDim));
   reg.emplace<TagSkinnedContact>(e);
 
-  reg.emplace_or_replace<CBoundingVolume<TimeStep::Current>>(
-      e, shape.GetBoundingVolume(ErrorAssert{}));
-  reg.emplace_or_replace<CBoundingVolume<TimeStep::Previous>>(
-      e, shape.GetBoundingVolume(ErrorAssert{}));
+  reg.emplace_or_replace<CBoundingVolume>(e, shape.GetBoundingVolume(ErrorAssert{}));
 
-  // Other components for collision detection (as colliding object, not as collider)
-  deformable::EmplaceContactComponents(reg, e, numCollidingSamples);
+  // Initialize contact partitions.
+  auto const& contactPartitions = reg.emplace<CContactPartitions>(
+      e, InitializeContactPartitions(reg, e, articulated, strategies));
+
+  // Initialize the bone points of the contact samples from the rest positions. Only articulated
+  // skins use contact sums.
+  if (reg.all_of<TagArticulatedActor>(e)) {
+    auto& bonePoints = reg.emplace<CContactSampleBonePoints>(e);
+    auto const& skinningData = reg.get<CArticulatedSkinningData const>(e);
+    if (auto const* boundary = reg.try_get<CFemBoundaryDiscretization const>(e)) {
+      InitContactSampleBonePoints(*boundary, skinningData, contactPartitions, bonePoints);
+    } else {
+      auto const& surface = reg.get<CFemSurfaceDiscretization const>(e);
+      InitContactSampleBonePoints(surface, skinningData, contactPartitions, bonePoints);
+    }
+  }
+
+  // Other components for collision detection (as colliding object, not as collider).
+  deformable::EmplaceContactComponents(reg, e, numCollidingSamples, isize(contactPartitions));
   reg.emplace_or_replace<CConservativeStepBounds>(e);
-
-  // Initialize contact partitions
-  reg.emplace<CContactPartitions>(e, InitializeContactPartitions(reg, e, articulated, strategies));
 }
 
 template <TimeStep kStep>
@@ -1325,7 +1461,7 @@ void articulated::compound::UpdateBounds(
     ecs::RequiredTag<TagCompoundActor>,
     CTriangularMesh const& meshComponent,
     CFinalDisplacementRef<kStep> const& solComponent,
-    CBoundingVolume<TimeStep::Current>& outBounds) {
+    CBoundingVolume& outBounds) {
   static_assert(kStep == TimeStep::Current || kStep == TimeStep::StageStart);
   MOCHI_PROFILE_SCOPE();
   auto const& sol = solComponent.value;
@@ -1338,71 +1474,12 @@ template void articulated::compound::UpdateBounds<TimeStep::Current>(
     ecs::RequiredTag<TagCompoundActor>,
     CTriangularMesh const&,
     CFinalDisplacementRef<TimeStep::Current> const&,
-    CBoundingVolume<TimeStep::Current>&);
+    CBoundingVolume&);
 template void articulated::compound::UpdateBounds<TimeStep::StageStart>(
     ecs::RequiredTag<TagCompoundActor>,
     CTriangularMesh const&,
     CFinalDisplacementRef<TimeStep::StageStart> const&,
-    CBoundingVolume<TimeStep::Current>&);
-
-static void InitFullSparsityPattern(
-    entt::registry const& reg,
-    entt::entity compound,
-    CFullSparsityPattern& outFullSparsity,
-    CCompoundConstraintSnle* outConstraintSnle) {
-  MOCHI_PROFILE_SCOPE();
-  MOCHI_ASSERT(reg.all_of<TagCompoundActor>(compound));
-  auto const& members = reg.get<CGroupMembers const>(compound);
-
-  // Find the non-zero coordinates from actors
-  std::vector<NdArray<int, 2>> totalEntries;
-  totalEntries.reserve(4096); // Reduce re-allocation
-  for (entt::entity a : members.actors) {
-    int actorDofOffset = reg.get<CDofOffset const>(a).dofsOffset;
-    if (auto const* reducedSparsity = reg.try_get<CReducedSparsityPattern const>(a)) {
-      AppendNonZeroCoordinates(totalEntries, reducedSparsity->graph, actorDofOffset);
-    } else {
-      auto const& fullSparsity = reg.get<CFullSparsityPattern const>(a);
-      AppendNonZeroCoordinates(totalEntries, fullSparsity.graph, actorDofOffset);
-    }
-  }
-
-  // Add the non-zero coordinates from constraints and update CCompoundConstraintSnle
-  if (!members.constraints.empty()) {
-    MOCHI_ASSERT(
-        outConstraintSnle != nullptr,
-        "A compound with constraints should have CCompoundConstraintSnle");
-
-    std::vector<NdArray<int, 2>> constraintEntries;
-    constraintEntries.reserve(512); // Reduce reallocation
-    for (entt::entity c : members.constraints) {
-      auto const& globalResIndices = reg.get<CConstraintGlobalSparsityCache const>(c).resIndices;
-      int const numGlobalDofs = isize(globalResIndices);
-      constraintEntries.reserve(constraintEntries.size() + Sqr(numGlobalDofs));
-      for (int d0 = 0; d0 < numGlobalDofs; ++d0) {
-        for (int d1 = 0; d1 < numGlobalDofs; ++d1) {
-          constraintEntries.emplace_back(globalResIndices[d0], globalResIndices[d1]);
-        }
-      }
-    }
-
-    Append(totalEntries, constraintEntries);
-
-    auto constraintSparsity = MakeSparsityGraph(std::move(constraintEntries));
-    outConstraintSnle->residuals.clear();
-    outConstraintSnle->dresiduals.clear();
-    outConstraintSnle->residuals.emplace_back(
-        /*offset*/ 0, ColumnVector<real>::Zero(isize(constraintSparsity)));
-    outConstraintSnle->dresiduals.emplace_back(
-        /*rowOffset*/ 0,
-        /*colOffset*/ 0,
-        SparseMatrix<real>{std::move(constraintSparsity)},
-        /*symmetricPair*/ std::nullopt);
-  }
-
-  // Store the compound's global sparsity
-  outFullSparsity.graph = MakeSparsityGraph(std::move(totalEntries));
-}
+    CBoundingVolume&);
 
 static void InitSkinMesh(
     entt::registry& reg,
@@ -1425,61 +1502,26 @@ static void InitSkinMesh(
       reg, e, *shape, params.boundarySubsampling, params.boundaryElementType, error);
   MOCHI_ERROR_RETURN(error);
 
-  auto strategy = ContactPartitionStrategy::SkinningDofGroups;
+  auto strategy = ContactPartitionStrategy::SharedBones;
   InitCollidingSkinMesh(
       reg, e, e, *shape, MakeSingletonConstSpan(strategy), params.contact, numCollidingSamples);
 }
 
-void mochi::articulated::compound::InitFullDofProblem(entt::registry& reg, entt::entity e) {
+void mochi::articulated::compound::UpdateFullDofInfo(entt::registry& reg, entt::entity e) {
   // Every compound has a CDofOffset. In regular compounds, this component refers to DoFs in the
   // island's SNLE problem. However, articulated compounds contain full DoF actors which do not
   // contribute to the island directly. Instead, these full DoF actors are assembled into a local
   // SNLE problem. Therefore, the actors in an articulated compound should start with a DoF offset
-  // of zero (relative to the articulation).
-  auto const& groupMembers = reg.get<CGroupMembers const>(e);
+  // of zero (relative to the articulation). Their constraints, if any, refer to these offsets.
   mochi::compound::UpdateDofInfo(
       reg,
       e, // compound
-      groupMembers,
+      reg.get<CGroupMembers const>(e),
       0, // Start at zero dofs offset
       0, // Start at zero pose offset
       0, // Start at zero derived state offset (unused by articulated links)
       0 // Start at zero diff input offset (unused by articulated links)
   );
-
-  // An articulated compound can have constraints (e.g. the position & rotation tracking constraints
-  // at the wrist of an articulated hand). Such constraints pertain to the full pose and do not get
-  // used by the solver directly.
-  auto* fullConstraintSnle = reg.try_get<CCompoundConstraintSnle>(e);
-  if (fullConstraintSnle) {
-    fullConstraintSnle->useInSolver = false;
-  }
-
-  // Initialize the full sparsity pattern
-  auto& fullSparsity = reg.emplace_or_replace<CFullSparsityPattern>(e);
-  InitFullSparsityPattern(reg, e, fullSparsity, fullConstraintSnle);
-
-  // A compound with zero reduced dofs (e.g. an all-Hard/weld skeleton) has nothing to solve. Skip
-  // the SNLE machinery entirely instead of running it as a chain of no-ops on a 0x0 problem.
-  if (reg.get<CActorDofInfo const>(e).dofsSize == 0) {
-    return;
-  }
-
-  // Storage for assembly of the compound's SNLE problem.
-  if (auto* snle = reg.try_get<CActorSnle>(e)) {
-    MOCHI_ASSERT(snle->UseReduced(), "Expected reduced SNLE to be enabled.");
-    int const reducedSize = snle->reducedResidual.Rows();
-    reg.replace<CActorSnle>(
-        e, SparseMatrix<real>{fullSparsity.graph}, Matrix<real>::Zero(reducedSize, reducedSize));
-  } else {
-    reg.emplace<CActorSnle>(e, SparseMatrix<real>{fullSparsity.graph});
-  }
-
-  // Non-linear solver convergence weights (lazily initialized). Preserved across re-invocations of
-  // InitFullDofProblem. Nothing this function does invalidates the convergence weights.
-  if (!reg.any_of<CActorConvergenceWeights>(e)) {
-    reg.emplace<CActorConvergenceWeights>(e);
-  }
 }
 
 /**
@@ -1530,13 +1572,14 @@ void mochi::articulated::compound::InitArticulatedBodyActor(
   // An articulated body is a type of compound. Initialize it as a compound first.
   InitCompoundActor(reg, e, error);
   MOCHI_ERROR_RETURN(error);
+
+  // Tag before adopting links so partial-initialization cleanup recognizes the aggregate.
+  reg.emplace<TagArticulatedActor>(e);
+
   AddLinkActorsToArticulatedCompound(reg, e, bones);
 
   // Update actor info component
   reg.emplace_or_replace<CActorInfo>(e, std::string(params.name), ActorType::Articulated);
-
-  // Add articulated actor tag
-  reg.emplace<TagArticulatedActor>(e);
 
   MOCHI_ASSERT(reg.all_of<CDofOffset>(e), "Expected InitCompoundActor to add CDofOffset already");
 
@@ -1563,7 +1606,7 @@ void mochi::articulated::compound::InitArticulatedBodyActor(
 
   // Extract articulated parameters from articulated body shape
   auto const* joints = articulatedShapePtr->GetJointsData();
-  // Pose-space layout is stored on the actor; dof-space layout lives on the shape's JointsData.
+  // Pose-space layout is stored on the actor; DoF-space layout lives on the shape's JointsData.
   auto const& poseInfo =
       reg.emplace<CArticulatedJointPoseInfo>(e, articulated::SetupJointPose(joints->jointTypes));
   Span<ArticulatedDofInfo const> const dofInfo = joints->dofInfo;
@@ -1617,7 +1660,7 @@ void mochi::articulated::compound::InitArticulatedBodyActor(
       articulatedShapePtr->GetJointsData()->parentLinkFromJoint);
   reg.emplace<CArticulatedRestTransforms>(e, std::move(restTransforms));
 
-  // Create storage for reduced pose, full pose and Jacobian
+  // Create storage for reduced pose, full pose, full velocity and Jacobian.
   auto& fullPose = reg.emplace<CArticulatedFullPose>(e, fullPoseDim);
   reg.emplace<CArticulatedReducedPose<TimeStep::Current>>(e, reducedPoseDim);
   reg.emplace<CArticulatedReducedPose<TimeStep::Previous>>(e, reducedPoseDim);
@@ -1626,6 +1669,7 @@ void mochi::articulated::compound::InitArticulatedBodyActor(
   reg.emplace<CArticulatedJacobian>(e, CreateJacobianStorage(fullDofsDim, reducedDofsDim));
   reg.emplace<CArticulatedJointTransforms<TimeStep::Current>>(e, numActors);
   reg.emplace<CArticulatedJointTransforms<TimeStep::StageStart>>(e, numActors);
+  reg.emplace<CArticulatedLinkVels>(e, numActors);
   reg.emplace<CArticulatedJointVels<TimeStep::Current>>(e, numActors);
   reg.emplace<CArticulatedJointVels<TimeStep::Previous>>(e, numActors);
   reg.emplace<CArticulatedJointVels<TimeStep::StageStart>>(e, numActors);
@@ -1638,21 +1682,20 @@ void mochi::articulated::compound::InitArticulatedBodyActor(
   actorDofInfo.poseSize = reducedPoseDim;
   actorDofInfo.dofsSize = reducedDofsDim;
 
-  // Initialize data related to the full DoF problem
-  InitFullDofProblem(reg, e);
+  // DoF offsets of the links and sparsity of the constraints of the full-DoF problem
+  UpdateFullDofInfo(reg, e);
 
-  // The articulated compound outputs a reduced space residual and dresidual, which has different
-  // dimensions from the full space ones. Create a new sparsity pattern based on the reduced space
-  // dofs and overwrite compound-level sparsity pattern
-  reg.emplace<CReducedSparsityPattern>(e, MakeDenseSparsityGraph(reducedDofsDim, reducedDofsDim));
+  // An articulated actor with zero reduced dofs (e.g. an all-Hard/weld skeleton) has nothing to
+  // solve. Skip the SNLE machinery entirely instead of running it as a chain of no-ops on a 0x0
+  // problem.
+  if (reducedDofsDim != 0) {
+    // Storage for assembly of the compound's SNLE problem, and for its link-space residuals.
+    reg.emplace<CActorSnle>(e, Matrix<real>::Zero(reducedDofsDim, reducedDofsDim), fullDofsDim);
+    reg.emplace<CArticulatedSyncContactLinkResidual>(e, fullDofsDim);
+    reg.emplace<CArticulatedConstraintLinkResidual>(e, fullDofsDim);
 
-  // Lean assembly uses one actor residual & matrix for the articulated compound.
-  // CActorSnle only exists (initialized in InitFullDofProblem) when the compound has reduced dofs.
-  if (reducedDofsDim > 0) {
-    reg.get<CActorSnle>(e).EnableReduced(Matrix<real>::Zero(reducedDofsDim, reducedDofsDim));
-  } else {
-    MOCHI_ASSERT(
-        !reg.any_of<CActorSnle>(e), "Articulated actors with no DoFs should not have CActorSnle.");
+    // Non-linear solver convergence weights (lazily initialized).
+    reg.emplace<CActorConvergenceWeights>(e);
   }
 
   // Create vector of internal rigid actors' handles
@@ -1672,7 +1715,7 @@ void mochi::articulated::compound::InitArticulatedBodyActor(
     reg.emplace<CArticulatedFullPoseRef>(groupMembers.actors[a], AsConstView(fullPose.value));
     reg.emplace<CArticulatedRigidJacobian>(
         groupMembers.actors[a],
-        CreateJacobianStorage(RigidSize::kDAll, isize(reducedDofsMap.dofs[a])),
+        RowMatrix<real, RigidSize::kDAll>::Zero(RigidSize::kDAll, isize(reducedDofsMap.dofs[a])),
         reducedDofsMap.dofs[a]);
     reg.get<CActorSnle>(groupMembers.actors[a]).useInSolver = false;
 
@@ -1704,15 +1747,9 @@ void mochi::articulated::compound::InitArticulatedBodyActor(
   articulated::ConvertDofsToPose(joints->jointTypes, joints->dofInfo, poseInfo, zeroDofs, pose);
   reg.get<CArticulatedReducedPose<TimeStep::Previous>>(e).value = pose;
 
-  // Recompute all pose-derived state (transforms, link states, Jacobian) from the reduced pose.
-  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(
-      UpdateDerivedStateFromPose</*kUpdateLinks*/ true>, reg, e);
-
-  // Resolve skinning so the skinned displacements reflect the actual skeleton pose rather than the
-  // rest mesh.
-  if (skinMeshShape) {
-    ResolveAllNodeSkinningDisplacementsPipeline(reg, MakeSingletonConstSpan(e));
-  }
+  // Recompute all pose-derived state (transforms, link states, Jacobian, skinning) from the reduced
+  // pose.
+  ecs::InvokeOnEntity<ecs::policy::AllowFullRegistryAccess>(UpdateDerivedStateFromPose, reg, e);
 
   // Initialize the velocity to specified values or zero otherwise.
   if (params.jointVelocities.has_value() && !params.jointVelocities->empty()) {
@@ -1779,7 +1816,6 @@ void articulated::compound::UpdateJacobiansStatePipeline(
   MOCHI_PROFILE_SCOPE();
   ecs::ParallelInvokeForEach(
       "Evaluate articulated Jacobian on state", &UpdateJacobianState<kTimeStep>, reg, entities);
-  ecs::InvokeForEach(&ResolveSkinningJacobianDJoints, reg, entities);
 }
 
 #define MOCHI_SPECIALIZE_UPDATE_JACOBIANS_STATE_PIPELINE(kTimeStep)             \
@@ -1847,148 +1883,6 @@ void articulated::compound::UpdateJacobiansInputPipeline(
 MOCHI_SPECIALIZE_UPDATE_JACOBIANS_INPUT_PIPELINE(TimeStep::Current);
 MOCHI_SPECIALIZE_UPDATE_JACOBIANS_INPUT_PIPELINE(TimeStep::Previous);
 #undef MOCHI_SPECIALIZE_UPDATE_JACOBIANS_INPUT_PIPELINE
-
-// Generic implementation. Specializations follow.
-template <TimeStep kStep, bool kForceUseAllNodes>
-void articulated::compound::ResolveSkinning(
-    CArticulatedLinkTransforms<kStep> const& linkTransforms,
-    CArticulatedSkinningData const& skinningData,
-    CActiveUniqueNodes const* activeNodes,
-    CDisplacementSlice<real, kStep, DisplacementLayer::Skinned>& outDisplacements) {
-  MOCHI_PROFILE_SCOPE();
-  if (activeNodes && !kForceUseAllNodes) {
-    auto rest3 = Unflatten<Real3 const>(MakeConstSpan(skinningData.restCoords));
-    auto disp3 = Unflatten<Real3>(MakeSpan(outDisplacements.value));
-    Span<int const> activeNodeSpan = activeNodes->ViewIds();
-    skinningData.skinningTransform.Transform(
-        linkTransforms, skinningData.restCoords, outDisplacements.value, activeNodeSpan);
-    for (int iNode : activeNodeSpan) {
-      disp3[iNode] -= rest3[iNode];
-    }
-  } else {
-    skinningData.skinningTransform.Transform(
-        linkTransforms, skinningData.restCoords, outDisplacements.value);
-    outDisplacements.value -= skinningData.restCoords;
-  }
-}
-
-// Explicit specializations
-#define MOCHI_SPECIALIZE_RESOLVE_SKINNING(StepT)               \
-  template void articulated::compound::ResolveSkinning<StepT>( \
-      CArticulatedLinkTransforms<StepT> const& linkTransforms, \
-      CArticulatedSkinningData const& skinningData,            \
-      CActiveUniqueNodes const* activeNodes,                   \
-      CDisplacementSlice<real, StepT, DisplacementLayer::Skinned>& outDisplacements);
-MOCHI_SPECIALIZE_RESOLVE_SKINNING(TimeStep::Current);
-MOCHI_SPECIALIZE_RESOLVE_SKINNING(TimeStep::StageStart);
-#undef MOCHI_SPECIALIZE_RESOLVE_SKINNING
-
-void articulated::compound::ResolveSkinningJacobianDBones(
-    Span<TransformRT const> linkTransforms,
-    ColumnVectorView<real const> unposedCoords,
-    ArticulatedSkinningData& skinningData,
-    CActiveUniqueNodes const* activeNodes) {
-  MOCHI_PROFILE_SCOPE();
-  // Compute Jacobian DBones
-  Span<int const> activeNodesSpan = activeNodes ? activeNodes->ViewIds() : Span<int const>{};
-  skinningData.skinningTransform.DTransformDBones(
-      linkTransforms, unposedCoords, skinningData.jacobianDBones, activeNodesSpan);
-}
-
-void articulated::compound::ResolveSkinningJacobianDJoints(
-    CArticulatedLinkTransforms<TimeStep::Current> const& linkTransforms,
-    CArticulatedJacobian const& articulatedJacobian,
-    CActiveUniqueNodes const* activeNodes,
-    CArticulatedSkinningData& skinningData) {
-  MOCHI_PROFILE_SCOPE();
-
-  // Compute Jacobian DBones. Then Jacobian DJoints by chain rule with Jacobian DBones/DJoints
-  ResolveSkinningJacobianDBones(linkTransforms, skinningData.restCoords, skinningData, activeNodes);
-  static_assert(
-      krylov::details::MatTraits<decltype(skinningData.jacobianDJoints)>::kMajorDir ==
-      krylov::Direction::RowMajor); // Enforced for performance reasons.
-  static_assert(
-      krylov::details::MatTraits<decltype(articulatedJacobian.value)>::kMajorDir ==
-      krylov::Direction::RowMajor); // Enforced for performance reasons.
-
-  if (activeNodes) {
-    // TODO: If the % of nodes that are active is large, it may be more efficient to compute the
-    // full product like in the "else" branch.
-    // TODO(@pabfer): Introduce SparseMatrix::ApplyToSubset to encapsulate this logic inside the
-    // class.
-    constexpr long long kMinFlopsPerTask = 100000; // ~20 μs @ 5 GFLOP/s
-    auto const numTotalVertices = skinningData.jacobianDBones.Rows() / kSpaceDim3;
-    auto const minVerticesPerTask = static_cast<int>(
-        (kMinFlopsPerTask * numTotalVertices) /
-        (2 * skinningData.jacobianDBones.NumNonZeros() * articulatedJacobian.value.Cols()));
-    ParallelForEach(
-        "DJoints Skinning Jacobian Product",
-        activeNodes->ViewIds(),
-        Max(1, minVerticesPerTask),
-        [&](int vertexId) {
-          skinningData.jacobianDBones.ApplyToRange(
-              articulatedJacobian.value,
-              skinningData.jacobianDJoints,
-              vertexId * kSpaceDim3,
-              vertexId * kSpaceDim3 + kSpaceDim3);
-        });
-  } else {
-    skinningData.jacobianDJoints = skinningData.jacobianDBones * articulatedJacobian.value;
-  }
-}
-
-template <typename DiscretizationT>
-void articulated::compound::SetupCollidingJacobians(
-    ecs::Included<TagArticulatedActor>,
-    ecs::Excluded<TagBlendedActor>,
-    DiscretizationT const& discretization,
-    CDofOffset const& dofOffset,
-    CArticulatedSkinningData const& skinningData,
-    CContactPartitions const& contactPartitions,
-    CCollJacs<CollRole::Colliding>& outJacobians) {
-  MOCHI_PROFILE_SCOPE();
-
-  // Reserve stack memory for up to 256 elements.
-  MOCHI_FILO_STACK_ALLOCATOR(allocator, sizeof(JacData*) * 256);
-  auto jacobiansActive = outJacobians.GetPtrsNonEmpty(&allocator);
-  if (jacobiansActive.empty()) {
-    return;
-  }
-
-  discretization.Visit([&](auto const& discretizationImpl) {
-    using ElementT = typename std::decay_t<decltype(discretizationImpl)>::ElementT;
-    using DQuad = DMapQuad<ElementT>;
-    // Process all Jacobians in parallel
-    ParallelForEach(
-        "SetupCollidingJacobiansArticulatedCompound", jacobiansActive, 1, [&](JacData* jac) {
-          // Create differentiable map
-          auto const& dofsVariant =
-              contactPartitions[jac->query->collidingPartitionId].GetDofDescriptors()[0];
-          auto dofs = MakeConstSpan(std::get<DynamicArray<int>>(dofsVariant));
-          DMapSkinNoInput dskinning(0, skinningData.jacobianDJoints, dofs, dofOffset.dofsOffset);
-          DQuad dquad(discretizationImpl.femElements, jac->query->jacColliderFromWorld);
-          DMap<DQuad, DMapSkinNoInput> dmap(&dquad, &dskinning);
-
-          // Compute Jacobian
-          auto& jacs = *jac->jacs;
-          dmap.GetJac(jac->query->sampleIndices, jacs);
-          jacs[0].CompressIndices();
-        });
-  });
-}
-
-#define MOCHI_ARTICULATED_COMPOUND_SETUP_COLLIDING_JACOBIANS_INST(DISCRETIZATION_TYPE) \
-  template void articulated::compound::SetupCollidingJacobians<DISCRETIZATION_TYPE>(   \
-      ecs::Included<TagArticulatedActor>,                                              \
-      ecs::Excluded<TagBlendedActor>,                                                  \
-      DISCRETIZATION_TYPE const&,                                                      \
-      CDofOffset const&,                                                               \
-      CArticulatedSkinningData const&,                                                 \
-      CContactPartitions const&,                                                       \
-      CCollJacs<CollRole::Colliding>&);
-MOCHI_ARTICULATED_COMPOUND_SETUP_COLLIDING_JACOBIANS_INST(CFemBoundaryDiscretization);
-MOCHI_ARTICULATED_COMPOUND_SETUP_COLLIDING_JACOBIANS_INST(CFemSurfaceDiscretization);
-#undef MOCHI_ARTICULATED_COMPOUND_SETUP_COLLIDING_JACOBIANS_INST
 
 static void AssembleJointForces(
     AssemblyParams const& params,
@@ -2095,6 +1989,10 @@ void articulated::compound::AssembleTransmissionForces(
     CTimeIntegratorState const& intState,
     CTransmissions const& transmissions,
     CActorSnle& outCompoundSnle) {
+  MOCHI_ASSERT_VERBOSE(
+      params.gradTarget == GradTarget::Current || params.gradTarget == GradTarget::Previous,
+      "Unexpected grad target");
+  // Link-dependent terms go to the full residual, which ProjectFullResidual projects.
   for (auto const& transmission : transmissions.transmissions) {
     transmission->AddObjResDRes(
         MakeConstSpan(currLinkTxs),
@@ -2106,6 +2004,7 @@ void articulated::compound::AssembleTransmissionForces(
         params,
         outCompoundSnle.objective,
         outCompoundSnle.reducedResidual,
+        outCompoundSnle.fullResidual,
         std::get<Matrix<real>>(outCompoundSnle.reducedDResidual));
   }
 }
@@ -2205,7 +2104,7 @@ void articulated::compound::AssembleInertiaForces(
         intState.dtStage,
         currJointTxs[i],
         stageStartJointTxs[i],
-        stageStartJointVels.value[i].value,
+        stageStartJointVels.value[i],
         energy,
         gradient,
         hessian);
@@ -2231,8 +2130,8 @@ void articulated::compound::AssembleInertiaForces(
     }
     int const offset = poseInfo[i].offset;
     auto const stageStartJointVel = jointTypes[i] == ArticulatedJointType::Revolute
-        ? stageStartJointVels.value[i].value.GetOmegaAndVSym().first
-        : stageStartJointVels.value[i].value.GetVCom();
+        ? stageStartJointVels.value[i].GetOmegaAndVSym().first
+        : stageStartJointVels.value[i].GetVCom();
     real const stageStartVel = Dot<3>(ToSimd(jointAxes[i]), stageStartJointVel);
     inertiaFuncSingleDof(
         currPose.value[offset],
@@ -2324,6 +2223,7 @@ void articulated::compound::AssembleExternalForces(
     CArticulatedJointTransforms<TimeStep::Current> const& currJointTxs,
     CArticulatedJointTransforms<TimeStep::StageStart> const& stageStartJointTxs,
     CArticulatedReducedPose<TimeStep::Current> const& currPose,
+    CArticulatedReducedPose<TimeStep::StageStart> const& stageStartPose,
     CActorSnle& outCompoundSnle) {
   auto const* joints = bodyShape.shape->GetJointsData();
   auto const jointTypes = joints->jointTypes;
@@ -2367,7 +2267,9 @@ void articulated::compound::AssembleExternalForces(
     if (force == 0_r) {
       return false;
     }
-    AddSingleDofExternalForce(currPose.value[poseInfo[i].offset], force, energy, gradient);
+    int const offset = poseInfo[i].offset;
+    AddSingleDofExternalForce(
+        currPose.value[offset], stageStartPose.value[offset], force, energy, gradient);
     return true;
   };
   AssembleJointForces(
@@ -2516,15 +2418,151 @@ static bool HasDryFriction(CArticulatedJointFrictionParams const& friction) {
   });
 }
 
+bool articulated::ReadsJointFrictionHessianChoice(
+    entt::registry const& reg,
+    Span<entt::entity const> entities) {
+  return std::ranges::any_of(entities, [&](entt::entity e) {
+    auto const* friction = reg.try_get<CArticulatedJointFrictionParams>(e);
+    return friction && HasDryFriction(*friction);
+  });
+}
+
 // Whether any joint has nonzero joint inertia, requiring inertia-force assembly.
 static bool HasJointInertia(CArticulatedInertiaParams const& inertia) {
   return std::any_of(inertia.begin(), inertia.end(), [](real value) { return value != 0_r; });
 }
 
+// Assembles the reduced dresidual outJtDJ = J^T * D * J. D, the full-DoF dresidual, is block
+// diagonal in the links' 6x6 dresiduals, plus the constraints' dresidual, which spans the full DoFs
+// up to the last constrained one.
+static void AssembleReducedDResidual(
+    ecs::PartialRegistry<CActorSnle const, CDofOffset const, CArticulatedRigidJacobian const> reg,
+    Span<entt::entity const> links,
+    CArticulatedJacobian const& jacobian,
+    CCompoundConstraintSnle const* constraintFullSnle,
+    MatrixView<real> outJtDJ) {
+  MOCHI_ASSERT_VERBOSE(
+      outJtDJ.Rows() == jacobian.value.Cols() && outJtDJ.Cols() == jacobian.value.Cols(),
+      "Unexpected reduced dresidual size.");
+  outJtDJ.SetZero();
+
+  SparseMatrixView<real const> constraintFullDRes;
+  if (constraintFullSnle) {
+    MOCHI_ASSERT(constraintFullSnle->dresiduals.size() == 1, "Expected 1 DResidual.");
+    auto const& constraintDResidual = constraintFullSnle->dresiduals[0];
+    MOCHI_ASSERT(
+        constraintDResidual.rowOffset == 0 && constraintDResidual.colOffset == 0,
+        "Expected zero row and col offsets.");
+    constraintFullDRes =
+        std::get<SparseMatrixView<real const>>(AsConstView(constraintDResidual.matrix));
+    MOCHI_ASSERT(
+        constraintFullDRes.Rows() <= jacobian.value.Rows(),
+        "CCompoundConstraintSnle should have been resized to the number of full DOFs in this articulated compound");
+  }
+
+  // Scratch reused by every link, sized for a link that spans all reduced DoFs.
+  MOCHI_FILO_STACK_ALLOCATOR(tempAllocator, 64 * 1024);
+  int const numDofs = outJtDJ.Rows();
+  Matrix<real, RigidSize::kDAll, RigidSize::kDAll> diagonalBlock;
+  Matrix<real, RigidSize::kDAll> DJ(RigidSize::kDAll, numDofs, &tempAllocator);
+  Matrix<real> linkJtDJ(numDofs, numDofs, &tempAllocator);
+  RowMatrix<real, RigidSize::kDAll> couplingDJ(RigidSize::kDAll, numDofs, &tempAllocator);
+
+  // Link i's 6 rows J_i of J are nonzero only in the columns of its ancestor joints' DoFs, which
+  // its compact Jacobian lists, so the 6x6 diagonal block D_ii contributes J_i^T * D_ii * J_i
+  // through them. Constraint entries C_ij coupling link i with another link j (e.g. in closed
+  // kinematic loops) contribute J_i^T * C_ij * J_j. D is symmetric, and so is J^T * D * J: only
+  // its upper triangle is assembled, counting each pair of coupled links once, and then mirrored.
+  for (int i = 0; i < isize(links); ++i) {
+    int const offset = i * RigidSize::kDAll;
+    MOCHI_ASSERT_VERBOSE(
+        reg.get<CDofOffset const>(links[i]).dofsOffset == offset, "Unexpected link offset.");
+    auto const& linkSnle = reg.get<CActorSnle const>(links[i]);
+    MOCHI_ASSERT_VERBOSE(
+        std::holds_alternative<Matrix<real>>(linkSnle.fullDResidual), "Expected dense storage.");
+    auto const& linkDRes = std::get<Matrix<real>>(linkSnle.fullDResidual);
+    MOCHI_ASSERT_VERBOSE(
+        linkDRes.Rows() == RigidSize::kDAll && linkDRes.Cols() == RigidSize::kDAll,
+        "Expected a 6x6 link dresidual.");
+
+    // D_ii is the link's own dresidual, copied only if constraints add to it (e.g. link-based pose
+    // control). Constraints act on aligned triples of DoFs (see CConstraintInfo), so the 3 rows of
+    // each triple share their columns, and their values form a row-major row of 3x3 blocks.
+    bool isConstrained = false;
+    bool isCoupled = false;
+    int const rowEnd = Min(offset + RigidSize::kDAll, constraintFullDRes.Rows());
+    for (int row = offset; row < rowEnd; row += 3) {
+      auto const cols = constraintFullDRes.Indices(row);
+      RowMatrixView<real const, 3> const blockRow(
+          constraintFullDRes.Values(row).data(), 3, isize(cols));
+      for (int nz = 0; nz < isize(cols); nz += 3) {
+        int const col = cols[nz];
+        auto const block = blockRow.MiddleCols<3>(nz, 3);
+        int const j = col / RigidSize::kDAll;
+        if (j == i) {
+          if (!isConstrained) {
+            diagonalBlock = linkDRes;
+            isConstrained = true;
+          }
+          diagonalBlock.Block<3, 3>(row - offset, col - offset, 3, 3) += block;
+        } else if (j > i) {
+          if (!isCoupled) {
+            couplingDJ.SetZero();
+            isCoupled = true;
+          }
+          couplingDJ.MiddleRows<3>(row - offset, 3) += block * jacobian.value.MiddleRows<3>(col, 3);
+        }
+      }
+    }
+
+    auto const& linkJacobian = reg.get<CArticulatedRigidJacobian const>(links[i]);
+    auto const& dofs = linkJacobian.dofs;
+    MOCHI_ASSERT_VERBOSE(std::is_sorted(dofs.begin(), dofs.end()), "Expected ascending link DoFs.");
+    int const numLinkDofs = isize(dofs);
+    RowMatrixView<real const, RigidSize::kDAll> const Ji = linkJacobian.value;
+    if (isCoupled) {
+      // J_i^T * C_ij * J_j over links j > i and its transpose meet in the upper triangle, and both
+      // add to its diagonal.
+      auto couplingJtDJ = linkJtDJ.TopRows(numLinkDofs);
+      couplingJtDJ = Ji.Transpose() * couplingDJ;
+      for (int p = 0; p < numLinkDofs; ++p) {
+        int const dof = dofs[p];
+        outJtDJ.Col(dof).TopRows(dof + 1) += couplingJtDJ.Row(p).LeftCols(dof + 1).Transpose();
+        outJtDJ.Row(dof).RightCols(numDofs - dof) += couplingJtDJ.Row(p).RightCols(numDofs - dof);
+      }
+    }
+
+    MatrixView<real const, RigidSize::kDAll, RigidSize::kDAll> const Dii(
+        isConstrained ? diagonalBlock.Data() : linkDRes.Data());
+    auto blockDJ = DJ.LeftCols(numLinkDofs);
+    blockDJ = Dii * Ji;
+    // Panels of columns of J_i^T * D_ii * J_i, each computed only over the rows that reach the
+    // diagonal. Narrower panels take more products, and wider ones compute more of the lower
+    // triangle.
+    constexpr int kPanelCols = 8;
+    for (int q0 = 0; q0 < numLinkDofs; q0 += kPanelCols) {
+      int const q1 = Min(q0 + kPanelCols, numLinkDofs);
+      linkJtDJ.Block(0, q0, q1, q1 - q0) =
+          Ji.LeftCols(q1).Transpose() * blockDJ.MiddleCols(q0, q1 - q0);
+    }
+    for (int q = 0; q < numLinkDofs; ++q) {
+      for (int p = 0; p <= q; ++p) {
+        outJtDJ(dofs[p], dofs[q]) += linkJtDJ(p, q);
+      }
+    }
+  }
+
+  for (int col = 1; col < numDofs; ++col) {
+    for (int row = 0; row < col; ++row) {
+      outJtDJ(col, row) = outJtDJ(row, col);
+    }
+  }
+}
+
 void articulated::compound::EntityAssemble(
     AssemblyParams const& params,
     ecs::RequiredTag<TagArticulatedActor>,
-    ecs::PartialRegistry<CActorSnle const, CDofOffset const> reg,
+    ecs::PartialRegistry<CActorSnle const, CDofOffset const, CArticulatedRigidJacobian const> reg,
     ecs::OptionalTag<TagUseNewtonEulerInertia> useNewtonEulerInertia,
     CArticulatedProps const& props,
     CGroupMembers const& groupMembers,
@@ -2563,15 +2601,11 @@ void articulated::compound::EntityAssemble(
     }
   }
 
-  // This code currently assumes SparseMatrix format (TODO: Change this)
-  MOCHI_ASSERT(std::holds_alternative<SparseMatrix<real>>(outCompoundSnle.fullDResidual));
-  auto outCompoundFullDRes =
-      std::get<SparseMatrixView<real>>(AsView(outCompoundSnle.fullDResidual));
   outCompoundSnle.SetFullToZero(params);
 
-  // First, assemble the full DOF rigid bodies into this compound's CActorSnle.
-  // TODO: We could skip this step if we had a way to go directly from the full DOF bodies to the
-  // reduced DOF problem.
+  // First, assemble the full-DoF rigid bodies into this compound's CActorSnle.
+  // TODO: We could skip this step if we had a way to go directly from the full-DoF bodies to the
+  // reduced-DoF problem.
   if (IsAssemblyNeeded(StateDependency::SecondOrder, false /*inputDependency*/, gradTarget)) {
     for (auto bodyEntity : groupMembers.actors) {
       auto const& bodySnle = reg.get<CActorSnle const>(bodyEntity);
@@ -2586,23 +2620,10 @@ void articulated::compound::EntityAssemble(
         outCompoundSnle.fullResidual.MiddleRows(bodyDofOffset.dofsOffset, RigidSize::kDAll) =
             bodySnle.fullResidual;
       }
-      if (params.assemDRes) {
-        MOCHI_ASSERT(
-            std::holds_alternative<Matrix<real>>(bodySnle.fullDResidual),
-            "Expected dense storage.");
-        auto const& bodyFullDRes = std::get<Matrix<real>>(bodySnle.fullDResidual);
-        MOCHI_ASSERT(
-            bodyFullDRes.Rows() == RigidSize::kDAll && bodyFullDRes.Cols() == RigidSize::kDAll);
-        MOCHI_ASSERT(bodyDofOffset.dofsOffset + RigidSize::kDAll <= outCompoundFullDRes.Rows());
-        // bodyFullDRes should be symmetric, so transpose in order to convert to row-matrix view
-        IndexGroup inds{.src = 0, .dst = bodyDofOffset.dofsOffset, .count = RigidSize::kDAll};
-        auto indsSpan = MakeSingletonConstSpan(inds);
-        MatAddSubBlocks(outCompoundFullDRes, indsSpan, indsSpan, bodyFullDRes.Transpose());
-      }
     }
   }
 
-  // If there were any constraints affecting the full DOF rigid bodies (e.g. forming a closed
+  // If there were any constraints affecting the full-DoF rigid bodies (e.g. forming a closed
   // kinematic loop or link-based pose control), then add the constraint assembly values into this
   // compound's CActorSnle. Constraints are first-order; do the work only if needed
   if (constraintFullSnle &&
@@ -2619,19 +2640,6 @@ void articulated::compound::EntityAssemble(
           "CCompoundConstraintSnle should have been resized to the number of full DOFs in this articulated compound");
       outCompoundSnle.fullResidual.MiddleRows(constraintOffset, constraintResidual.Rows()) +=
           constraintResidual;
-    }
-    if (params.assemDRes) {
-      MOCHI_ASSERT(constraintFullSnle->dresiduals.size() == 1, "Expected 1 DResidual.");
-      auto const& constraintDResidual = constraintFullSnle->dresiduals[0];
-      MOCHI_ASSERT(
-          constraintDResidual.rowOffset == 0 && constraintDResidual.colOffset == 0,
-          "Expected zero row and col offsets.");
-      MOCHI_ASSERT(
-          GetNumRows(constraintDResidual.matrix) <= GetNumRows(outCompoundSnle.fullDResidual),
-          "CCompoundConstraintSnle should have been resized to the number of full DOFs in this articulated compound");
-      auto constraintFullDRes =
-          std::get<SparseMatrixView<real const>>(AsConstView(constraintDResidual.matrix));
-      outCompoundFullDRes += constraintFullDRes;
     }
   }
 
@@ -2653,25 +2661,20 @@ void articulated::compound::EntityAssemble(
       MOCHI_ASSERT_VERBOSE(
           gradTarget == GradTarget::Current || gradTarget == GradTarget::Previous,
           "Unexpected grad target");
+      // The full residual is projected by ProjectFullResidual, together with contact.
       outCompoundSnle.reducedResidual.Resize(props.reducedDofsDim);
-      outCompoundSnle.reducedResidual = jacobian.value.Transpose() * outCompoundSnle.fullResidual;
+      outCompoundSnle.reducedResidual.SetZero();
     }
   }
 
   // Reduced dresidual
   if (params.assemDRes) {
     MOCHI_ASSERT_VERBOSE(gradTarget == GradTarget::Current, "Unexpected grad target");
-
-    // Temporary storage
-    MOCHI_FILO_STACK_ALLOCATOR(tempAllocator, 32 * 1024);
-
-    // Project the Jacobian
-    Matrix<real> DJ(outCompoundFullDRes * jacobian.value, &tempAllocator);
     MOCHI_ASSERT(
         std::holds_alternative<Matrix<real>>(outCompoundSnle.reducedDResidual),
         "Expected dense storage.");
     auto& JtDJ = std::get<Matrix<real>>(outCompoundSnle.reducedDResidual);
-    JtDJ = jacobian.value.Transpose() * DJ;
+    AssembleReducedDResidual(reg, groupMembers.actors, jacobian, constraintFullSnle, JtDJ);
 
     // regularize the jacobian in case we want to do quasi-static optimization
     if (!IsFinite(intState.dtStage)) {
@@ -2748,10 +2751,14 @@ void articulated::compound::EntityAssemble(
         currJointTxs,
         stageStartJointTxs,
         currPose,
+        stageStartPose,
         outCompoundSnle);
   }
 
-  if (!transmissions.transmissions.empty()) {
+  // Add transmission forces. They depend on the current and stage-start displacements, but not on
+  // differentiable input.
+  if (!transmissions.transmissions.empty() &&
+      IsAssemblyNeeded(StateDependency::FirstOrder, false /*inputDependency*/, gradTarget)) {
     AssembleTransmissionForces(
         params,
         currLinkTxs,
@@ -2763,6 +2770,74 @@ void articulated::compound::EntityAssemble(
         transmissions,
         outCompoundSnle);
   }
+}
+
+void articulated::compound::ProjectFullResidual(
+    AssemblyParams const& params,
+    ecs::RequiredTag<TagArticulatedActor>,
+    entt::registry& reg,
+    CArticulatedBodyShape const& bodyShape,
+    CArticulatedParents const& parents,
+    CArticulatedLinkTransforms<TimeStep::Current> const& currLinkTxs,
+    CArticulatedLinkTransforms<TimeStep::StageStart> const& stageStartLinkTxs,
+    CArticulatedJacobian const& jacobian,
+    CBlendedComposition const* blendedComposition,
+    CArticulatedAsyncContactLinkResidual* asyncContactLinkResidual,
+    CArticulatedSyncContactLinkResidual& syncContactLinkResidual,
+    CArticulatedConstraintLinkResidual& constraintLinkResidual,
+    CActorSnle& outCompoundSnle) {
+  MOCHI_PROFILE_SCOPE();
+  bool const project = params.assemRes &&
+      (params.gradTarget == GradTarget::Current || params.gradTarget == GradTarget::Previous);
+  auto& fullResidual = outCompoundSnle.fullResidual;
+
+  // Consumes a link-space residual: adds it to the full residual if it is projected, and
+  // deactivates it, so that the next assembly accumulates it from zero. Inactive residuals may hold
+  // stale values.
+  auto consume = [&](ArticulatedLinkResidual& linkResidual) {
+    if (!linkResidual.isActive) {
+      return;
+    }
+    MOCHI_ASSERT_VERBOSE(
+        project || !params.assemRes, "Link-space residuals require a state grad target.");
+    if (project) {
+      MOCHI_ASSERT_VERBOSE(linkResidual.residual.Rows() == fullResidual.Rows());
+      fullResidual += linkResidual.residual;
+    }
+    linkResidual.isActive = false;
+  };
+  consume(syncContactLinkResidual);
+  if (asyncContactLinkResidual) {
+    consume(*asyncContactLinkResidual);
+  }
+  consume(constraintLinkResidual);
+  if (blendedComposition) {
+    for (entt::entity const soft : blendedComposition->soft) {
+      if (auto* softContact = reg.try_get<CArticulatedAsyncContactLinkResidual>(soft)) {
+        consume(*softContact);
+      }
+      if (auto* softBody = reg.try_get<CArticulatedSkinnedBodyLinkResidual>(soft)) {
+        consume(*softBody);
+      }
+    }
+  }
+  if (!project) {
+    return;
+  }
+
+  // Project the full residual, with the link-space residuals, all at once. The Jacobian of each
+  // grad target is evaluated on the link transforms of its time step (see
+  // UpdateJacobiansSubpipeline), which the linear-time contraction must use too.
+  Span<TransformRT const> const linkTransforms = params.gradTarget == GradTarget::Previous
+      ? MakeConstSpan(stageStartLinkTxs)
+      : MakeConstSpan(currLinkTxs);
+  articulated::JacobianTransposeContract(
+      bodyShape.shape->GetJointsData()->dofInfo,
+      parents,
+      linkTransforms,
+      fullResidual.GetConstSpan(),
+      jacobian.value,
+      AsView(outCompoundSnle.reducedResidual));
 }
 
 void articulated::compound::EntityPreFirstStage(
@@ -2777,19 +2852,14 @@ void articulated::compound::EntityPreFirstStage(
   MOCHI_PROFILE_SCOPE();
   auto const* joints = bodyShape.shape->GetJointsData();
   integration::ArticulatedIntegrationMetadata const metadata{
-      joints->jointTypes, joints->dofInfo, poseInfo};
+      joints->jointTypes, joints->jointAxes, joints->dofInfo, poseInfo};
 
   // Joint DoFs and joint velocities are differential variables. Use integration utilities to
   // compute their values at the beginning of the step.
   integration::ApplyTimeIntegrationStepStart(
       metadata, intState, outIntPose, prevPose, outIntPose.stepStart);
-  for (int i = 0; i < prevJointVels.value.size(); ++i) {
-    integration::ApplyTimeIntegrationStepStart(
-        intState,
-        outIntJointVels.value[i],
-        prevJointVels.value[i],
-        outIntJointVels.value[i].stepStart);
-  }
+  integration::ApplyTimeIntegrationStepStart(
+      intState, outIntJointVels, prevJointVels, outIntJointVels.stepStart);
 }
 
 template <TimeTarget kTargetTime, TimeStep kOutTime>
@@ -2810,7 +2880,7 @@ static void ComputeStateAndVelocity(
     CArticulatedFullPose& outFullPose) {
   auto const* joints = bodyShape.shape->GetJointsData();
   integration::ArticulatedIntegrationMetadata const metadata{
-      joints->jointTypes, joints->dofInfo, poseInfo};
+      joints->jointTypes, joints->jointAxes, joints->dofInfo, poseInfo};
   // Joint DoFs are differential variables. Use integration utilities to compute their value.
   integration::ApplyTimeIntegration<kTargetTime>(metadata, intState, outIntDofs, outPose);
 
@@ -2829,10 +2899,7 @@ static void ComputeStateAndVelocity(
 
   // Joint velocities are differential variables. Use integration utilities to compute their
   // value.
-  for (int i = 0; i < outIntJointVels.value.size(); ++i) {
-    integration::ApplyTimeIntegration<kTargetTime>(
-        intState, outIntJointVels.value[i], outJointVels.value[i]);
-  }
+  integration::ApplyTimeIntegration<kTargetTime>(intState, outIntJointVels, outJointVels);
 }
 
 static void PushCurrentStateAndVelocityToIntegrationStages(
@@ -2845,22 +2912,34 @@ static void PushCurrentStateAndVelocityToIntegrationStages(
   // Joint DoFs and velocities are differential variables. Push them to the vectors containing
   // their values at the end of each time integration stage.
   outIntDofs.stages[intState.currentStage].value = currDofs.value;
-  for (int i = 0; i < isize(outIntJointVels.value); ++i) {
-    outIntJointVels.value[i].stages[intState.currentStage].value = currJointVels.value[i].value;
-  }
+  outIntJointVels.stages[intState.currentStage].value = currJointVels.value;
 }
 
 static void ComputeCurrentVelocity(
     ecs::RequiredTag<TagArticulatedActor>,
     CTimeIntegratorState const& intState,
+    CArticulatedBodyShape const& bodyShape,
+    CArticulatedJointPoseInfo const& poseInfo,
+    CArticulatedReducedPose<TimeStep::StageStart> const& stageStartPose,
+    CArticulatedReducedPose<TimeStep::Current> const& currPose,
     CArticulatedJointTransforms<TimeStep::StageStart> const& stageStartJointTransforms,
     CArticulatedJointTransforms<TimeStep::Current> const& currJointTransforms,
     CArticulatedJointVels<TimeStep::Current>& outCurrJointVels) {
   // Joint velocities are recovered via finite differences of the pose at the beginning and at the
-  // end of the stage.
+  // end of the stage. Revolute joints finite-difference their angle, which yields the exact angle
+  // rate assumed by their single-dof inertia, instead of a finite-step rotation velocity.
+  auto const* joints = bodyShape.shape->GetJointsData();
+  real const invDt = 1_r / intState.dtStage;
   for (int i = 0; i < isize(currJointTransforms); ++i) {
-    outCurrJointVels.value[i].value.SetFromFiniteDifferencePose(
-        stageStartJointTransforms[i], currJointTransforms[i], intState.dtStage);
+    auto& jointVel = outCurrJointVels.value[i];
+    if (joints->jointTypes[i] == ArticulatedJointType::Revolute) {
+      int const offset = poseInfo[i].offset;
+      real const angleRate = invDt * (currPose.value[offset] - stageStartPose.value[offset]);
+      jointVel.SetOmegaWithZeroVSym(angleRate * ToSimd(joints->jointAxes[i]));
+    } else {
+      jointVel.SetFromFiniteDifferencePose(
+          stageStartJointTransforms[i], currJointTransforms[i], intState.dtStage);
+    }
   }
 }
 
@@ -2897,7 +2976,7 @@ static void HandleSolverDivergence(
 
     // Reset the velocity to zero.
     for (auto& jointVel : outCurrJointVels.value) {
-      jointVel.value.SetZero();
+      jointVel.SetZero();
     }
   }
 }
@@ -2911,9 +2990,9 @@ static void CompoundEntityPreStep(
   // Shift joint DoFs from current to previous.
   prevState.value = currState.value;
   // Shift joint velocities from current to previous and reset current velocity.
-  for (int i = 0; i < isize(currJointVels.value); ++i) {
-    prevJointVels.value[i].value = currJointVels.value[i].value;
-    currJointVels.value[i].value.SetZero();
+  prevJointVels.value = currJointVels.value;
+  for (auto& jointVel : currJointVels.value) {
+    jointVel.SetZero();
   }
 }
 
@@ -2922,58 +3001,104 @@ void articulated::compound::PreStepPipeline(entt::registry& reg) {
   ecs::InvokeForEachGlobal(&articulated::rigid::EntityPreStep, reg);
 }
 
+static void CompoundEntityReconstructPreviousStep(
+    ecs::Included<TagArticulatedActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CArticulatedBodyShape const& bodyShape,
+    CArticulatedJointPoseInfo const& poseInfo,
+    CArticulatedReducedPose<TimeStep::Current> const& currState,
+    CArticulatedJointVels<TimeStep::Current> const& currJointVels,
+    CIntegrationArticulatedReducedPose const& intPose,
+    CIntegrationArticulatedJointVels const& intJointVels,
+    CArticulatedReducedPose<TimeStep::Previous>& outPrevPose,
+    CArticulatedJointVels<TimeStep::Previous>& outPrevJointVels) {
+  auto const* joints = bodyShape.shape->GetJointsData();
+  integration::ArticulatedIntegrationMetadata const metadata{
+      joints->jointTypes, joints->jointAxes, joints->dofInfo, poseInfo};
+
+  // Joint pose and velocity are both differential variables.
+  auto const method = simParams->integrationMethod;
+  integration::ReconstructPreviousPoseFromHistoryOrExtrapolate(
+      metadata, method, time.value, intPose, currState, currJointVels, outPrevPose);
+  integration::ReconstructPreviousVelocityFromHistoryOrCopy(
+      method, intJointVels, currJointVels, outPrevJointVels);
+}
+
+void articulated::compound::ReconstructPreviousStepPipeline(entt::registry& reg) {
+  ecs::InvokeForEachGlobal(&CompoundEntityReconstructPreviousStep, reg);
+  ecs::InvokeForEachGlobal(&articulated::rigid::EntityReconstructPreviousStep, reg);
+}
+
 void articulated::compound::PreStagePipeline(
     entt::registry& reg,
-    Span<entt::entity const> entities) {
+    Span<entt::entity const> compounds,
+    Span<entt::entity const> links) {
   MOCHI_PROFILE_SCOPE();
   // First, compute the state and velocity of the articulated compound at the beginning of the
   // stage.
   ecs::InvokeForEach(
-      &ComputeStateAndVelocity<TimeTarget::StageStart, TimeStep::StageStart>, reg, entities);
+      &ComputeStateAndVelocity<TimeTarget::StageStart, TimeStep::StageStart>, reg, compounds);
 
   // Then, update the rigid actors in the compound (if any).
-  ecs::InvokeForEach(&articulated::rigid::EntityPreStage, reg, entities);
+  ecs::InvokeForEach(&articulated::rigid::EntityPreStage, reg, links);
 
-  ecs::InvokeForEach(&articulated::compound::ResolveSkinning<TimeStep::StageStart>, reg, entities);
+  ecs::InvokeForEach(&ResolveSkinning<TimeStep::StageStart>, reg, compounds);
 }
 
 void articulated::compound::PostStagePipeline(
     entt::registry& reg,
-    Span<entt::entity const> entities) {
+    Span<entt::entity const> compounds,
+    Span<entt::entity const> links) {
   MOCHI_PROFILE_SCOPE();
   // Compute the velocity
-  ecs::InvokeForEach(&ComputeCurrentVelocity, reg, entities);
+  ecs::InvokeForEach(&ComputeCurrentVelocity, reg, compounds);
 
   // Handle potential solver divergence.
-  ecs::InvokeForEach(&HandleSolverDivergence, reg, entities);
+  ecs::InvokeForEach(&HandleSolverDivergence, reg, compounds);
 
   // Then, push the state and velocity to the integration stages, update the rigid actors in the
   // compound (if any), and compute skinning on the visual mesh. These operations are independent
   // of each other.
-  ecs::InvokeForEach(&PushCurrentStateAndVelocityToIntegrationStages, reg, entities);
-  ecs::InvokeForEach(&articulated::rigid::EntityPostStage, reg, entities);
-  ecs::InvokeForEach(&ResolveSkinning<TimeStep::Current>, reg, entities);
+  ecs::InvokeForEach(&PushCurrentStateAndVelocityToIntegrationStages, reg, compounds);
+  ecs::InvokeForEach(&articulated::rigid::EntityPostStage, reg, links);
+  ecs::InvokeForEach(&ResolveSkinning<TimeStep::Current>, reg, compounds);
+}
+
+// Synchronize the derived ordered link-velocity mirror from authoritative link components.
+static void UpdateLinkVelocityArray(
+    ecs::PartialRegistry<CRigidVel<TimeStep::Current> const> reg,
+    CGroupMembers const& groupMembers,
+    CArticulatedLinkVels& outLinkVels) {
+  MOCHI_ASSERT_VERBOSE(
+      outLinkVels.size() == groupMembers.actors.size(), "Link velocity count mismatch.");
+  for (int i = 0; i < isize(groupMembers.actors); ++i) {
+    outLinkVels[i] = reg.get<CRigidVel<TimeStep::Current> const>(groupMembers.actors[i]).value;
+  }
 }
 
 void articulated::compound::PostLastStagePipeline(
     entt::registry& reg,
-    Span<entt::entity const> entities) {
+    Span<entt::entity const> compounds,
+    Span<entt::entity const> links) {
   MOCHI_PROFILE_SCOPE();
   // First, compute the state and velocity of the articulated compound at the end of the time
   // step.
   ecs::InvokeForEach(
-      &ComputeStateAndVelocity<TimeTarget::StepEnd, TimeStep::Current>, reg, entities);
+      &ComputeStateAndVelocity<TimeTarget::StepEnd, TimeStep::Current>, reg, compounds);
 
   // Update the Jacobian to match the step-end pose.
-  ecs::InvokeForEach(&articulated::compound::UpdateJacobianState<TimeStep::Current>, reg, entities);
+  ecs::InvokeForEach(
+      &articulated::compound::UpdateJacobianState<TimeStep::Current>, reg, compounds);
 
-  // Then, update the rigid actors in the compound (if any).
-  ecs::InvokeForEach(&articulated::rigid::EntityPostLastStage, reg, entities);
+  // Then, update the rigid actors in the compound (if any) and gather their velocities.
+  ecs::InvokeForEach(&articulated::rigid::EntityPostLastStage, reg, links);
+  ecs::InvokeForEach(&UpdateLinkVelocityArray, reg, compounds);
 
   // Resolve skinning on the full mesh because this is where we need to do this
   // for, e.g., rendering purposes
   ecs::InvokeForEach(
-      &ResolveSkinning<TimeStep::Current, /*kForceUseAllNodes = */ true>, reg, entities);
+      &ResolveSkinning<TimeStep::Current, /*kForceUseAllNodes = */ true>, reg, compounds);
 }
 
 template <typename ContainerT, size_t... DIMS>
@@ -3073,15 +3198,11 @@ void articulated::compound::RecordState(
   RecordDataset("pose", AsConstView(reducedPose.value), outData);
 
   // Record current joint velocities as three 2D datasets
-  MOCHI_FILO_STACK_ALLOCATOR(alloc, sizeof(RigidBodyVel) * 256);
-  DynamicArray<RigidBodyVel> jointVelsRaw(&alloc);
-  jointVelsRaw.reserve(jointVels.value.size());
-  for (auto const& jointVel : jointVels.value) {
-    jointVelsRaw.emplace_back(jointVel.value);
-  }
-  RecordDatasetFromContainers(MakeConstSpan(jointVelsRaw), "vcom", ExtractVcom, &alloc, outData);
-  RecordDatasetFromContainers(MakeConstSpan(jointVelsRaw), "omega", ExtractOmega, &alloc, outData);
-  RecordDatasetFromContainers(MakeConstSpan(jointVelsRaw), "vsym", ExtractVsym, &alloc, outData);
+  MOCHI_FILO_STACK_ALLOCATOR(alloc, sizeof(Matrix3x3r) * 256);
+  RecordDatasetFromContainers(MakeConstSpan(jointVels.value), "vcom", ExtractVcom, &alloc, outData);
+  RecordDatasetFromContainers(
+      MakeConstSpan(jointVels.value), "omega", ExtractOmega, &alloc, outData);
+  RecordDatasetFromContainers(MakeConstSpan(jointVels.value), "vsym", ExtractVsym, &alloc, outData);
 
   // If there is a pose controller, record the old target pose as a 1D dataset.
   if (targetOld) {
@@ -3092,9 +3213,14 @@ void articulated::compound::RecordState(
 void articulated::compound::UpdateVSym(
     ecs::Included<TagArticulatedActor>,
     ecs::CtxGlobal<CSceneTime const> time,
-    CArticulatedJointVels<TimeStep::Current>& outJointVels) {
+    CArticulatedJointVels<TimeStep::Current>& outJointVels,
+    CArticulatedLinkVels& outLinkVels) {
+  real const timeStep = static_cast<real>(time->DeltaTime());
   for (auto& jointVel : outJointVels.value) {
-    jointVel.value.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
+    jointVel.UpdateVSymIfDirty(timeStep);
+  }
+  for (auto& linkVel : outLinkVels) {
+    linkVel.UpdateVSymIfDirty(timeStep);
   }
 }
 
@@ -3120,37 +3246,6 @@ static void DecodeDatasetToContainers(
   for (int i = 0; i < count; ++i) {
     writeData(data[i], outAllContainers[i]);
   }
-}
-
-SkinningParams articulated::compound::CreateSkinningParams(
-    entt::registry& reg,
-    entt::entity e,
-    bool allowUnusedBones,
-    Error& error) {
-  MOCHI_ERROR_RETURN(error, {});
-
-  // Fetch reference bone transforms. This requires that the rigid actors are currently in their
-  // reference pose. In practice, the reference bone transforms are translations between the root
-  // and the center of mass of each bone.
-  auto const* groupMembers = reg.try_get<CGroupMembers const>(e);
-  MOCHI_ERROR_IF(!groupMembers, error, "Not a compound actor");
-  MOCHI_ERROR_RETURN(error, {});
-  auto numActors = groupMembers->actors.size();
-  SkinningParams skinningParams;
-  SkeletonReferenceFrames refFrames;
-  refFrames.initialWorldFromBone.resize(numActors);
-  refFrames.referenceRootFromBone.resize(numActors);
-  TransformRT rootInverse =
-      Invert(reg.get<CRootTransform const>(groupMembers->actors[0]).worldFromLocal);
-  for (int i = 0; i < numActors; i++) {
-    TransformRT const& transform =
-        reg.get<CRigidState<TimeStep::Current> const>(groupMembers->actors[i]).value;
-    refFrames.initialWorldFromBone[i] = transform;
-    refFrames.referenceRootFromBone[i] = rootInverse * transform;
-  }
-  skinningParams.allowUnusedBones = allowUnusedBones;
-  skinningParams.referenceFrames = refFrames;
-  return skinningParams;
 }
 
 void articulated::compound::ProjectDerivedStateGradient(
@@ -3249,9 +3344,14 @@ void articulated::rigid::EntityUpdateJacobian(
   MOCHI_ASSERT_VERBOSE(numDofs.dofsSize == RigidSize::kDAll);
 
   auto const& artJacobian = reg.get<CArticulatedJacobian const>(entArticulated.entity).value;
-  auto artJacobianBlock = artJacobian.MiddleRows(dofOffset.dofsOffset, numDofs.dofsSize);
-  for (int i = 0; i < isize(outJacobian.dofs); i++) {
-    outJacobian.value.Col(i) = artJacobianBlock.Col(outJacobian.dofs[i]);
+  auto const artJacobianBlock =
+      artJacobian.MiddleRows<RigidSize::kDAll>(dofOffset.dofsOffset, numDofs.dofsSize);
+  for (int r = 0; r < RigidSize::kDAll; ++r) {
+    auto const src = artJacobianBlock.Row(r);
+    auto dst = outJacobian.value.Row(r);
+    for (int i = 0; i < isize(outJacobian.dofs); ++i) {
+      dst(i) = src(outJacobian.dofs[i]);
+    }
   }
 }
 
@@ -3267,7 +3367,7 @@ void articulated::rigid::EntitySetSolution(
   mochi::rigid::EntitySetSolution(actorSol, {}, {}, outCurrPose);
 }
 
-MOCHI_API void articulated::rigid::EntityPreStep(
+void articulated::rigid::EntityPreStep(
     ecs::RequiredTag<TagArticulatedLinkActor>,
     CRigidState<TimeStep::Current> const& currPose,
     CRigidVel<TimeStep::Current>& currVel,
@@ -3278,6 +3378,17 @@ MOCHI_API void articulated::rigid::EntityPreStep(
   mochi::rigid::EntityIncrementStep({}, {}, currPose, currVel, prevPose, prevVel);
 }
 
+void articulated::rigid::EntityReconstructPreviousStep(
+    ecs::RequiredTag<TagArticulatedLinkActor>,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CRigidVel<TimeStep::Current> const& currVel,
+    CIntegrationRigidVels const& intVels,
+    CRigidVel<TimeStep::Previous>& outPrevVel) {
+  // Link velocity is the only differential variable.
+  auto const method = simParams->integrationMethod;
+  integration::ReconstructPreviousVelocityFromHistoryOrCopy(method, intVels, currVel, outPrevVel);
+}
+
 void articulated::rigid::EntityPreFirstStage(
     ecs::RequiredTag<TagArticulatedLinkActor>,
     CTimeIntegratorState const& intState,
@@ -3285,7 +3396,7 @@ void articulated::rigid::EntityPreFirstStage(
     CIntegrationRigidVels& intVels) {
   MOCHI_PROFILE_SCOPE();
   // Compute differential variables (i.e. velocity) at the beginning of the step.
-  mochi::rigid::ComputeVelocityAtStepStart(intState, prevVel, intVels);
+  integration::ApplyTimeIntegrationStepStart(intState, intVels, prevVel, intVels.stepStart);
 }
 
 void articulated::rigid::EntityPreStage(
@@ -3318,7 +3429,7 @@ void articulated::rigid::EntityPreStage(
   mochi::rigid::ComputeVelocityAtStageStart(intState, intVels, stageStartVel);
 }
 
-MOCHI_API void articulated::rigid::EntityPostStage(
+void articulated::rigid::EntityPostStage(
     ecs::RequiredTag<TagArticulatedLinkActor>,
     CConvergenceStatus const& convergence,
     CDofOffset const& rigidDofOffset,
@@ -3397,7 +3508,7 @@ static void ApplyBoundaryConditions(
   }
 }
 
-MOCHI_API void mochi::articulated::compound::PreStepArticulatedBodyActorAsync(
+void mochi::articulated::compound::PreStepArticulatedBodyActorAsync(
     entt::registry& reg,
     entt::entity e) {
   MOCHI_PROFILE_SCOPE();
@@ -3422,6 +3533,7 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CArticulatedJointTransforms<TimeStep::Current>>(reg);
   ecs::RegisterComponent<CArticulatedJointTransforms<TimeStep::Previous>>(reg);
   ecs::RegisterComponent<CArticulatedJointTransforms<TimeStep::StageStart>>(reg);
+  ecs::RegisterComponent<CArticulatedLinkVels>(reg);
   ecs::RegisterComponent<CArticulatedJointVels<TimeStep::Current>>(reg);
   ecs::RegisterComponent<CArticulatedJointVels<TimeStep::Previous>>(reg);
   ecs::RegisterComponent<CArticulatedJointVels<TimeStep::StageStart>>(reg);
@@ -3436,14 +3548,19 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CArticulatedRigidJacobian>(reg);
   ecs::RegisterComponent<CArticulatedSkinExportParams>(reg);
   ecs::RegisterComponent<CArticulatedSkinningData>(reg);
+  ecs::RegisterComponent<CArticulatedAsyncContactLinkResidual>(reg);
+  ecs::RegisterComponent<CArticulatedSyncContactLinkResidual>(reg);
+  ecs::RegisterComponent<CArticulatedConstraintLinkResidual>(reg);
+  ecs::RegisterComponent<CArticulatedSkinnedBodyLinkResidual>(reg);
   ecs::RegisterComponent<CBoneHandles>(reg);
   ecs::RegisterComponent<CIntegrationArticulatedReducedPose>(reg);
   ecs::RegisterComponent<CIntegrationArticulatedJointVels>(reg);
   ecs::RegisterComponent<CTransmissions>(reg);
 
-  // Post-restore fixup: update derived state but not links, as they are state-captured.
+  // Post-restore fixup: update derived state.
   capture::RegisterPostRestoreSystem<ecs::policy::AllowFullRegistryAccess>(
-      &UpdateDerivedStateFromPose</*kUpdateLinks*/ false>, reg);
+      &UpdateDerivedStateFromPose, reg);
+  capture::RegisterPostRestoreSystem(&UpdateLinkVelocityArray, reg);
 }
 
 real GetActorMass(entt::registry const& reg, entt::entity actor) {

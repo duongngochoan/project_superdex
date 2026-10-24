@@ -41,14 +41,20 @@ using namespace mochi;
 
 #endif
 
-#if MOCHI_ARCH_CPU && !MOCHI_ARCH_X64_AVX2 && !MOCHI_ARCH_ARM_NEON
+#if MOCHI_ARCH_CPU && \
+    ((!MOCHI_ARCH_X64_AVX2 && !MOCHI_ARCH_ARM_NEON) || (MOCHI_ARCH_X64 && !MOCHI_ARCH_X64_FMA))
 #error \
-    "Please enable SIMD in your compiler settings.\n" \
-    "- For x86-64 platforms:\n" \
-    "  * MSVC: Add '/arch:AVX2' compiler flag.\n" \
-    "  * GCC/Clang: Add '-mavx2' compiler flag.\n" \
+    "Please enable SIMD + FMA in your compiler settings. FMA is important for both performance and rounding accuracy.\n" \
+    "- For x86-64 with AVX2:\n" \
+    "  * MSVC: Add '/arch:AVX2' compiler flag (implies FMA).\n" \
+    "  * clang-cl: Add '/arch:AVX2 -mfma' compiler flags.\n" \
+    "  * GCC/Clang: Add '-mavx2 -mfma' compiler flags.\n" \
+    "- For x86-64 with AVX-512:\n" \
+    "  * MSVC: Add '/arch:AVX512' compiler flag (implies FMA).\n" \
+    "  * clang-cl: Add '/arch:AVX512 -mfma' compiler flags.\n" \
+    "  * GCC/Clang: Add '-mavx512f -mavx512cd -mavx512bw -mavx512dq -mavx512vl -mfma' compiler flags.\n" \
     "- For ARM64 platforms:\n" \
-    "  * GCC/Clang: Add '-march=armv8-a+simd' compiler flag.\n" \
+    "  * GCC/Clang: Add '-march=armv8-a+simd' compiler flag (implies FMA).\n" \
     "- For CUDA GPU:\n" \
     "  * NVCC: No flag required. SIMD instructions are not available on CUDA.\n" \
     "Other architectures and compilers are not supported."

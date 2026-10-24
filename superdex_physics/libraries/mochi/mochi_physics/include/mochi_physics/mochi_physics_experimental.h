@@ -27,7 +27,6 @@
 
 #include <mochi_physics/mochi_physics.h>
 
-#include <mochi_core/ai/compute_type.h>
 #include <mochi_core/articulated_body/articulated_body_params.h>
 #include <mochi_core/contact/contact_params.h>
 #include <mochi_core/rom/rom_hyper_reduction_params.h>
@@ -42,12 +41,18 @@
 #include <any>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <variant>
 
 namespace mochi {
 // Forwards
 struct QPSolverParams;
 struct NewtonSolverParams;
+
+namespace prefab {
+struct AddToSceneResult;
+struct PrefabParams;
+} // namespace prefab
 
 /**
  * @brief Default finite-difference epsilon used by @ref BackPropagationSolverParams::epsFiniteDiff.
@@ -420,6 +425,14 @@ struct RomParams {
   MOCHI_STRUCT_END()
 };
 
+MOCHI_API prefab::AddToSceneResult AddToScene(
+    std::string_view prefabPath,
+    std::string_view rootPath,
+    Scene* scene,
+    prefab::PrefabParams const& params,
+    RomParams const& romParams,
+    Error& error);
+
 struct DeepModelParams {
   // Path of the file containing the deep model.
   DynamicString deepModelPath;
@@ -451,10 +464,12 @@ struct DeepModelParams {
 // (material_params.h) as shell modeling matures.  For now, it is a stub to ensure analogous code
 // structure elsewhere between shell and soft actors.
 struct ShellMaterialParams {
-  // The membrane Lame parameters, lambda and mu, for plane-stress linear elasticity.  These should
-  // be thought of as "2D" parameters, where the conversion from 3D material properties through the
-  // membrane thickness has already been applied.  The units are [Pa*m] = [N/m], i.e., force per
-  // unit length.
+  // The 2D membrane Lame parameters, lambda and mu, where the conversion from 3D material
+  // properties through the membrane thickness has already been applied.  The units are
+  // [Pa*m] = [N/m], i.e., force per unit length.  The plane-stress reduction of any valid isotropic
+  // 3D material gives membraneLambda / membraneMu < 2, approaching 2 in the incompressible limit.
+  // Larger ratios are still well-posed, but do not correspond to any valid isotropic 3D material,
+  // so shell actor creation logs a warning for them.
   real membraneLambda = 300_r; // [Pa*m]
   real membraneMu = 400_r; // [Pa*m]
   // These define a basic isotropic bending stiffness, which can be combined with any in-plane
@@ -469,18 +484,13 @@ struct ShellMaterialParams {
   real massDampingCoefficient = 0_r; // [1/s]
   // Stiffness-proportional damping coefficient.
   real stiffnessDampingCoefficient = 0_r; // [s]
-
-  // clang-format off
-  MOCHI_STRUCT_BEGIN(mochi::experimental::ShellMaterialParams)
-  MOCHI_FIELD(membraneLambda) MOCHI_ATTRIBUTE(Units("Pa*m"))
-  MOCHI_FIELD(membraneMu) MOCHI_ATTRIBUTE(Units("Pa*m"))
-  MOCHI_FIELD(bendingAlpha) MOCHI_ATTRIBUTE(Units("Pa*m^3"))
-  MOCHI_FIELD(bendingBeta) MOCHI_ATTRIBUTE(Units("Pa*m^3"))
-  MOCHI_FIELD(density) MOCHI_ATTRIBUTE(Units("kg/m^2"))
-  MOCHI_FIELD(massDampingCoefficient) MOCHI_ATTRIBUTE(Units("1/s"))
-  MOCHI_FIELD(stiffnessDampingCoefficient) MOCHI_ATTRIBUTE(Units("s"))
-  MOCHI_STRUCT_END()
-  // clang-format on
+  // Dimensionless scale of an optional barrier energy
+  // 2*membraneCollapseBarrierScale*membraneMu*max(tr(C^-1) - 2, 0)^3 per unit reference area, with
+  // the 2D (in-plane) right Cauchy-Green tensor C.  It vanishes unless some direction is
+  // compressed, adds no reference stiffness, and resists membrane collapse under large
+  // compression.  Increase it if elements still collapse under in-plane compression;
+  // membraneLambda / membraneMu > 2 may need more.  Zero disables it, leaving plain StVK.
+  real membraneCollapseBarrierScale = 1e-3_r;
 };
 
 struct PointCloudColliderParams {
@@ -494,6 +504,10 @@ struct PointCloudColliderParams {
    * per element, whose spacing scales roughly like (element size) / (quadrature points per
    * element)^(1/d), where `d` is the parametric dimension of the collider geometry (`d = 2` for
    * surfaces such as shell, `d = 1` for curves such as rods).
+   *
+   * @note Must be finite and strictly positive. Its sum with the effective contact threshold in
+   * @ref ContactParams, including @ref ContactParams::penaltyThresholdExtraPadding, must also be
+   * finite and strictly positive.
    *
    * @note This value also serves as the length scale for dimensional correction of the contact
    * penalty coefficient on the collider side. The effective penalty stiffness is scaled by
@@ -548,17 +562,6 @@ struct PointCloudColliderParams {
 #if MOCHI_LANGUAGE_CPP20
   bool operator==(PointCloudColliderParams const&) const = default;
 #endif
-
-  // clang-format off
-  MOCHI_STRUCT_BEGIN(mochi::experimental::PointCloudColliderParams)
-  MOCHI_FIELD(radius) MOCHI_ATTRIBUTE(Units("m"))
-  MOCHI_FIELD(selfContactExclusionRatio)
-  MOCHI_FIELD(spatialHashLoadFactor)
-  MOCHI_FIELD(selfContact)
-  MOCHI_FIELD(colliderTriangleElementType)
-  MOCHI_FIELD(colliderSegmentElementType)
-  MOCHI_STRUCT_END()
-  // clang-format on
 };
 
 // Parameters for creating a shell actor.
@@ -573,19 +576,7 @@ struct ShellActorParams {
   PointCloudColliderParams pointCloudCollider = {};
   bool hasGravity = true;
   ActorBoundaryElementType contactElementType = ActorBoundaryElementType::Default;
-
-  MOCHI_STRUCT_BEGIN(mochi::experimental::ShellActorParams)
-  MOCHI_FIELD(name)
-  MOCHI_FIELD(layer)
-  MOCHI_FIELD(worldFromLocal)
-  // MOCHI_FIELD(shape) // REFLECTION TODO
-  MOCHI_FIELD(material)
-  MOCHI_FIELD(colliderType)
-  MOCHI_FIELD(contact)
-  MOCHI_FIELD(pointCloudCollider)
-  MOCHI_FIELD(hasGravity)
-  MOCHI_FIELD(contactElementType)
-  MOCHI_STRUCT_END()
+  bool useContactSkin = false;
 };
 
 struct RodMaterialParams {
@@ -594,9 +585,7 @@ struct RodMaterialParams {
   real linearDensity = 1e-1_r; // [kg/m]
   // Rotational inertia about the rod's axis, per unit undeformed length. For a rod made of a
   // homogeneous material, the value would be the 3D density (per unit volume) times the cross
-  // section's polar area moment of inertia. NOTE: This must be positive if there are no Dirichlet
-  // boundary conditions or other constraints on torsional degrees of freedom and/or if the
-  // torsional stiffness is zero.
+  // section's polar area moment of inertia. This must be positive.
   real linearRotationalInertia = 1e-6_r; // [kg m^2 / m] = [kg m]
   // Axial stiffness of a rod. This would be Young's modulus times cross-section area if the rod was
   // made of a homogeneous elastic material. This must be positive.
@@ -604,9 +593,7 @@ struct RodMaterialParams {
   // Torsional stiffness of a rod. For rods made of homogenous elastic material, this would be the
   // shear modulus times a "torsion constant" that is the polar area moment of inertia for circular
   // cross sections, and depends on solving for a Prandtl stress function in the general case (with
-  // values for common shapes available in engineering handbooks). NOTE: If rotational inertia is
-  // zero (which may be well posed when some twisting DoFs are constrained), this must be positive
-  // to transmit the effects of constrained twisting DoFs to the rest of the rod.
+  // values for common shapes available in engineering handbooks). This must be non-negative.
   real torsionalStiffness = 5e-4_r; // [N m^2]
   // The first value is flexural stiffness about the material frame axes explicitly provided, and
   // the second value is flexural stiffness about the perpendicular axis. For a beam made of
@@ -621,18 +608,6 @@ struct RodMaterialParams {
 #if MOCHI_LANGUAGE_CPP20
   bool operator==(RodMaterialParams const&) const = default;
 #endif
-
-  // clang-format off
-  MOCHI_STRUCT_BEGIN(mochi::experimental::RodMaterialParams)
-  MOCHI_FIELD(linearDensity) MOCHI_ATTRIBUTE(Units("kg/m"))
-  MOCHI_FIELD(linearRotationalInertia) MOCHI_ATTRIBUTE(Units("kg*m"))
-  MOCHI_FIELD(axialStiffness) MOCHI_ATTRIBUTE(Units("N"))
-  MOCHI_FIELD(torsionalStiffness) MOCHI_ATTRIBUTE(Units("N*m^2"))
-  MOCHI_FIELD(flexuralStiffness) MOCHI_ATTRIBUTE(Units("N*m^2"))
-  MOCHI_FIELD(massDampingCoefficient) MOCHI_ATTRIBUTE(Units("1/s"))
-  MOCHI_FIELD(stiffnessDampingCoefficient) MOCHI_ATTRIBUTE(Units("s"))
-  MOCHI_STRUCT_END()
-  // clang-format on
 };
 
 struct RodActorParams {
@@ -646,23 +621,8 @@ struct RodActorParams {
   ColliderType colliderType = ColliderType::None;
   PointCloudColliderParams pointCloudCollider = {};
   bool hasGravity = true;
-  bool useVisualMeshContact = false;
-  ActorBoundaryElementType visualMeshContactElementType = ActorBoundaryElementType::Default;
-
-  MOCHI_STRUCT_BEGIN(mochi::experimental::RodActorParams)
-  MOCHI_FIELD(name)
-  MOCHI_FIELD(layer)
-  MOCHI_FIELD(worldFromLocal)
-  // MOCHI_FIELD(shape) // REFLECTION TODO
-  MOCHI_FIELD(contact)
-  MOCHI_FIELD(contactElementType)
-  MOCHI_FIELD(material)
-  MOCHI_FIELD(colliderType)
-  MOCHI_FIELD(pointCloudCollider)
-  MOCHI_FIELD(hasGravity)
-  MOCHI_FIELD(useVisualMeshContact)
-  MOCHI_FIELD(visualMeshContactElementType)
-  MOCHI_STRUCT_END()
+  bool useContactSkin = false;
+  ActorBoundaryElementType contactSkinElementType = ActorBoundaryElementType::Default;
 };
 
 enum class ControlType {
@@ -717,9 +677,9 @@ struct SpatialTendonParams {
 struct DisplacementControlActuatorParams {
   // Initial value of the target displacement (state variable)
   real targetDisplacement = 0_r; // [generalized coordinate units]
-  // Stiffness in the penalty used to control displacement
+  // Stiffness in the penalty used to control displacement. Must be non-negative and finite.
   real stiffness = 1e9_r; // [generalized force / generalized coordinate units]
-  // Damping coefficient to reduce oscillations
+  // Damping coefficient to reduce oscillations. Must be non-negative and finite.
   real damping = 0_r; // [generalized force / (generalized coordinate / s) units]
   // Set true if this actuator is attached to a transmission that can transmit force in both
   // directions (e.g. gearbox or rigid linkage); leave false (default) for rope-like
@@ -729,13 +689,6 @@ struct DisplacementControlActuatorParams {
 #if MOCHI_LANGUAGE_CPP20
   bool operator==(DisplacementControlActuatorParams const&) const = default;
 #endif
-
-  MOCHI_STRUCT_BEGIN(mochi::experimental::DisplacementControlActuatorParams)
-  MOCHI_FIELD(targetDisplacement) MOCHI_ATTRIBUTE(NoSerializeDefaults);
-  MOCHI_FIELD(stiffness) MOCHI_ATTRIBUTE(NoSerializeDefaults);
-  MOCHI_FIELD(damping) MOCHI_ATTRIBUTE(NoSerializeDefaults);
-  MOCHI_FIELD(allowCompressiveForce) MOCHI_ATTRIBUTE(NoSerializeDefaults);
-  MOCHI_STRUCT_END()
 };
 struct ForceControlActuatorParams {
   // Initial value of the applied generalized force (state variable)
@@ -866,16 +819,18 @@ MOCHI_API void ConstrainNodesByPosition(
     std::function<bool(int, Real3 const&)> callback,
     Error& error);
 
-// Create a shape defined by a flow map, where the map is approximated by a neural network.
-// WARNING: Requires MOCHI_ENABLE_DEEP_FLOW_ACTORS=1.
-// WARNING: Requires libtorch (see MOCHI_USE_TORCH in mochi_config.h) if the compute type is Torch.
-[[nodiscard]] MOCHI_API ShapeHandle CreateDeepFlowShape(
-    Context* context,
-    DeepModelParams const& params, // Parameters of a deep model
-    NeuralComputeType computeType, // Compute type, e.g. MochiCpu, TorchCpu, TorchGpu
-    int preallocMemSize, // Amount of preallocated GPU memory. Only used if computeType is
-                         // TorchGpu
-    Error& error);
+/**
+ * @brief [Experimental] Creates a shape whose flow map is approximated by a neural network.
+ *
+ * @param[in] context Context that owns the shape.
+ * @param[in] params Deep flow model and normalization parameters.
+ * @param[out] error Error status. Check Error::IsOK() for success.
+ * @return A valid shape handle on success, or an invalid handle on failure.
+ *
+ * @warning Requires `MOCHI_ENABLE_DEEP_FLOW_ACTORS=1` and `MOCHI_USE_HDF5=1`.
+ */
+[[nodiscard]] MOCHI_API ShapeHandle
+CreateDeepFlowShape(Context* context, DeepModelParams const& params, Error& error);
 
 /**
  * @brief [Experimental] Additional parameters for creating a soft actor.
@@ -900,14 +855,14 @@ struct ExperimentalSoftActorParams {
   ColliderType colliderType = ColliderType::None;
 
   /**
-   * @brief [Experimental] Parameters used to construct a grid-based Signed Distance Field (SDF) if
-   * the shape doesn't already have one.
+   * @brief [Experimental] Parameters used to construct a grid-based Signed Distance Field (SDF)
+   * from the shape's surface mesh.
    *
    * @warning The use of @ref GridSdfParams for a soft actor is experimental. It may be changed or
    * removed in the future. Use at your own risk.
    *
-   * @note Ignored if @ref colliderType is not @ref ColliderType::Sdf.
-   * @note Ignored if the shape already has a grid-based SDF.
+   * @note Ignored unless @ref colliderType is @ref ColliderType::Sdf or @ref ColliderType::Auto.
+   * @note The SDF is computed when the actor is created, even if the shape already has one.
    */
   GridSdfParams sdf;
 
@@ -1022,12 +977,12 @@ MOCHI_API Actor* CreateRodActor(Scene* scene, RodActorParams const& params, Erro
     bool isClosedLoop,
     Error& error);
 
-// Generate a @ref ModelData with a polyline simulation mesh and a tubular visual mesh for use
+// Generate a @ref ModelData with a polyline simulation mesh and a tubular contact skin for use
 // with rod actors. The returned @ref ModelData can be passed to @ref Context::CreateModelShape.
 // @param[in] nodes Node positions [m] defining the polyline centerline. Must have at least 2.
 // @param[in] elementFrameAxes Unit vectors perpendicular to each element's tangent direction.
 //            If empty, these will be auto-generated using parallel transport.
-// @param[in] radius Radius [m] of the tubular visual mesh cross-section. Must be positive.
+// @param[in] radius Radius [m] of the tubular contact-skin cross-section. Must be positive.
 // @param[in] numCrossSectionSegments Number of segments around the tube circumference (>= 3).
 // @param[in] isClosedLoop If true, the polyline forms a closed loop.
 // @param[in,out] error Error status. Check @ref Error::IsOK for success.
@@ -1058,6 +1013,9 @@ CalibrateNormalViscousDampingCoefficient(real cor, real impactVelocity, Error& e
     real normalViscousDampingCoefficient,
     real impactVelocity,
     Error& error);
+
+MOCHI_API void
+SetActorPreconditionerType(Actor* actor, PreconditionerType preconditionerType, Error& error);
 
 // [Rigid and articulated] Enable/disable Newton-Euler inertia. Default is false.
 MOCHI_API void EnableNewtonEulerInertia(Actor* actor, bool enable, Error& error);
@@ -1547,6 +1505,77 @@ MOCHI_API bool
 IsValidNewtonEulerTerms(NewtonEulerTerms const* newtonEulerTerms, Context* context, Error& error);
 
 // -------------------------------------------------------------------
+// Island sleeping
+// -------------------------------------------------------------------
+
+struct SleepParams {
+  bool canSleep = false;
+
+  double sleepThreshold = 0.5;
+
+  int minStepsBeforeSleep = 20;
+
+#if MOCHI_LANGUAGE_CPP20
+  bool operator==(SleepParams const&) const = default;
+#endif
+
+  MOCHI_STRUCT_BEGIN(mochi::experimental::SleepParams)
+  MOCHI_FIELD(canSleep)
+  MOCHI_FIELD(sleepThreshold)
+  MOCHI_FIELD(minStepsBeforeSleep)
+  MOCHI_STRUCT_END()
+};
+
+[[nodiscard]] MOCHI_API SleepParams GetSleepParams(Scene const* scene, Error& error);
+
+MOCHI_API void SetSleepParams(Scene* scene, SleepParams const& params, Error& error);
+
+// -------------------------------------------------------------------
+// Scene recording
+// -------------------------------------------------------------------
+
+struct RecordingParams {
+  bool recordActorMeshes = true;
+
+  bool recordActorLocalToGlobalMap = false;
+
+  bool recordTargetState = true;
+
+  bool recordDynamicActorState = true;
+
+  bool recordStaticActorState = false;
+
+  bool recordContactPoints = false;
+
+  bool recordNodeContactForces = false;
+
+  bool recordSdfDistances = false;
+
+  static RecordingParams All(bool enabled = true) {
+    RecordingParams params;
+    params.recordActorMeshes = enabled;
+    params.recordActorLocalToGlobalMap = enabled;
+    params.recordTargetState = enabled;
+    params.recordDynamicActorState = enabled;
+    params.recordStaticActorState = enabled;
+    params.recordContactPoints = enabled;
+    params.recordNodeContactForces = enabled;
+    params.recordSdfDistances = enabled;
+    return params;
+  }
+};
+
+[[nodiscard]] MOCHI_API bool IsRecording(Scene const* scene, Error& error);
+
+MOCHI_API void StartRecording(
+    Scene* scene,
+    std::string_view filePath,
+    RecordingParams const& params,
+    Error& error);
+
+MOCHI_API void StopRecording(Scene* scene, Error& error);
+
+// -------------------------------------------------------------------
 // Debugging tools
 // -------------------------------------------------------------------
 
@@ -1557,3 +1586,7 @@ struct DebugStats {
 [[nodiscard]] MOCHI_API DebugStats GetDebugStats(Scene const* scene, Error& error);
 
 } // namespace mochi::experimental
+
+#if MOCHI_USE_REFLECTION
+#include <mochi_physics/utils/mochi_physics_experimental_reflection.generated.h>
+#endif

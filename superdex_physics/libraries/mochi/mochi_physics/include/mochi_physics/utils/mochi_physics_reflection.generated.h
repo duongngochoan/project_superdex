@@ -23,6 +23,8 @@
 #include <mochi_core/utils/reflection.h>
 #include <mochi_physics/mochi_physics.h>
 
+#include <limits>
+
 MOCHI_ENUM_BEGIN(mochi::ActorType)
 MOCHI_ENUM_ITEM(None)
 MOCHI_ENUM_ITEM(Rigid)
@@ -93,6 +95,8 @@ MOCHI_ENUM_ITEM(SurfaceNodePositions)
 MOCHI_ENUM_ITEM(SurfaceNodeNormals)
 MOCHI_ENUM_ITEM(VisualNodePositions)
 MOCHI_ENUM_ITEM(VisualNodeNormals)
+MOCHI_ENUM_ITEM(ContactSkinNodePositions)
+MOCHI_ENUM_ITEM(ContactSkinNodeNormals)
 MOCHI_ENUM_ITEM(ContactPoints)
 MOCHI_ENUM_ITEM(ElasticEnergy)
 MOCHI_ENUM_ITEM(NodeContactForces)
@@ -108,8 +112,6 @@ MOCHI_ENUM_ITEM(No)
 MOCHI_ENUM_ITEM(Yes)
 MOCHI_ENUM_COUNT(Count)
 MOCHI_ENUM_END()
-
-#include <mochi_physics/mochi_physics_experimental.h>
 
 MOCHI_STRUCT_BEGIN_EX(mochi::Handle)
 MOCHI_FIELD(value)
@@ -161,6 +163,14 @@ MOCHI_FIELD(subsamplingDensity)
 MOCHI_FIELD(strategy)
 MOCHI_STRUCT_END_EX()
 
+MOCHI_STRUCT_BEGIN_EX(mochi::ContactPairParamsOverride)
+MOCHI_FIELD(penaltyCoefficient) MOCHI_ATTRIBUTE(Units("Pa/m"))
+MOCHI_FIELD(frictionFalloffVel) MOCHI_ATTRIBUTE(Units("m/s"))
+MOCHI_FIELD(viscousFrictionCoefficient) MOCHI_ATTRIBUTE(Units("s/m"))
+MOCHI_FIELD(coulombFrictionCoefficient)
+MOCHI_FIELD(normalViscousDampingCoefficient) MOCHI_ATTRIBUTE(Units("s/m"))
+MOCHI_STRUCT_END_EX()
+
 MOCHI_STRUCT_BEGIN_EX(mochi::ArticulatedShapeInfo)
 // MOCHI_FIELD(rootFromLinksAtRest) // TODO: Span not supported
 // MOCHI_FIELD(linkNames) // TODO: Span not supported
@@ -174,9 +184,6 @@ MOCHI_STRUCT_BEGIN_EX(mochi::ArticulatedShapeInfo)
 // MOCHI_FIELD(jointMinLimits) // TODO: Span not supported
 // MOCHI_FIELD(jointMaxLimits) // TODO: Span not supported
 // MOCHI_FIELD(jointNames) // TODO: Span not supported
-MOCHI_STRUCT_END_EX()
-
-MOCHI_STRUCT_BEGIN_EX(mochi::Scene)
 MOCHI_STRUCT_END_EX()
 
 MOCHI_STRUCT_BEGIN_EX(mochi::StepInfo)
@@ -214,6 +221,7 @@ MOCHI_FIELD(contact)
 MOCHI_FIELD(hasGravity)
 MOCHI_FIELD(hasInertia)
 MOCHI_FIELD(hasStress)
+MOCHI_FIELD(useContactSkin)
 MOCHI_FIELD(boundaryElementType)
 MOCHI_STRUCT_END_EX()
 
@@ -253,6 +261,7 @@ MOCHI_FIELD(layer)
 MOCHI_FIELD(contact)
 MOCHI_FIELD(boundaryElementType)
 MOCHI_FIELD(boundarySubsampling)
+MOCHI_FIELD(nonCollidingLinks)
 MOCHI_STRUCT_END_EX()
 
 MOCHI_STRUCT_BEGIN_EX(mochi::ArticulatedCycleJointParams)
@@ -461,18 +470,6 @@ MOCHI_FIELD(maxLineSearchIters)
 MOCHI_FIELD(convergenceStatus)
 MOCHI_STRUCT_END_EX()
 
-MOCHI_STRUCT_BEGIN_EX(mochi::RecordingParams)
-MOCHI_FIELD(recordActorMeshes)
-MOCHI_FIELD(recordActorLocalToGlobalMap)
-MOCHI_FIELD(recordActorMassMatrix)
-MOCHI_FIELD(recordTargetState)
-MOCHI_FIELD(recordDynamicActorState)
-MOCHI_FIELD(recordStaticActorState)
-MOCHI_FIELD(recordContactPoints)
-MOCHI_FIELD(recordNodeContactForces)
-MOCHI_FIELD(recordSdfDistances)
-MOCHI_STRUCT_END_EX()
-
 MOCHI_STRUCT_BEGIN_EX(mochi::PoseTrackingParams)
 MOCHI_FIELD(stiffness)
 MOCHI_FIELD(damping)
@@ -515,6 +512,9 @@ MOCHI_STRUCT_BEGIN_EX(mochi::Actor)
 MOCHI_STRUCT_END_EX()
 
 MOCHI_STRUCT_BEGIN_EX(mochi::Constraint)
+MOCHI_STRUCT_END_EX()
+
+MOCHI_STRUCT_BEGIN_EX(mochi::Scene)
 MOCHI_STRUCT_END_EX()
 
 MOCHI_STRUCT_BEGIN_EX(mochi::AsyncScene)

@@ -31,10 +31,29 @@ unset(_mochi_renderer_srcs)
 # on specific symbols. To function as a shared library, it currently exports ALL
 # symbols
 if (MOCHI_BUILD_SHARED)
-    set_target_properties(mochi_renderer PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+    set_target_properties(mochi_renderer PROPERTIES
+        C_VISIBILITY_PRESET default
+        CXX_VISIBILITY_PRESET default
+        WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif ()
 
 if (MOCHI_BUILD_TESTS)
+    get_target_property(_mochi_renderer_test_srcs mochi_renderer_test SOURCES)
+    list(REMOVE_ITEM _mochi_renderer_test_srcs
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/mochi_renderer_test.cpp"
+    )
+    set_target_properties(mochi_renderer_test PROPERTIES
+        SOURCES "${_mochi_renderer_test_srcs}")
+    unset(_mochi_renderer_test_srcs)
+
+    mochi_add_test_executable(
+        mochi_renderer_gpu_test
+        "${CMAKE_CURRENT_SOURCE_DIR}/test")
+    set_target_properties(mochi_renderer_gpu_test PROPERTIES
+        SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/main.cpp;${CMAKE_CURRENT_SOURCE_DIR}/test/mochi_renderer_test.cpp")
+    target_link_libraries(mochi_renderer_gpu_test PRIVATE mochi_renderer)
+
     # WORK-AROUND: the export-all hack above causes linker errors when mochi_core types
     # are used, because mochi_core is statically linked into mochi_renderer_test and all
     # mochi_core symbols are also exported from mochi_renderer. The real fix should be to
@@ -42,6 +61,7 @@ if (MOCHI_BUILD_TESTS)
     # were a shared library, that would also fix it.
     if (MOCHI_BUILD_SHARED)
         target_compile_definitions(mochi_renderer_test PRIVATE MOCHI_USE_EXTERN_TEMPLATE=0)
+        target_compile_definitions(mochi_renderer_gpu_test PRIVATE MOCHI_USE_EXTERN_TEMPLATE=0)
     endif ()
 
     # stl_import_test.cpp includes "third_party/stl_reader.h", which is a private header
@@ -59,7 +79,7 @@ if (MOCHI_BUILD_TESTS)
     # Meshes loaded from disk by glb_sections_test.cpp and stl_import_test.cpp.
     # Buck stages these; ctest reads them from the source tree. APPEND so the
     # MOCHI_ASSETS_PATH that mochi_add_test_executable sets survives.
-    set_property(TEST mochi_renderer_test APPEND PROPERTY
+    set_property(TEST mochi_renderer_test mochi_renderer_gpu_test APPEND PROPERTY
         ENVIRONMENT "MOCHI_RENDERER_TEST_ASSETS=${CMAKE_CURRENT_SOURCE_DIR}/test/assets/")
 endif ()
 
@@ -77,6 +97,7 @@ set(_mochi_renderer_materials
     FlatLitSeeThrough
     GroundShadow
     HighlightComposite
+    InstancedSphere
     LitOpaque
     LitSeeThrough
     LitVertexColor

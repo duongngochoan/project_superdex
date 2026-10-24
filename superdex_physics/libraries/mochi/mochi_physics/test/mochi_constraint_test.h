@@ -30,7 +30,6 @@
 #include <mochi_physics/src/mochi_constraint.h>
 #include <mochi_physics/src/mochi_group.h>
 #include <mochi_physics/src/mochi_rod.h>
-#include <mochi_physics/src/mochi_skinning.h>
 
 #include <algorithm>
 #include <array>
@@ -241,6 +240,9 @@ class ConstraintTestBase : public test::MochiSceneTestBase {
     entt::registry& reg = GetRegistry();
     auto& result = reg.get<CCompoundConstraintSnle>(_entityCompound);
     result.SetZero(params);
+    for (auto [e, linkResidual] : reg.view<CArticulatedConstraintLinkResidual>().each()) {
+      linkResidual.isActive = false;
+    }
     AssembleConstraint<kGradTarget>(reg, _entityConstraint, params, result);
   }
 
@@ -256,6 +258,34 @@ class ConstraintTestBase : public test::MochiSceneTestBase {
   void RunTest_Obj();
   void SanityCheck_CVal(ColumnVectorView<real const> cVal);
   void SanityCheck_DCVal(ColumnVectorView<real const> dCVal);
+
+  // Assembled residual at the given global DoF indices. For constraints with mixed links, it
+  // includes the link-space residuals of the articulations, projected to their joint DoFs with the
+  // articulated Jacobian, as articulated::compound::ProjectFullResidual does.
+  ColumnVector<real> GatherResidual(Span<int const> globalIndices) {
+    auto& reg = GetRegistry();
+    auto const& compoundResidual =
+        reg.get<CCompoundConstraintSnle const>(_entityCompound).residuals[0].second;
+    ColumnVector<real> residual(isize(globalIndices));
+    for (int i = 0; i < isize(globalIndices); ++i) {
+      residual[i] = compoundResidual[globalIndices[i]];
+    }
+    for (auto [e, linkResidual] : reg.view<CArticulatedConstraintLinkResidual const>().each()) {
+      if (!linkResidual.isActive) {
+        continue;
+      }
+      auto const& jacobian = reg.get<CArticulatedJacobian const>(e).value;
+      ColumnVector<real> const jointResidual = jacobian.Transpose() * linkResidual.residual;
+      int const offset = reg.get<CDofOffset const>(e).dofsOffset;
+      for (int i = 0; i < isize(globalIndices); ++i) {
+        int const dof = globalIndices[i] - offset;
+        if (dof >= 0 && dof < jointResidual.Rows()) {
+          residual[i] += jointResidual[dof];
+        }
+      }
+    }
+    return residual;
+  }
 
   template <GradTarget kGradTarget>
   void RunTest_Res() {
@@ -288,10 +318,7 @@ class ConstraintTestBase : public test::MochiSceneTestBase {
         ? reg.get<CConstraintGlobalInputSparsityCache const>(_entityConstraint).resIndices
         : reg.get<CConstraintGlobalSparsityCache const>(_entityConstraint).resIndices;
     auto resSize = isize(globalResIndices);
-    ColumnVector<real> res0(resSize);
-    for (int i = 0; i < resSize; ++i) {
-      res0[i] = result.residuals[0].second[globalResIndices[i]];
-    }
+    ColumnVector<real> res0 = GatherResidual(MakeConstSpan(globalResIndices));
     ColumnVector<real> resFD = res0.Duplicate();
 
     real dx = 2.0e-3_r;

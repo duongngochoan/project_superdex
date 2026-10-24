@@ -16,7 +16,15 @@
 # Mochi's own assets/ is the wrong root for this target.
 set(MOCHI_TEST_ASSETS_DIR "${PROJECT_SOURCE_DIR}/assets")
 
+# Most robotics tests load bot geometry from HDF5, so the no-HDF5 configuration
+# validates the library build while the full configuration builds and runs its tests.
+set(_superdex_robotics_build_tests "${MOCHI_BUILD_TESTS}")
+if (NOT MOCHI_USE_HDF5)
+    set(MOCHI_BUILD_TESTS OFF)
+endif ()
 mochi_add_library(superdex_robotics)
+set(MOCHI_BUILD_TESTS "${_superdex_robotics_build_tests}")
+unset(_superdex_robotics_build_tests)
 
 target_link_libraries(superdex_robotics
     PUBLIC

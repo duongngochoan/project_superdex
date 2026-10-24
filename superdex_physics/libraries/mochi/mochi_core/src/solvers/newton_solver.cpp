@@ -349,11 +349,6 @@ void NewtonSolver<T>::SetParams(NewtonSolverParams const& params) {
 }
 
 template <typename T>
-NewtonSolverParams const& NewtonSolver<T>::GetParams() const {
-  return _params;
-}
-
-template <typename T>
 bool NewtonSolver<T>::TakeStep(
     Problem& problem,
     Status& status,
@@ -624,8 +619,10 @@ NewtonSolverStatus<T> NewtonSolver<T>::Solve(Problem& problem) {
   // TODO Explore whether we can avoid accessing `SnleProblem<T>::increment`
   auto dxStep = AsView(problem.increment);
 
-  // Owning copy of the initial solution.
-  ColumnVector<T> const initialSolution = problem.GetSolution();
+  // Owning copy of the initial solution used by verbose termination logging.
+  ColumnVector<T> const initialSolution = _params.verbosity >= VerbosityLevel::Verbose
+      ? problem.GetSolution().Duplicate()
+      : ColumnVector<T>{};
 
   // Linear operator with the approximate DResidual for the linear solve.
   AnyLinearOperator linOp = {};
@@ -744,17 +741,25 @@ NewtonSolverStatus<T> NewtonSolver<T>::Solve(Problem& problem) {
 
       // Solve the linear system.
       dxSolve.SetZero();
-      auto linearResult = _linearSolver->Solve(linOp, problem.GetResidual(), dxSolve);
+      auto linearResult = _linearSolver->Solve(
+          linOp,
+          problem.GetResidual(),
+          dxSolve,
+          /*hasOperatorChanged*/ true,
+          InitialGuessHint::Zero);
+      MOCHI_ASSERT_VERBOSE(
+          linearResult.convergence != LinearSolverConvergenceStatus::None,
+          "Linear solver convergence status has not been set.");
 
-      if (linearResult.converged && _params.verbosity >= VerbosityLevel::Verbose) {
+      if (IsConverged(linearResult.convergence) && _params.verbosity >= VerbosityLevel::Verbose) {
         MOCHI_LOG(
             "\n\tLinear solver converged after %d iterations: |r|=%.5e, |r|/|r0|=%.5e\n",
             linearResult.numIterDone,
             linearResult.residualNorm,
             linearResult.relativeResidualNorm);
-      } else if (!linearResult.converged) {
+      } else if (!IsConverged(linearResult.convergence)) {
         bool const abortedDueToNonPsd = !projectPsd && _params.lParams.abortIfNotSpd &&
-            (linearResult.numIterDone <= _params.lParams.maxIter);
+            (linearResult.convergence == LinearSolverConvergenceStatus::Diverged);
         if (abortedDueToNonPsd && _params.verbosity >= VerbosityLevel::Verbose) {
           MOCHI_LOG(
               "\n\tLinear solver aborted after %d iterations due to non-PSD matrix.",
@@ -770,7 +775,7 @@ NewtonSolverStatus<T> NewtonSolver<T>::Solve(Problem& problem) {
 
       linearResidualNorm = static_cast<T>(linearResult.residualNorm);
       status.totalNumLinearIterDone += linearResult.numIterDone;
-      retry = !linearResult.converged;
+      retry = !IsConverged(linearResult.convergence);
 
       // If the Newton-Raphson step is not successful, the iteration will be retried if (a) we did
       // not use a fitted Hessian, (b) we are not doing PSD projection but we could, and/or (c) the
@@ -781,7 +786,7 @@ NewtonSolverStatus<T> NewtonSolver<T>::Solve(Problem& problem) {
           (status.itersSinceDResidualAssembly == 0);
 
       // Try to take the step only if the linear solver converged or if it's the last try.
-      if (isLastTry || linearResult.converged) {
+      if (isLastTry || IsConverged(linearResult.convergence)) {
         if (MOCHI_ASSERT_VERBOSE_ENABLED && projectPsd) {
           [[maybe_unused]] auto resDot = problem.GetResidual().Dot(dxSolve);
           MOCHI_ASSERT_VERBOSE(resDot >= 0, "NOT PSD: residual.Dot(dxSolve) = %g", resDot);
@@ -797,24 +802,15 @@ NewtonSolverStatus<T> NewtonSolver<T>::Solve(Problem& problem) {
         status.improvedInLastIter = TakeStep(
             problem,
             status,
-            /*takeFinalLsStepIfNoImprovement*/ isLastTry && !_params.gradientDescentFallback);
+            /*takeFinalLsStepIfNoImprovement*/ isLastTry);
         retry = !status.improvedInLastIter;
       }
 
       if (retry) { // The Newton-Raphson step was not successful.
         if (isLastTry) {
           // If 'retry' and 'isLastTry' are true, this is the last try and there was no improvement
-          // in the line search. Try a gradient descent step if the gradient descent fallback is
-          // enabled.
-          if (_params.gradientDescentFallback) {
-            dxStep = -_workspace.residual;
-            status.improvedInLastIter = TakeStep(
-                problem,
-                status,
-                /*takeFinalLsStepIfNoImprovement*/ true);
-          }
-
-          if (!status.improvedInLastIter && _params.verbosity >= VerbosityLevel::Verbose) {
+          // in the line search, so the final line-search iterate was taken.
+          if (_params.verbosity >= VerbosityLevel::Verbose) {
             MOCHI_LOG(
                 "\n\t\tUnable to take Newton-Raphson step with improvement. This was the last try in this Newton-Raphson iteration. Taking step without improvement (|dx|=%.5e).\n",
                 problem.GetIncrement().Norm());
@@ -836,7 +832,7 @@ NewtonSolverStatus<T> NewtonSolver<T>::Solve(Problem& problem) {
             psdMode = PsdProjectionMode::Always;
           }
 
-          projectPsd = true;
+          projectPsd = (psdMode != PsdProjectionMode::Never);
           if (_params.verbosity >= VerbosityLevel::Verbose) {
             MOCHI_LOG(
                 "\n\t\tUnable to take a valid step. DResidual update, globally fitted Hessian, and/or PSD projection possible. Retrying step.\n");

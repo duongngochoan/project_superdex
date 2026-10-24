@@ -56,7 +56,7 @@ void InitializeOnce(entt::registry& reg) {
 
 void mochi::rom::SetupCollidingJacobians(
     ecs::Included<TagRomActor>,
-    ecs::Excluded<TagSoftSkinnedActor>,
+    ecs::Excluded<TagNestedSoftActor>,
     CFemBoundaryDiscretization const& discretization,
     CRootTransform const& transform,
     CDofOffset const& dofOffset,
@@ -82,15 +82,19 @@ void mochi::rom::SetupCollidingJacobians(
 
     // Compute Jacobians
     for (auto& jac : outJacobians) {
-      if (jac.type == ContactType::Sync) {
+      if (jac.isSync) {
         // Create differentiable map.
         DQuad dquad(discretizationImpl.femElements, jac.query->jacColliderFromWorld);
         DMapThis dmap(
             useTransform ? DMapThis{DWithTransform(&dquad, &dtransform.value(), &drom)}
                          : DMapThis{DNoTransform(&dquad, &drom)});
+        auto jacs = jac.PrepareJacs(1);
         std::visit(
-            [&jac](auto const& dmap) { dmap.GetJac(jac.query->sampleIndices, *jac.jacs); }, dmap);
-        (*jac.jacs)[0].CompressIndices();
+            [&](auto const& dmap) {
+              dmap.GetJac(jac.query->sampleIndices, jacs, jac.JacScratch());
+            },
+            dmap);
+        jacs[0].CompressIndices();
       }
     }
   });

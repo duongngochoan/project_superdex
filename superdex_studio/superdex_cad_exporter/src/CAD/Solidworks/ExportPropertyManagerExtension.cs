@@ -85,30 +85,17 @@ namespace CADRobotExporter.CAD
             }
         }
 
-        // Adds an asterix to the node text if it is incomplete (not currently used)
-        private void UpdateNodeNames(LinkNode node)
-        {
-            if (node.IsIncomplete)
-            {
-                node.Text = node.Link.Name + "*";
-            }
-            foreach (LinkNode child in node.Nodes)
-            {
-                UpdateNodeNames(child);
-            }
-        }
-
         // Adds the number of empty nodes to the currently active node
         private void CreateNewNodes(LinkNode currentNode, int number)
         {
             for (int i = 0; i < number; i++)
             {
                 LinkNode node = CreateEmptyNode(currentNode);
-                currentNode.Nodes.Add(node);
+                currentNode.AddChildNode(node);
             }
             for (int i = 0; i < -number; i++)
             {
-                currentNode.Nodes.RemoveAt(currentNode.Nodes.Count - 1);
+                currentNode.RemoveLastChildNode();
             }
             currentNode.ExpandAll();
         }
@@ -120,7 +107,7 @@ namespace CADRobotExporter.CAD
             for (int i = 0; i < number; i++)
             {
                 LinkNode newNode = CreateEmptyNode(node);
-                node.Nodes.Add(newNode);
+                node.AddChildNode(newNode);
                 node = newNode;
             }
             currentNode.ExpandAll();
@@ -138,12 +125,12 @@ namespace CADRobotExporter.CAD
 
             int index = parent.Nodes.IndexOf(currentNode);
 
-            parent.Nodes.Remove(currentNode);
+            parent.RemoveChildNode(currentNode);
 
             LinkNode newParent = CreateEmptyNode(parent);
-            newParent.Nodes.Add(currentNode);
+            newParent.AddChildNode(currentNode);
 
-            parent.Nodes.Insert(index, newParent);
+            parent.InsertChildNode(index, newParent);
 
             newParent.ExpandAll();
 
@@ -230,7 +217,7 @@ namespace CADRobotExporter.CAD
                 }
 
                 // Build ImportedTreeNode structure from current tree
-                var exportedRoot = BuildExportedTree(_rootNode);
+                var exportedRoot = BuildExportedTree(_rootNode.Link);
                 string text = Import.TreeTextImporter.Export(exportedRoot);
 
                 using (SaveFileDialog saveFileDialog = new SaveFileDialog())
@@ -279,7 +266,7 @@ namespace CADRobotExporter.CAD
 
             foreach (var child in importedRoot.Children)
             {
-                rootNode.Nodes.Add(CreateNodeFromImported(child, rootLink));
+                rootNode.AddChildNode(CreateNodeFromImported(child, rootLink));
             }
 
             return rootNode;
@@ -305,7 +292,7 @@ namespace CADRobotExporter.CAD
 
             foreach (var child in imported.Children)
             {
-                node.Nodes.Add(CreateNodeFromImported(child, link));
+                node.AddChildNode(CreateNodeFromImported(child, link));
             }
 
             return node;
@@ -314,14 +301,14 @@ namespace CADRobotExporter.CAD
         /// <summary>
         /// Builds an ImportedTreeNode structure from the current tree for export.
         /// </summary>
-        private Import.ImportedTreeNode BuildExportedTree(LinkNode linkNode)
+        private Import.ImportedTreeNode BuildExportedTree(Link link)
         {
             var exported = new Import.ImportedTreeNode(
-                linkNode.Link.Name,
-                linkNode.Link.Joint.Name,
-                linkNode.IsBaseNode ? "fixed" : linkNode.Link.Joint.Type);
+                link.Name,
+                link.Joint.Name,
+                link.IsBaseLink ? "fixed" : link.Joint.Type);
 
-            foreach (LinkNode child in linkNode.Nodes)
+            foreach (Link child in link.Children)
             {
                 var childExported = BuildExportedTree(child);
                 childExported.Parent = exported;
@@ -336,7 +323,7 @@ namespace CADRobotExporter.CAD
             LinkNode currentNode = (LinkNode)Tree.SelectedNode;
 
             LinkNode newNode = CreateEmptyNode(currentNode);
-            currentNode.Nodes.Add(newNode);
+            currentNode.AddChildNode(newNode);
 
             currentNode.ExpandAll();
 
@@ -365,9 +352,11 @@ namespace CADRobotExporter.CAD
             Tree.SelectedNode = node;
 
             node.NodeFont = fontBold;
+            // Reassigning Text forces the native tree to re-measure the node; without it
+            // the bold text is clipped to the width computed for the regular font.
             node.Text = node.Text;
             previouslySelectedNode = node;
-            CheckNodeComplete(node);
+            CheckNodeComplete(node.Link);
         }
 
         // This method runs through first the child nodes of the selected node to see if there are
@@ -403,26 +392,26 @@ namespace CADRobotExporter.CAD
             return null;
         }
 
-        //Sets the node's isIncomplete flag if the node has key items that need to be completed
-        public void CheckNodeComplete(LinkNode node)
+        //Sets the link's isIncomplete flag if the link has key items that need to be completed
+        public void CheckNodeComplete(Link link)
         {
-            node.WhyIncomplete = "";
-            node.IsIncomplete = false;
-            if (String.IsNullOrWhiteSpace(node.Link.Name))
+            link.WhyIncomplete = "";
+            link.IsIncomplete = false;
+            if (String.IsNullOrWhiteSpace(link.Name))
             {
-                node.IsIncomplete = true;
-                node.WhyIncomplete += "        Link name is empty. Fill in a unique link name\r\n";
+                link.IsIncomplete = true;
+                link.WhyIncomplete += "        Link name is empty. Fill in a unique link name\r\n";
             }
-            if (String.IsNullOrWhiteSpace(node.Link.Joint.Name) && !node.IsBaseNode)
+            if (String.IsNullOrWhiteSpace(link.Joint.Name) && !link.IsBaseLink)
             {
-                node.IsIncomplete = true;
-                node.WhyIncomplete += "        Joint name is empty. Fill in a unique joint name\r\n";
+                link.IsIncomplete = true;
+                link.WhyIncomplete += "        Joint name is empty. Fill in a unique joint name\r\n";
             }
         }
 
-        private void CheckModelDocsExist(LinkNode node, List<string> problemComponents)
+        private void CheckModelDocsExist(Link link, List<string> problemComponents)
         {
-            foreach (Component2 component in node.Link.SWVisualComponents)
+            foreach (Component2 component in link.SWVisualComponents)
             {
                 ModelDoc2 doc = component.GetModelDoc2();
                 if (doc == null)
@@ -431,24 +420,24 @@ namespace CADRobotExporter.CAD
                 }
             }
 
-            foreach (LinkNode child in node.Nodes)
+            foreach (Link child in link.Children)
             {
                 CheckModelDocsExist(child, problemComponents);
             }
         }
 
-        //Recursive function to iterate though nodes and build a message containing those that are incomplete
-        public string CheckNodesComplete(LinkNode node, string incompleteNodes)
+        //Recursive function to iterate though links and build a message containing those that are incomplete
+        public string CheckNodesComplete(Link link, string incompleteNodes)
         {
-            // Determine if the node is incomplete
-            CheckNodeComplete(node);
-            if (node.IsIncomplete)
+            // Determine if the link is incomplete
+            CheckNodeComplete(link);
+            if (link.IsIncomplete)
             {
                 //Building the message
-                incompleteNodes += "    '" + node.Text + "':\r\n" + node.WhyIncomplete + "\r\n\r\n";
+                incompleteNodes += "    '" + link.Name + "':\r\n" + link.WhyIncomplete + "\r\n\r\n";
             }
-            // Cycle through the rest of the nodes
-            foreach (LinkNode child in node.Nodes)
+            // Cycle through the rest of the links
+            foreach (Link child in link.Children)
             {
                 incompleteNodes = CheckNodesComplete(child, incompleteNodes);
             }
@@ -460,7 +449,7 @@ namespace CADRobotExporter.CAD
         {
             //Calls the recursive function starting with the base_link node and retrieves a string
             // identifying the incomplete nodes
-            string incompleteNodes = CheckNodesComplete((LinkNode)tree.Nodes[0], "");
+            string incompleteNodes = CheckNodesComplete(((LinkNode)tree.Nodes[0]).Link, "");
             if (!String.IsNullOrWhiteSpace(incompleteNodes))
             {
                 MessageBox.Show(
@@ -551,12 +540,7 @@ namespace CADRobotExporter.CAD
 
                     previouslySelectedNode.Link.Joint.Type = GetJointTypeFromOptions();
 
-                    CommonSwOperations.GetSelectedComponents(
-                        model, previouslySelectedNode.Link.SWVisualComponents, PMLinkVisualComponentsSelection.Mark);
-                    CommonSwOperations.GetSelectedComponents(
-                        model, previouslySelectedNode.Link.SWCollisionComponents, PMLinkCollisionComponentsSelection.Mark);
-                    CommonSwOperations.GetSelectedComponents(
-                        model, previouslySelectedNode.Link.SWInertialComponents, PMLinkInertialComponentsSelection.Mark);
+                    ReadGeometrySelections(previouslySelectedNode.Link);
                     previouslySelectedNode.Link.shouldFlipAxis = PMRefAxisFlipCheckbox.Checked;
                     previouslySelectedNode.Link.visualsOnly = PMCheckboxLinkPurelyVisual.Checked;
                     previouslySelectedNode.Link.inertialsOnly = PMCheckboxLinkPurelyInertial.Checked;
@@ -570,12 +554,7 @@ namespace CADRobotExporter.CAD
                         previouslySelectedNode.Link.Joint.SWCoordinateSystemFeature = coordSys;
                         previouslySelectedNode.Link.Joint.CoordinateSystemName = coordSys.GetNameForSelection(out _);
                     }
-                    CommonSwOperations.GetSelectedComponents(
-                        model, previouslySelectedNode.Link.SWVisualComponents, PMLinkVisualComponentsSelection.Mark);
-                    CommonSwOperations.GetSelectedComponents(
-                        model, previouslySelectedNode.Link.SWCollisionComponents, PMLinkCollisionComponentsSelection.Mark);
-                    CommonSwOperations.GetSelectedComponents(
-                        model, previouslySelectedNode.Link.SWInertialComponents, PMLinkInertialComponentsSelection.Mark);
+                    ReadGeometrySelections(previouslySelectedNode.Link);
                     previouslySelectedNode.Link.shouldFlipAxis = PMRefAxisFlipCheckbox.Checked;
                     previouslySelectedNode.Link.visualsOnly = PMCheckboxLinkPurelyVisual.Checked;
                     previouslySelectedNode.Link.inertialsOnly = PMCheckboxLinkPurelyInertial.Checked;
@@ -605,7 +584,7 @@ namespace CADRobotExporter.CAD
                 // Apply auto-numbering if enabled
                 if (autoNumber)
                 {
-                    node.Link.Name = GenerateLinkName(Parent);
+                    node.Link.Name = GenerateLinkName(Parent.Link);
                     node.Link.Joint.Name = $"joint_{node.Link.Name}";
                 }
                 else
@@ -621,7 +600,6 @@ namespace CADRobotExporter.CAD
                 node.IsIncomplete = true;
             }
 
-            node.Name = node.Link.Name;
             node.Text = node.Link.Name;
             node.ContextMenuStrip = docMenu;
 
@@ -629,27 +607,26 @@ namespace CADRobotExporter.CAD
         }
 
         // Generate link name based on parent and its existing children
-        private string GenerateLinkName(LinkNode parent)
+        private string GenerateLinkName(Link parent)
         {
             string prefix;
 
             // Check if parent already has children
-            if (parent.Nodes != null && parent.Nodes.Count > 0)
+            if (parent.Children != null && parent.Children.Count > 0)
             {
                 // Subsequent child: use first sibling's full name as prefix
-                LinkNode firstChild = parent.Nodes[0] as LinkNode;
-                prefix = firstChild.Link.Name;
+                prefix = parent.Children[0].Name;
             }
             else
             {
                 // First child: extract prefix from parent's name
-                if (parent.IsBaseNode)
+                if (parent.IsBaseLink)
                 {
                     prefix = "link";  // Default for children of base_link
                 }
                 else
                 {
-                    prefix = ExtractPrefix(parent.Link.Name);
+                    prefix = ExtractPrefix(parent.Name);
                 }
             }
 
@@ -711,7 +688,6 @@ namespace CADRobotExporter.CAD
             }
 
             node.Link.Name = newName;
-            node.Name = newName;
             node.Text = newName;
         }
 
@@ -719,16 +695,16 @@ namespace CADRobotExporter.CAD
         public void SyncCountersWithTree(LinkNode rootNode)
         {
             _linkCounters.Clear();
-            TraverseAndRegister(rootNode);
+            TraverseAndRegister(rootNode?.Link);
         }
 
-        private void TraverseAndRegister(LinkNode node)
+        private void TraverseAndRegister(Link link)
         {
-            if (node == null) return;
+            if (link == null) return;
 
-            if (!node.IsBaseNode)
+            if (!link.IsBaseLink)
             {
-                var parts = node.Link.Name.Split('_');
+                var parts = link.Name.Split('_');
                 if (parts.Length > 1 && int.TryParse(parts[parts.Length - 1], out int number))
                 {
                     string prefix = string.Join("_", parts, 0, parts.Length - 1);
@@ -744,9 +720,9 @@ namespace CADRobotExporter.CAD
                 }
             }
 
-            if (node.Nodes != null)
+            if (link.Children != null)
             {
-                foreach (LinkNode child in node.Nodes)
+                foreach (Link child in link.Children)
                 {
                     TraverseAndRegister(child);
                 }
@@ -759,7 +735,49 @@ namespace CADRobotExporter.CAD
             _linkCounters.Clear();
         }
 
-        //Sets all the controls in the Property Manager from the Selected Node
+        private void ReadGeometrySelections(Link link)
+        {
+            if (isPartDoc)
+            {
+                CommonSwOperations.GetSelectedBodies(
+                    model, link.SWVisualBodies, PMLinkVisualComponentsSelection.Mark);
+                CommonSwOperations.GetSelectedBodies(
+                    model, link.SWCollisionBodies, PMLinkCollisionComponentsSelection.Mark);
+                CommonSwOperations.GetSelectedBodies(
+                    model, link.SWInertialBodies, PMLinkInertialComponentsSelection.Mark);
+                return;
+            }
+
+            CommonSwOperations.GetSelectedComponents(
+                model, link.SWVisualComponents, PMLinkVisualComponentsSelection.Mark);
+            CommonSwOperations.GetSelectedComponents(
+                model, link.SWCollisionComponents, PMLinkCollisionComponentsSelection.Mark);
+            CommonSwOperations.GetSelectedComponents(
+                model, link.SWInertialComponents, PMLinkInertialComponentsSelection.Mark);
+        }
+
+        private void WriteGeometrySelections(Link link)
+        {
+            if (isPartDoc)
+            {
+                CommonSwOperations.SelectBodies(
+                    model, link.SWVisualBodies, true, PMLinkVisualComponentsSelection.Mark);
+                CommonSwOperations.SelectBodies(
+                    model, link.SWCollisionBodies, false, PMLinkCollisionComponentsSelection.Mark);
+                CommonSwOperations.SelectBodies(
+                    model, link.SWInertialBodies, false, PMLinkInertialComponentsSelection.Mark);
+                return;
+            }
+
+            CommonSwOperations.SelectComponents(
+                model, link.SWVisualComponents, true, PMLinkVisualComponentsSelection.Mark);
+            CommonSwOperations.SelectComponents(
+                model, link.SWCollisionComponents, false, PMLinkCollisionComponentsSelection.Mark);
+            CommonSwOperations.SelectComponents(
+                model, link.SWInertialComponents, false, PMLinkInertialComponentsSelection.Mark);
+        }
+
+        // Sets all the controls in the Property Manager from the Selected Node
         public void FillPropertyManager(LinkNode node)
         {
             PMTextBoxLinkName.Text = node.Link.Name;
@@ -777,7 +795,7 @@ namespace CADRobotExporter.CAD
                 }
 
                 PMTextBoxJointName.Text = "";
-                PMLabelParentLinkName.Caption = node.Parent?.Name ?? "(none)";
+                PMLabelParentLinkName.Caption = node.Link.Parent?.Name ?? "(none)";
                 PMLabelCoordSys.Caption = "Site Reference Coordinate System:";
                 SelectOptionsFromJointType("NONE");
                 SelectAxisOption("");
@@ -786,9 +804,7 @@ namespace CADRobotExporter.CAD
             {
                 PMRefAxisFlipCheckbox.Checked = node.Link.shouldFlipAxis;
 
-                CommonSwOperations.SelectComponents(model, node.Link.SWVisualComponents, true, PMLinkVisualComponentsSelection.Mark);
-                CommonSwOperations.SelectComponents(model, node.Link.SWCollisionComponents, false, PMLinkCollisionComponentsSelection.Mark);
-                CommonSwOperations.SelectComponents(model, node.Link.SWInertialComponents, false, PMLinkInertialComponentsSelection.Mark);
+                WriteGeometrySelections(node.Link);
 
                 PMCheckboxLinkPurelyInertial.Checked = node.Link.inertialsOnly;
                 PMCheckboxLinkPurelyVisual.Checked = node.Link.visualsOnly;
@@ -810,14 +826,12 @@ namespace CADRobotExporter.CAD
                 }
 
                 PMTextBoxJointName.Text = node.Link.Joint.Name;
-                PMLabelParentLinkName.Caption = node.Parent.Name;
+                PMLabelParentLinkName.Caption = node.Link.Parent?.Name ?? "(none)";
                 SelectOptionsFromJointType(node.Link.Joint.Type);
             }
             else
             {
-                CommonSwOperations.SelectComponents(model, node.Link.SWVisualComponents, true, PMLinkVisualComponentsSelection.Mark);
-                CommonSwOperations.SelectComponents(model, node.Link.SWCollisionComponents, false, PMLinkCollisionComponentsSelection.Mark);
-                CommonSwOperations.SelectComponents(model, node.Link.SWInertialComponents, false, PMLinkInertialComponentsSelection.Mark);
+                WriteGeometrySelections(node.Link);
                 PMCheckboxLinkPurelyInertial.Checked = node.Link.inertialsOnly;
                 PMCheckboxLinkPurelyVisual.Checked = node.Link.visualsOnly;
                 PMRefAxisFlipCheckbox.Checked = node.Link.shouldFlipAxis;
@@ -904,7 +918,6 @@ namespace CADRobotExporter.CAD
                     previouslySelectedNode.Link.Name = "site_" + previouslySelectedNode.Link.Name;
                     PMTextBoxLinkName.Text = previouslySelectedNode.Link.Name;
                     previouslySelectedNode.Text = previouslySelectedNode.Link.Name;
-                    previouslySelectedNode.Name = previouslySelectedNode.Link.Name;
                 }
 
                 SelectOptionsFromJointType("NONE");
@@ -978,7 +991,6 @@ namespace CADRobotExporter.CAD
             Tree.Nodes.Clear();
             LinkNode baseNode = new LinkNode();
             Link baseLink = robot.BaseLink;
-            baseNode.Name = baseLink.Name;
             baseNode.Text = baseLink.Name;
             baseNode.Link = baseLink;
             baseNode.ContextMenuStrip = docMenu;
@@ -995,7 +1007,6 @@ namespace CADRobotExporter.CAD
         public LinkNode CreateLinkNodeFromLink(Link Link)
         {
             LinkNode node = new LinkNode();
-            node.Name = Link.Name;
             node.Text = Link.Name;
             node.Link = Link;
             node.ContextMenuStrip = docMenu;
@@ -1005,8 +1016,6 @@ namespace CADRobotExporter.CAD
                 node.Nodes.Add(CreateLinkNodeFromLink(child));
             }
 
-            // Need to erase the children from the embedded link because they may be rearranged later.
-            node.Link.Children.Clear();
             return node;
         }
 
@@ -1043,7 +1052,7 @@ namespace CADRobotExporter.CAD
             else
             {
                 List<string> problemLinks = new List<string>();
-                CommonSwOperations.LoadSWComponents(model, baseNode, problemLinks);
+                CommonSwOperations.LoadSWComponents(model, baseNode.Link, problemLinks);
 
                 if (problemLinks.Count > 0)
                 {
@@ -1091,20 +1100,20 @@ namespace CADRobotExporter.CAD
             model.Extension.SelectByID2
                 (ConfigurationSerialization.UrdfCongfigurationFeatureName, "ATTRIBUTE", 0, 0, 0, true, 0, null, 0);
             model.FeatureManager.MoveToFolder(robotExporterItemsFolder, "", false);
-            SelectFeatures(node);
+            SelectFeatures(node.Link);
             model.FeatureManager.MoveToFolder(robotExporterItemsFolder, "", false);
         }
 
-        public void SelectFeatures(LinkNode node)
+        public void SelectFeatures(Link link)
         {
             model.Extension.SelectByID2(
-                node.Link.Joint.CoordinateSystemName, "COORDSYS", 0, 0, 0, true, -1, null, 0);
-            if (node.Link.Joint.AxisName != "None")
+                link.Joint.CoordinateSystemName, "COORDSYS", 0, 0, 0, true, -1, null, 0);
+            if (link.Joint.AxisName != "None")
             {
                 model.Extension.SelectByID2(
-                    node.Link.Joint.AxisName, "AXIS", 0, 0, 0, true, -1, null, 0);
+                    link.Joint.AxisName, "AXIS", 0, 0, 0, true, -1, null, 0);
             }
-            foreach (LinkNode child in node.Nodes)
+            foreach (Link child in link.Children)
             {
                 SelectFeatures(child);
             }
@@ -1114,7 +1123,7 @@ namespace CADRobotExporter.CAD
         {
             List<string> problematicLinks = new List<string>();
 
-            CheckAllLinksHaveCoordinateSystemsRecursive(node, problematicLinks);
+            CheckAllLinksHaveCoordinateSystemsRecursive(node.Link, problematicLinks);
 
             if (problematicLinks.Count > 0)
             {
@@ -1135,7 +1144,7 @@ namespace CADRobotExporter.CAD
         {
             List<string> problematicLinks = new List<string>();
 
-            CheckAllLinksHaveJointAxesRecursive(node, problematicLinks);
+            CheckAllLinksHaveJointAxesRecursive(node.Link, problematicLinks);
 
             if (problematicLinks.Count > 0)
             {
@@ -1152,52 +1161,52 @@ namespace CADRobotExporter.CAD
             return true;
         }
 
-        public void CheckAllLinksHaveCoordinateSystemsRecursive(LinkNode node, List<string> problematicLinks)
+        public void CheckAllLinksHaveCoordinateSystemsRecursive(Link link, List<string> problematicLinks)
         {
-            if (string.IsNullOrEmpty(node.Link.Joint.CoordinateSystemName))
+            if (string.IsNullOrEmpty(link.Joint.CoordinateSystemName))
             {
-                problematicLinks.Add(node.Link.Name);
+                problematicLinks.Add(link.Name);
             }
 
-            foreach (LinkNode child in node.Nodes)
+            foreach (Link child in link.Children)
             {
                 CheckAllLinksHaveCoordinateSystemsRecursive(child, problematicLinks);
             }
         }
 
-        public void CheckAllLinksHaveJointAxesRecursive(LinkNode node, List<string> problematicLinks)
+        public void CheckAllLinksHaveJointAxesRecursive(Link link, List<string> problematicLinks)
         {
-            if (!node.IsBaseNode && node.Link.Joint.Type != "fixed" && string.IsNullOrEmpty(node.Link.Joint.AxisName))
+            if (!link.IsBaseLink && link.Joint.Type != "fixed" && string.IsNullOrEmpty(link.Joint.AxisName))
             {
-                problematicLinks.Add(node.Link.Name);
+                problematicLinks.Add(link.Name);
             }
 
-            foreach (LinkNode child in node.Nodes)
+            foreach (Link child in link.Children)
             {
                 CheckAllLinksHaveJointAxesRecursive(child, problematicLinks);
             }
         }
 
-        public void CheckIfLinkNamesAreUnique(LinkNode node, string linkName, List<string> conflict)
+        public void CheckIfLinkNamesAreUnique(Link link, string linkName, List<string> conflict)
         {
-            if (node.Link.Name == linkName)
+            if (link.Name == linkName)
             {
-                conflict.Add(node.Link.Name);
+                conflict.Add(link.Name);
             }
 
-            foreach (LinkNode child in node.Nodes)
+            foreach (Link child in link.Children)
             {
                 CheckIfLinkNamesAreUnique(child, linkName, conflict);
             }
         }
 
-        public void CheckIfJointNamesAreUnique(LinkNode node, string jointName, List<string> conflict)
+        public void CheckIfJointNamesAreUnique(Link link, string jointName, List<string> conflict)
         {
-            if (node.Link.Joint.Name == jointName)
+            if (link.Joint.Name == jointName)
             {
-                conflict.Add(node.Link.Joint.Name);
+                conflict.Add(link.Joint.Name);
             }
-            foreach (LinkNode child in node.Nodes)
+            foreach (Link child in link.Children)
             {
                 CheckIfJointNamesAreUnique(child, jointName, conflict);
             }
@@ -1207,8 +1216,8 @@ namespace CADRobotExporter.CAD
         {
             List<List<string>> linkConflicts = new List<List<string>>();
             List<List<string>> jointConflicts = new List<List<string>>();
-            CheckIfLinkNamesAreUnique(node, node, linkConflicts);
-            CheckIfJointNamesAreUnique(node, node, jointConflicts);
+            CheckIfLinkNamesAreUnique(node.Link, node.Link, linkConflicts);
+            CheckIfJointNamesAreUnique(node.Link, node.Link, jointConflicts);
 
             string message = "\r\nPlease fix these errors before proceeding.";
             string specificErrors = "";
@@ -1264,12 +1273,12 @@ namespace CADRobotExporter.CAD
         }
 
         public void CheckIfLinkNamesAreUnique(
-            LinkNode basenode, LinkNode currentNode, List<List<string>> conflicts)
+            Link baselink, Link currentLink, List<List<string>> conflicts)
         {
             List<string> conflict = new List<string>();
 
-            //Finds the conflicts of the currentNode with all the other nodes
-            CheckIfLinkNamesAreUnique(basenode, currentNode.Link.Name, conflict);
+            //Finds the conflicts of the currentLink with all the other links
+            CheckIfLinkNamesAreUnique(baselink, currentLink.Name, conflict);
             bool alreadyExists = false;
             foreach (List<string> existingConflict in conflicts)
             {
@@ -1282,21 +1291,21 @@ namespace CADRobotExporter.CAD
             {
                 conflicts.Add(conflict);
             }
-            foreach (LinkNode child in currentNode.Nodes)
+            foreach (Link child in currentLink.Children)
             {
                 //Proceeds recursively through the children nodes and adds to the conflicts
                 // list of lists.
-                CheckIfLinkNamesAreUnique(basenode, child, conflicts);
+                CheckIfLinkNamesAreUnique(baselink, child, conflicts);
             }
         }
 
         public void CheckIfJointNamesAreUnique(
-            LinkNode basenode, LinkNode currentNode, List<List<string>> conflicts)
+            Link baselink, Link currentLink, List<List<string>> conflicts)
         {
             List<string> conflict = new List<string>();
 
-            //Finds the conflicts of the currentNode with all the other nodes
-            CheckIfJointNamesAreUnique(basenode, currentNode.Link.Joint.Name, conflict);
+            //Finds the conflicts of the currentLink with all the other links
+            CheckIfJointNamesAreUnique(baselink, currentLink.Joint.Name, conflict);
             bool alreadyExists = false;
             foreach (List<string> existingConflict in conflicts)
             {
@@ -1310,11 +1319,11 @@ namespace CADRobotExporter.CAD
             {
                 conflicts.Add(conflict);
             }
-            foreach (LinkNode child in currentNode.Nodes)
+            foreach (Link child in currentLink.Children)
             {
                 //Proceeds recursively through the children nodes and adds to the conflicts
                 // list of lists.
-                CheckIfJointNamesAreUnique(basenode, child, conflicts);
+                CheckIfJointNamesAreUnique(baselink, child, conflicts);
             }
         }
     }

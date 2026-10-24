@@ -18,6 +18,7 @@
 
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/test/wait_until.h>
+#include <mochi_physics/dbg/protocol.h>
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/src/mochi_scene.h>
 #include <mochi_physics/src/mochi_scene_debugger.h>
@@ -194,6 +195,7 @@ TEST_F(ScenePauseTest, StepBlocksWhenPaused) {
   std::atomic<bool> ready{false};
   std::atomic<int> stepCounter{0};
   auto thread = std::thread{[&]() {
+    assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
     ready.store(true);
     for (int i = 0; i < 10; ++i) {
       scene->Step(kTimeStep);
@@ -306,6 +308,7 @@ TEST_F(ScenePauseTest, UnpauseWhenClientDisconnects) {
   std::atomic<bool> ready{false};
   std::atomic<int> stepCounter{0};
   auto thread = std::thread{[&]() {
+    assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
     ready.store(true);
     for (int i = 0; i < 10; ++i) {
       scene->Step(kTimeStep);
@@ -338,6 +341,7 @@ TEST_F(ScenePauseTest, UnpauseWhenServerStops) {
   std::atomic<bool> ready{false};
   std::atomic<int> stepCounter{0};
   auto thread = std::thread{[&]() {
+    assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
     ready.store(true);
     for (int i = 0; i < 10; ++i) {
       scene->Step(kTimeStep);
@@ -362,6 +366,37 @@ TEST_F(ScenePauseTest, UnpauseWhenServerStops) {
   EXPECT_EQ(10, stepCounter.load()); // All 10 steps completed
 }
 
+TEST_F(ScenePauseTest, SceneThreadEntryPointsDoNothingAfterShutdown) {
+  Scene* scene = CreateConnectedSelectedScene();
+  auto sceneDebugger = GetDebugger(scene);
+  ASSERT_NE(nullptr, sceneDebugger);
+  EXPECT_EQ(StepMode::Play, sceneDebugger->GetStepMode());
+
+  DisconnectClient();
+  EXPECT_EQ(nullptr, GetDebugger(scene));
+
+  auto* sceneImpl = assert_cast<SceneImpl*>(scene);
+  StepInfo const step{.scene = scene, .timeStepSec = kTimeStep};
+  auto queuePauseRequest = [&]() {
+    auto request = std::make_unique<protocol::SceneStepRequest>();
+    request->scene = scene->GetHandle();
+    request->mode = StepMode::Pause;
+    sceneDebugger->OnReceiveAsync(std::move(request));
+  };
+
+  queuePauseRequest();
+  sceneDebugger->UpdateOnSceneThread(sceneImpl);
+  EXPECT_EQ(StepMode::Play, sceneDebugger->GetStepMode());
+
+  queuePauseRequest();
+  sceneDebugger->OnPreStep(sceneImpl, step);
+  EXPECT_EQ(StepMode::Play, sceneDebugger->GetStepMode());
+
+  queuePauseRequest();
+  sceneDebugger->OnPostStep(sceneImpl, step);
+  EXPECT_EQ(StepMode::Play, sceneDebugger->GetStepMode());
+}
+
 TEST_F(ScenePauseTest, SetSceneStepModeUpdatesClientAndServer) {
   Scene* scene = CreateConnectedSelectedScene();
 
@@ -370,34 +405,52 @@ TEST_F(ScenePauseTest, SetSceneStepModeUpdatesClientAndServer) {
   SetModeAndWait(scene, StepMode::Play);
 }
 
-TEST_F(ScenePauseTest, PlayWaitsForRealTimeClock) {
+TEST_F(ScenePauseTest, PlayWaitsForRealTimeClockOrRestore) {
   Scene* scene = CreateConnectedSelectedScene();
   auto sceneDebugger = GetDebugger(scene);
   ASSERT_NE(nullptr, sceneDebugger);
 
   std::atomic<double> clock{0.0};
-  sceneDebugger->SetClock([&clock]() { return clock.load(); });
+  std::atomic<int> clockReads{0};
+  sceneDebugger->SetClock([&]() {
+    ++clockReads;
+    return clock.load();
+  });
 
   scene->Step(kTimeStep);
 
-  std::atomic<bool> stepStarted{false};
-  std::atomic<bool> stepFinished{false};
-  std::thread thread{[&]() {
-    stepStarted.store(true);
-    scene->Step(kTimeStep);
-    stepFinished.store(true);
-  }};
+  auto const expectStepWaitsUntil = [&](auto const& release) {
+    clockReads = 0;
+    std::atomic<bool> stepFinished{false};
+    std::thread thread{[&]() {
+      assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
+      scene->Step(kTimeStep);
+      stepFinished.store(true);
+    }};
 
-  test::WaitUntil([&]() { return stepStarted.load(); });
-  EXPECT_FALSE(
-      test::WaitUntil(
-          [&]() { return stepFinished.load(); },
-          kShortTimeout,
-          /*failOnTimeout*/ false));
+    // Two clock reads mean the step has handled queued messages and is waiting in the throttle.
+    test::WaitUntil([&]() { return clockReads.load() >= 2; });
+    EXPECT_FALSE(
+        test::WaitUntil(
+            [&]() { return stepFinished.load(); },
+            kShortTimeout,
+            /*failOnTimeout*/ false));
 
-  clock.store(kTimeStep);
-  test::WaitUntil([&]() { return stepFinished.load(); });
-  thread.join();
+    release();
+    if (!test::WaitUntil([&]() { return stepFinished.load(); })) {
+      clock.store(1e9); // Release a stuck step, so the test fails instead of hanging.
+    }
+    thread.join();
+  };
+
+  expectStepWaitsUntil([&]() { clock.store(kTimeStep); });
+
+  // A restore resets real-time tracking, which releases the waiting step. The clock moves behind
+  // the old start time first, so a throttle still using the old timeline would keep waiting.
+  expectStepWaitsUntil([&]() {
+    clock.store(-1.0);
+    _client->RestoreSceneState();
+  });
 }
 
 TEST_F(ScenePauseTest, PlayThrottlesEveryStepWithoutSpuriousReset) {
@@ -414,6 +467,7 @@ TEST_F(ScenePauseTest, PlayThrottlesEveryStepWithoutSpuriousReset) {
   std::atomic<int> stepCounter{0};
   std::atomic<bool> done{false};
   std::thread thread{[&]() {
+    assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
     for (int i = 0; i < kNumSteps; ++i) {
       scene->Step(kTimeStep);
       ++stepCounter;
@@ -450,6 +504,7 @@ TEST_F(ScenePauseTest, PlayResetsThrottleAfterExternalStall) {
   {
     std::atomic<bool> finished{false};
     std::thread thread{[&]() {
+      assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
       scene->Step(kTimeStep);
       finished.store(true);
     }};
@@ -466,6 +521,7 @@ TEST_F(ScenePauseTest, PlayResetsThrottleAfterExternalStall) {
   clock.store(kTimeStep + 10.0 * kTimeStep);
   std::atomic<bool> finished{false};
   std::thread thread{[&]() {
+    assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
     scene->Step(kTimeStep);
     finished.store(true);
   }};
@@ -487,6 +543,7 @@ TEST_F(ScenePauseTest, FastForwardDoesNotWaitForRealTimeClock) {
   std::atomic<bool> stepsStarted{false};
   std::atomic<bool> stepsFinished{false};
   std::thread thread{[&]() {
+    assert_cast<SceneImpl*>(scene)->SetThreadAffinity();
     stepsStarted.store(true);
     scene->Step(kTimeStep);
     scene->Step(kTimeStep);

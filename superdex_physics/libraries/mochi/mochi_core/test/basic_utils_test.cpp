@@ -113,6 +113,13 @@ TEST(BasicUtils, MulAdd) {
       }
     }
   }
+
+  // (1 + eps) * (1 - eps) = 1 - eps^2 rounds to 1, so only a fused operation keeps the eps^2.
+  real constexpr kEps = std::numeric_limits<real>::epsilon();
+  EXPECT_EQ(-kEps * kEps, MulAdd(1_r + kEps, 1_r - kEps, -1_r));
+  EXPECT_EQ(-kEps * kEps, MulSub(1_r + kEps, 1_r - kEps, 1_r));
+  EXPECT_EQ(kEps * kEps, NegMulAdd(1_r + kEps, 1_r - kEps, 1_r));
+  EXPECT_EQ(kEps * kEps, NegMulSub(1_r + kEps, 1_r - kEps, -1_r));
 }
 
 TEST(BasicUtils, IsFinite) {

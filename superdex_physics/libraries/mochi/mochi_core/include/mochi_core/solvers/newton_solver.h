@@ -80,7 +80,9 @@ class NewtonSolver {
   void SetParams(Params const& params);
 
   /** @brief Gets the solver parameters. */
-  Params const& GetParams() const;
+  Params const& GetParams() const {
+    return _params;
+  }
 
   /** @brief Solves the specified system of non-linear equations. */
   Status Solve(Problem& problem);
@@ -106,9 +108,6 @@ class NewtonSolver {
       }
       n = nIn;
       auto iN = static_cast<int>(nIn);
-      if (params.gradientDescentFallback) {
-        residual.Resize(iN);
-      }
       if (params.solverType == NonLinearSolverType::BFGS ||
           params.solverType == NonLinearSolverType::SR1) {
         residual.Resize(iN);
@@ -136,7 +135,7 @@ class NewtonSolver {
 
     void AdvanceResidual(Problem const& problem, bool savePrevious) {
       if (!residual.empty()) { // Only if needed.
-        if (savePrevious && !prevIterResidual.empty()) { // Only if needed.
+        if (savePrevious) {
           prevIterResidual = residual;
         }
         residual = problem.GetResidual();

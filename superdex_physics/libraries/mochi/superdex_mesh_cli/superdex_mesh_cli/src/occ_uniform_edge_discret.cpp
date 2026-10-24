@@ -36,8 +36,10 @@ IMPLEMENT_STANDARD_RTTIEXT(mochi::mesh::cli::occ::UniformEdgeDiscretizer, IMeshT
 
 namespace mochi::mesh::cli::occ {
 
-UniformEdgeDiscretizer::UniformEdgeDiscretizer(double maxEdgeLength, CurveSampling sampling)
-    : _maxEdgeLength(maxEdgeLength), _sampling(sampling) {}
+UniformEdgeDiscretizer::UniformEdgeDiscretizer(
+    FaceSizingField const& sizing,
+    CurveSampling sampling)
+    : _sizing(&sizing), _sampling(sampling) {}
 
 Standard_Boolean UniformEdgeDiscretizer::performInternal(
     Handle(IMeshData_Model) const& model,
@@ -61,7 +63,19 @@ void UniformEdgeDiscretizer::Process(Standard_Integer edgeIndex) const {
   try {
     OCC_CATCH_SIGNALS
 
-    BRepMesh_Deflection::ComputeDeflection(dEdge, _model->GetMaxSize(), _parameters);
+    FaceSizing sizing = _sizing->Defaults();
+    IMeshTools_Parameters parameters = _parameters;
+    if (_sizing->HasOverrides() && !dEdge->IsFree()) {
+      sizing = _sizing->At(dEdge->GetPCurve(0)->GetFace()->GetFace());
+      for (Standard_Integer i = 1; i < dEdge->PCurvesNb(); ++i) {
+        sizing = Min(sizing, _sizing->At(dEdge->GetPCurve(i)->GetFace()->GetFace()));
+      }
+      parameters.Deflection = sizing.linearDeflection;
+      parameters.Angle = sizing.angularDeflection;
+    }
+    double const maxEdgeLength = sizing.targetEdgeLength;
+
+    BRepMesh_Deflection::ComputeDeflection(dEdge, _model->GetMaxSize(), parameters);
 
     Handle(IMeshTools_CurveTessellator) edgeTessellator;
 
@@ -77,15 +91,14 @@ void UniformEdgeDiscretizer::Process(Standard_Integer edgeIndex) const {
       }
 
       if (dEdge->GetSameParam()) {
-        edgeTessellator =
-            new UniformCurveTessellator(dEdge, _parameters, _maxEdgeLength, _sampling);
+        edgeTessellator = new UniformCurveTessellator(dEdge, parameters, maxEdgeLength, _sampling);
       } else {
         edgeTessellator = new UniformCurveTessellator(
-            dEdge, pCurve->GetOrientation(), dFace, _parameters, _maxEdgeLength, _sampling);
+            dEdge, pCurve->GetOrientation(), dFace, parameters, maxEdgeLength, _sampling);
       }
     } else {
       // Free edges (not on any face).
-      edgeTessellator = new UniformCurveTessellator(dEdge, _parameters, _maxEdgeLength, _sampling);
+      edgeTessellator = new UniformCurveTessellator(dEdge, parameters, maxEdgeLength, _sampling);
     }
 
     BRepMesh_EdgeDiscret::Tessellate3d(dEdge, edgeTessellator, Standard_True);

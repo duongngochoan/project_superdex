@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copyright (c) Meta Platforms, Inc. and affiliates.
+
+     This source code is licensed under the MIT license found in the
+     LICENSE file in the root directory of this source tree. -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <!-- Variables that point NX at add-ins or at another environment file. Any of them means
+       someone has already customized this NX setup, so the user is warned before installing. -->
+  <?define NxVariables = UGII_USER_DIR;UGII_ENV_FILE;UGII_CUSTOM_DIRECTORY_FILE;UGII_SITE_DIR;UGII_GROUP_DIR ?>
+  <?define UserEnvKey = Environment ?>
+  <?define MachineEnvKey = SYSTEM\CurrentControlSet\Control\Session Manager\Environment ?>
+  <?define SettingsKey = Software\SuperDex\NXExporter ?>
+
+  <Package Name="SuperDex CAD Exporter for NX"
+           Manufacturer="SuperDex"
+           Version="!(bind.FileVersion.NXRobotExporter.dll)"
+           UpgradeCode="EFE7264B-4463-4369-9FD4-F1375321846B"
+           Scope="perUser"
+           Compressed="yes"
+           Language="1033"
+           Codepage="1252">
+
+    <SummaryInformation Description="SuperDex CAD Exporter for NX" Manufacturer="SuperDex" />
+
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it before running this installer." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/facebookresearch/project_superdex" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/facebookresearch/project_superdex" />
+    <Property Id="ARPCOMMENTS" Value="Build $(CommitVersion)" />
+
+    <!-- ############################################################ -->
+    <!-- Detection                                                    -->
+    <!-- ############################################################ -->
+
+    <!-- Read from the registry rather than [%VAR]: the execute sequence runs in the installer
+         service, whose environment is not the user's, and the registry is also what NX inherits
+         when launched normally. User and machine values are kept apart so both can be reported. -->
+    <?foreach Var in $(NxVariables) ?>
+    <Property Id="USER_$(Var)" Secure="yes">
+      <RegistrySearch Id="User$(Var)Search" Root="HKCU" Key="$(UserEnvKey)" Name="$(Var)" Type="raw" />
+    </Property>
+    <Property Id="MACHINE_$(Var)" Secure="yes">
+      <RegistrySearch Id="Machine$(Var)Search" Root="HKLM" Key="$(MachineEnvKey)" Name="$(Var)" Type="raw" />
+    </Property>
+    <?endforeach?>
+
+    <!-- Where the previous install went, so repair and uninstall still find the files if
+         UGII_USER_DIR has changed since. -->
+    <Property Id="NXREMEMBEREDDIR" Secure="yes">
+      <RegistrySearch Id="RememberedDirSearch" Root="HKCU" Key="$(SettingsKey)" Name="InstallDir" Type="raw" />
+    </Property>
+
+    <Launch Condition="Installed OR VersionNT64"
+            Message="[ProductName] requires 64-bit Windows." />
+
+    <!-- ############################################################ -->
+    <!-- Layout                                                       -->
+    <!-- ############################################################ -->
+
+    <!-- NX loads startup\ and application\ under UGII_USER_DIR on its own, so installing there
+         needs no custom_dirs.dat entry. A user-level value wins over a machine-level one, as it
+         does in the environment NX inherits. Authored under a standard directory only so WiX can
+         generate stable component GUIDs; SetDirectory below replaces the whole path. -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="NXUSERDIR" Name="NXCustom">
+        <Directory Id="NXSTARTUPDIR" Name="startup" />
+        <Directory Id="NXAPPLICATIONDIR" Name="application" />
+      </Directory>
+    </StandardDirectory>
+
+    <SetDirectory Id="NXUSERDIR" Action="SetNxUserDirRemembered" Value="[NXREMEMBEREDDIR]"
+                  Condition="Installed AND NXREMEMBEREDDIR" />
+    <SetDirectory Id="NXUSERDIR" Action="SetNxUserDirUser" Value="[USER_UGII_USER_DIR]\"
+                  Condition="NOT (Installed AND NXREMEMBEREDDIR) AND USER_UGII_USER_DIR" />
+    <SetDirectory Id="NXUSERDIR" Action="SetNxUserDirMachine" Value="[MACHINE_UGII_USER_DIR]\"
+                  Condition="NOT (Installed AND NXREMEMBEREDDIR) AND NOT USER_UGII_USER_DIR AND MACHINE_UGII_USER_DIR" />
+    <SetDirectory Id="NXUSERDIR" Action="SetNxUserDirDefault" Value="C:\NXCustom\"
+                  Condition="NOT (Installed AND NXREMEMBEREDDIR) AND NOT USER_UGII_USER_DIR AND NOT MACHINE_UGII_USER_DIR" />
+
+    <Feature Id="Main" Title="SuperDex CAD Exporter for NX" Level="1" AllowAbsent="no">
+      <ComponentGroupRef Id="StartupFiles" />
+      <ComponentGroupRef Id="ApplicationFiles" />
+      <ComponentRef Id="RememberInstallDir" />
+      <ComponentRef Id="UgiiUserDirVariable" />
+    </Feature>
+
+    <ComponentGroup Id="StartupFiles" Directory="NXSTARTUPDIR">
+      <!-- Authored explicitly rather than harvested so the file id stays stable for the
+           !(bind.FileVersion.NXRobotExporter.dll) reference in Package/@Version. -->
+      <Component Id="MainAssembly" Guid="EF86E026-6A77-4643-B5B2-669F83E38227">
+        <File Id="NXRobotExporter.dll" Name="NXRobotExporter.dll"
+              Source="$(BinDir)\NXRobotExporter.dll" KeyPath="yes" />
+        <!-- Kept so the Serilog stack traces users send in retain file and line numbers. -->
+        <File Id="NXRobotExporter.pdb" Name="NXRobotExporter.pdb"
+              Source="$(BinDir)\NXRobotExporter.pdb" />
+      </Component>
+
+      <Files Include="$(BinDir)\*">
+        <Exclude Files="$(BinDir)\NXRobotExporter.dll" />
+        <!-- Test-only dependencies. They land in the build output because the add-in and its
+             unit tests share sources, but they are not needed at runtime. -->
+        <Exclude Files="$(BinDir)\xunit.*" />
+        <Exclude Files="$(BinDir)\Moq.*" />
+        <Exclude Files="$(BinDir)\Microsoft.VisualStudio.TestPlatform.*" />
+        <!-- Third-party symbols only; the add-in's own .pdb is shipped by MainAssembly. -->
+        <Exclude Files="$(BinDir)\*.pdb" />
+      </Files>
+
+      <Files Include="$(NXSourceDir)\startup\*" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="ApplicationFiles" Directory="NXAPPLICATIONDIR">
+      <Files Include="$(NXSourceDir)\application\**" />
+    </ComponentGroup>
+
+    <Component Id="RememberInstallDir" Directory="NXUSERDIR" Guid="EA8A4329-D7DA-4912-B129-B13D0B79A494">
+      <RegistryValue Root="HKCU" Key="$(SettingsKey)" Name="InstallDir" Type="string"
+                     Value="[NXUSERDIR]" KeyPath="yes" />
+    </Component>
+
+    <!-- Only when NX has no UGII_USER_DIR at all. Permanent, so an upgrade, which removes the
+         old product after reading the environment, cannot leave NX without one. -->
+    <Component Id="UgiiUserDirVariable" Directory="NXUSERDIR"
+               Condition="NOT USER_UGII_USER_DIR AND NOT MACHINE_UGII_USER_DIR">
+      <Environment Id="UgiiUserDir" Name="UGII_USER_DIR" Value="C:\NXCustom"
+                   Action="set" Part="all" System="no" Permanent="yes" />
+      <RegistryValue Root="HKCU" Key="$(SettingsKey)" Name="CreatedUgiiUserDir" Type="integer"
+                     Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- ############################################################ -->
+    <!-- Customization warning                                        -->
+    <!-- ############################################################ -->
+
+    <!-- One line per variable found, user and machine level separately. Only on a first install:
+         an upgrade has already shown it. -->
+    <?foreach Var in $(NxVariables) ?>
+    <SetProperty Id="NXCUSTOMIZATIONS" Action="NoteUser$(Var)"
+                 Value="[NXCUSTOMIZATIONS]$(Var) = [USER_$(Var)]  (user)&#13;&#10;"
+                 Condition="NOT Installed AND NOT NXREMEMBEREDDIR AND USER_$(Var)"
+                 After="AppSearch" Sequence="ui" />
+    <SetProperty Id="NXCUSTOMIZATIONS" Action="NoteMachine$(Var)"
+                 Value="[NXCUSTOMIZATIONS]$(Var) = [MACHINE_$(Var)]  (machine)&#13;&#10;"
+                 Condition="NOT Installed AND NOT NXREMEMBEREDDIR AND MACHINE_$(Var)"
+                 After="AppSearch" Sequence="ui" />
+    <?endforeach?>
+
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="NXUSERDIR" />
+
+      <!-- The install location is not offered as a choice: NX only looks in UGII_USER_DIR. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="NxCustomizationsDlg"
+               Order="2" Condition="NOT Installed AND NXCUSTOMIZATIONS" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg"
+               Order="2" Condition="NOT Installed AND NOT NXCUSTOMIZATIONS" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="NxCustomizationsDlg"
+               Order="2" Condition="NOT Installed AND NXCUSTOMIZATIONS" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg"
+               Order="2" Condition="NOT Installed AND NOT NXCUSTOMIZATIONS" />
+
+      <Dialog Id="NxCustomizationsDlg" Width="370" Height="270" Title="!(loc.InstallDirDlg_Title)">
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="WelcomeDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="300" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}Existing NX customizations found" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="300" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Please review before continuing." />
+
+        <Control Id="Intro" Type="Text" X="20" Y="52" Width="330" Height="12" NoPrefix="yes"
+                 Text="Looks like you have custom applications installed via the following:" />
+        <Control Id="Found" Type="Text" X="30" Y="66" Width="320" Height="70" NoPrefix="yes"
+                 Text="[NXCUSTOMIZATIONS]" />
+        <Control Id="Destination" Type="Text" X="20" Y="140" Width="330" Height="36" NoPrefix="yes"
+                 Text="SuperDex will add its files to [NXSTARTUPDIR] and [NXAPPLICATIONDIR], alongside anything already there. If UGII_ENV_FILE or an NX launch script sets UGII_USER_DIR differently, NX may not load SuperDex from there." />
+        <Control Id="Advice" Type="Text" X="20" Y="184" Width="330" Height="40" NoPrefix="yes"
+                 Text="We'd recommend consulting with your NX system administrator before continuing." />
+      </Dialog>
+    </UI>
+
+  </Package>
+</Wix>

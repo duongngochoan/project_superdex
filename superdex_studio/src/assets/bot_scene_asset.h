@@ -20,8 +20,12 @@
 
 #include "assets/asset.h"
 #include "assets/asset_referencer.h"
+#include "assets/bot_task_cache.h"
+#include "assets/controller_params.h"
 
 #include <superdex_robotics/internal/bot_scene.h>
+
+#include <optional>
 
 namespace superdex::studio {
 
@@ -36,7 +40,9 @@ class BotSceneAsset : public Asset, public IAssetReferencer {
   bool RendersThumbnail() const override;
   void StageThumbnailScene(mochi_renderer::Scene& scene) override;
   bool IsSavable() const override;
-  bool Save() const override;
+  bool Save() override;
+  [[nodiscard]] bool SupportsSaveAs() const override;
+  [[nodiscard]] bool SaveAs(mochi::Path const& path) override;
   std::unique_ptr<AssetEditor> CreateEditor(SuperDexStudio* studio) override;
 
   // IAssetReferencer
@@ -47,17 +53,32 @@ class BotSceneAsset : public Asset, public IAssetReferencer {
 
   superdex::robotics::BotScenePrefab const& GetPrefab() const;
   superdex::robotics::BotScenePrefab& GetPrefab();
+  // Params of controllers that reference .superdex_controller files, written by Save.
+  ControllerParamsCache& GetControllerParams();
+  // Tasks edited in this scene's editor, written by Save.
+  BotTaskCache& GetTaskCache();
   std::string const& GetBotsRootPath() const;
+  [[nodiscard]] bool IsArchive() const;
+  [[nodiscard]] bool SaveArchiveCopy(mochi::Path const& path) const;
+  bool ExtractArchiveToLooseFiles(mochi::Path const& directory, mochi::Path& scenePath) const;
 
  private:
   friend class AssetManager;
   using Asset::Asset;
   static std::unique_ptr<BotSceneAsset>
   Create(std::string const& name, mochi::Path const& path, AssetManager* manager);
+  // Moves inline controller params to files (asking where, starting in @p sceneDirectory) and
+  // writes modified params files. Runs before the scene is written, so an archive bundles them.
+  bool SaveControllerParams(mochi::Path const& sceneDirectory);
 
  private:
   superdex::robotics::BotScenePrefab _prefab;
+  ControllerParamsCache _controllerParams;
+  BotTaskCache _taskCache;
   std::string _botsRootPath;
+  mochi::Path _archiveExtractedDir;
+  mochi::Path _archiveTargetPath;
+  std::optional<mochi::DynamicString> _archiveComment;
   bool _isArchive = false;
 };
 

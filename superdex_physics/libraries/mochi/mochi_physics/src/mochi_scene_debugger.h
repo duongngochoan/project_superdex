@@ -25,6 +25,7 @@
 
 namespace mochi {
 class SceneImpl;
+struct StepInfo;
 } // namespace mochi
 
 namespace mochi::net {
@@ -35,6 +36,13 @@ class MessageServer;
 
 namespace mochi::dbg {
 
+// Durations of the simulation phases of one SceneImpl::Step [s]. Zero if nothing was simulated.
+struct StepProfileTimers {
+  double preStepSec = 0.0; // PreStepEcs
+  double stepSec = 0.0; // StepEcs
+  double postStepSec = 0.0; // PostStepEcs
+};
+
 class SceneDebugger {
  public:
   using ClockFn = std::function<double()>;
@@ -42,6 +50,20 @@ class SceneDebugger {
   // Call this periodically on the scene's controlling thread, when it is safe to
   // access and modify the scene contents.
   virtual void UpdateOnSceneThread(SceneImpl* scene) = 0;
+
+  // Called by SceneImpl::Step before any step timing starts. May block while paused or while
+  // throttling to real time.
+  virtual void OnPreStep(SceneImpl* scene, StepInfo const& step) = 0;
+
+  // Capture profiling data after simulation finishes, before user post-step callbacks mutate the
+  // scene.
+  virtual void CaptureStepProfile(
+      SceneImpl* scene,
+      StepInfo const& step,
+      StepProfileTimers const& stepProfile) = 0;
+
+  // Called by SceneImpl::Step after all step timing has been recorded.
+  virtual void OnPostStep(SceneImpl* scene, StepInfo const& step) = 0;
 
   // Check the current step mode (modified by queued messages). Thread-safe.
   virtual StepMode GetStepMode() const = 0;
@@ -60,7 +82,7 @@ class SceneDebugger {
 
   // Called on the DebugServer's thread before the SceneDebugger is destroyed.
   // It will no longer function after this point.
-  virtual void PreShutdownAsync(SceneImpl* scene) = 0;
+  virtual void PreShutdownAsync() = 0;
 
   // Finish shutting down this SceneDebugger on the scene's controlling thread. Must come after
   // PreShutdown. If the scene is being destroyed, then it is OK to skip this.

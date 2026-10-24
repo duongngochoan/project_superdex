@@ -52,153 +52,6 @@
 namespace mochi_renderer {
 
 //--------------------------------------------------------------------------------------------------
-// PROCEDURAL MESH GENERATORS (for Mochi models defined by an analytic shape)
-//--------------------------------------------------------------------------------------------------
-
-struct ProceduralMesh {
-  std::vector<float> positions;
-  std::vector<float> normals;
-  std::vector<int> indices;
-};
-
-static ProceduralMesh GenerateBoxMesh(mochi::Box const& box) {
-  ProceduralMesh mesh;
-  mesh.positions.reserve(72);
-  mesh.normals.reserve(72);
-  mesh.indices.reserve(36);
-  auto const& c = box.center;
-  auto const& h = box.halfExtents;
-  auto const& q = box.rotation;
-  mochi::Real3 const localCorners[8] = {
-      {-h[0], -h[1], -h[2]},
-      {+h[0], -h[1], -h[2]},
-      {+h[0], +h[1], -h[2]},
-      {-h[0], +h[1], -h[2]},
-      {-h[0], -h[1], +h[2]},
-      {+h[0], -h[1], +h[2]},
-      {+h[0], +h[1], +h[2]},
-      {-h[0], +h[1], +h[2]},
-  };
-  struct Face {
-    int v[4];
-    mochi::Real3 normal;
-  };
-  using R = mochi::real;
-  Face const faces[6] = {
-      {{1, 2, 6, 5}, {R(1), R(0), R(0)}},
-      {{0, 4, 7, 3}, {R(-1), R(0), R(0)}},
-      {{3, 7, 6, 2}, {R(0), R(1), R(0)}},
-      {{0, 1, 5, 4}, {R(0), R(-1), R(0)}},
-      {{4, 5, 6, 7}, {R(0), R(0), R(1)}},
-      {{0, 3, 2, 1}, {R(0), R(0), R(-1)}},
-  };
-  for (auto const& face : faces) {
-    int const base = static_cast<int>(mesh.positions.size()) / 3;
-    mochi::Real3 const n = q * face.normal;
-    for (int i = 0; i < 4; ++i) {
-      mochi::Real3 const v = c + q * localCorners[face.v[i]];
-      mesh.positions.push_back(static_cast<float>(v[0]));
-      mesh.positions.push_back(static_cast<float>(v[1]));
-      mesh.positions.push_back(static_cast<float>(v[2]));
-      mesh.normals.push_back(static_cast<float>(n[0]));
-      mesh.normals.push_back(static_cast<float>(n[1]));
-      mesh.normals.push_back(static_cast<float>(n[2]));
-    }
-    mesh.indices.push_back(base);
-    mesh.indices.push_back(base + 1);
-    mesh.indices.push_back(base + 2);
-    mesh.indices.push_back(base);
-    mesh.indices.push_back(base + 2);
-    mesh.indices.push_back(base + 3);
-  }
-  return mesh;
-}
-
-static ProceduralMesh GeneratePlaneMesh(mochi::Plane const& plane) {
-  ProceduralMesh mesh;
-  mesh.positions.reserve(12);
-  mesh.normals.reserve(12);
-  mochi::Real3 const n = mochi::Normalize(plane.normal);
-  mochi::Real3 const origin = n * plane.distance;
-  mochi::Real3 tangent;
-  if (std::abs(n[0]) < mochi::real(0.9)) {
-    tangent = mochi::Normalize(
-        mochi::Cross(n, mochi::Real3{mochi::real(1), mochi::real(0), mochi::real(0)}));
-  } else {
-    tangent = mochi::Normalize(
-        mochi::Cross(n, mochi::Real3{mochi::real(0), mochi::real(1), mochi::real(0)}));
-  }
-  mochi::Real3 const bitangent = mochi::Cross(n, tangent);
-  mochi::real const halfSize = mochi::real(5);
-  mochi::Real3 const corners[4] = {
-      origin - tangent * halfSize - bitangent * halfSize,
-      origin + tangent * halfSize - bitangent * halfSize,
-      origin + tangent * halfSize + bitangent * halfSize,
-      origin - tangent * halfSize + bitangent * halfSize,
-  };
-  for (auto const& v : corners) {
-    mesh.positions.push_back(static_cast<float>(v[0]));
-    mesh.positions.push_back(static_cast<float>(v[1]));
-    mesh.positions.push_back(static_cast<float>(v[2]));
-    mesh.normals.push_back(static_cast<float>(n[0]));
-    mesh.normals.push_back(static_cast<float>(n[1]));
-    mesh.normals.push_back(static_cast<float>(n[2]));
-  }
-  mesh.indices = {0, 1, 2, 0, 2, 3};
-  return mesh;
-}
-
-static ProceduralMesh GenerateSphereMesh(mochi::Sphere const& sphere) {
-  ProceduralMesh mesh;
-  int const numLon = 32;
-  int const numLat = 16;
-  int const numVerts = (numLat + 1) * (numLon + 1);
-  mesh.positions.reserve(numVerts * 3);
-  mesh.normals.reserve(numVerts * 3);
-  mesh.indices.reserve(numLat * numLon * 6);
-  auto const r = static_cast<float>(sphere.radius);
-  auto const cx = static_cast<float>(sphere.center[0]);
-  auto const cy = static_cast<float>(sphere.center[1]);
-  auto const cz = static_cast<float>(sphere.center[2]);
-  for (int lat = 0; lat <= numLat; ++lat) {
-    float const theta =
-        static_cast<float>(mochi::kPI) * static_cast<float>(lat) / static_cast<float>(numLat);
-    float const sinT = std::sin(theta);
-    float const cosT = std::cos(theta);
-    for (int lon = 0; lon <= numLon; ++lon) {
-      float const phi = 2.0f * static_cast<float>(mochi::kPI) * static_cast<float>(lon) /
-          static_cast<float>(numLon);
-      float const nx = sinT * std::cos(phi);
-      float const ny = sinT * std::sin(phi);
-      float const nz = cosT;
-      mesh.positions.push_back(cx + r * nx);
-      mesh.positions.push_back(cy + r * ny);
-      mesh.positions.push_back(cz + r * nz);
-      mesh.normals.push_back(nx);
-      mesh.normals.push_back(ny);
-      mesh.normals.push_back(nz);
-    }
-  }
-  for (int lat = 0; lat < numLat; ++lat) {
-    for (int lon = 0; lon < numLon; ++lon) {
-      int const curr = lat * (numLon + 1) + lon;
-      int const next = curr + numLon + 1;
-      if (lat != 0) {
-        mesh.indices.push_back(curr);
-        mesh.indices.push_back(next);
-        mesh.indices.push_back(curr + 1);
-      }
-      if (lat != numLat - 1) {
-        mesh.indices.push_back(curr + 1);
-        mesh.indices.push_back(next);
-        mesh.indices.push_back(next + 1);
-      }
-    }
-  }
-  return mesh;
-}
-
-//--------------------------------------------------------------------------------------------------
 // FILAMENT BUFFER HELPERS
 //--------------------------------------------------------------------------------------------------
 
@@ -396,103 +249,6 @@ MeshBuffers CreateModelMeshBuffers(
       vertexBuffer,
       CreateIndexBuffer(engine, indices),
       ComputeBoundingBox(positions.data(), vertexCount)};
-}
-
-bool BuildMochiModelGeometry(
-    mochi::ModelData const& modelData,
-    mochi::CoordinateSpaceConverter const* converter,
-    std::vector<float>& positions,
-    std::vector<float>& vertexNormals,
-    std::vector<int>& indices) {
-  mochi::CoordinateSpaceConverter const defaultConverter(
-      mochi::CoordinateSpace::Default(), RenderSpace());
-  mochi::CoordinateSpaceConverter const& spaceConverter = converter ? *converter : defaultConverter;
-
-  positions.clear();
-  vertexNormals.clear();
-  indices.clear();
-
-  if (modelData.mesh) {
-    mochi::Span<mochi::Real3 const> surfaceNodes;
-    mochi::Span<mochi::Int3 const> surfaceTris;
-    std::shared_ptr<mochi::TriangularMesh const> boundaryMesh;
-    int const nodesPerElement = modelData.mesh->nodesPerElement;
-    if (nodesPerElement == 4) {
-      // Tetrahedral mesh: extract boundary surface
-      auto nodes =
-          mochi::Unflatten<mochi::Real3 const>(mochi::MakeConstSpan(modelData.mesh->coordinates));
-      auto tets =
-          mochi::Unflatten<mochi::Int4 const>(mochi::MakeConstSpan(modelData.mesh->connectivity));
-      mochi::TetrahedralMesh tetMesh(nodes, tets);
-      boundaryMesh = tetMesh.GetBoundaryMesh();
-      surfaceNodes = boundaryMesh->GetNodeCoordinates();
-      surfaceTris = boundaryMesh->GetElementConnectivity();
-    } else if (nodesPerElement == 3) {
-      // Surface mesh: use directly
-      surfaceNodes =
-          mochi::Unflatten<mochi::Real3 const>(mochi::MakeConstSpan(modelData.mesh->coordinates));
-      surfaceTris =
-          mochi::Unflatten<mochi::Int3 const>(mochi::MakeConstSpan(modelData.mesh->connectivity));
-    } else {
-      return false;
-    }
-    positions.reserve(surfaceNodes.size() * 3);
-    for (auto const& node : surfaceNodes) {
-      auto const pos = spaceConverter.TranslationToOutput(StaticCast<mochi::Float3>(node));
-      positions.push_back(pos[0]);
-      positions.push_back(pos[1]);
-      positions.push_back(pos[2]);
-    }
-
-    indices.reserve(surfaceTris.size() * 3);
-    for (auto const& tri : surfaceTris) {
-      indices.push_back(tri[0]);
-      indices.push_back(tri[1]);
-      indices.push_back(tri[2]);
-    }
-
-    std::vector<float> faceNormals;
-    faceNormals.reserve(surfaceTris.size() * 3);
-    for (auto const& tri : surfaceTris) {
-      auto const v0 = StaticCast<mochi::Float3>(surfaceNodes[tri[0]]);
-      auto const v1 = StaticCast<mochi::Float3>(surfaceNodes[tri[1]]);
-      auto const v2 = StaticCast<mochi::Float3>(surfaceNodes[tri[2]]);
-      auto const e1 = v1 - v0;
-      auto const e2 = v2 - v0;
-      auto n = mochi::Cross(e1, e2);
-      float const len = mochi::Norm(n);
-      if (len > 0) {
-        n = n / len;
-      }
-      auto const norm = spaceConverter.DirectionToOutput(n);
-      faceNormals.push_back(norm[0]);
-      faceNormals.push_back(norm[1]);
-      faceNormals.push_back(norm[2]);
-    }
-    ComputeVertexNormalsAngleWeighted(positions, faceNormals, indices, vertexNormals);
-  } else {
-    ProceduralMesh procMesh;
-    if (modelData.box) {
-      procMesh = GenerateBoxMesh(*modelData.box);
-    } else if (modelData.plane) {
-      procMesh = GeneratePlaneMesh(*modelData.plane);
-    } else if (modelData.sphere) {
-      procMesh = GenerateSphereMesh(*modelData.sphere);
-    } else {
-      return false;
-    }
-    spaceConverter.TranslationsToOutput(mochi::MakeSpan(procMesh.positions), mochi::ErrorAssert{});
-    spaceConverter.DirectionsToOutput(mochi::MakeSpan(procMesh.normals), mochi::ErrorAssert{});
-    positions = std::move(procMesh.positions);
-    vertexNormals = std::move(procMesh.normals);
-    indices = std::move(procMesh.indices);
-  }
-
-  if (positions.empty() || indices.empty() || positions.size() % 3 != 0 ||
-      vertexNormals.size() != positions.size()) {
-    return false;
-  }
-  return true;
 }
 
 //--------------------------------------------------------------------------------------------------
@@ -762,7 +518,7 @@ IInstanceable* MeshInstance::GetInstanceable() {
 //--------------------------------------------------------------------------------------------------
 
 namespace {
-static size_t s_lineSegmentMeshCount = 0;
+size_t s_lineSegmentMeshCount = 0;
 } // namespace
 
 std::unique_ptr<LineSegmentMesh> LineSegmentMesh::CreateLineSegmentMesh(
@@ -990,7 +746,7 @@ IInstanceable* LineSegmentMeshInstance::GetInstanceable() {
 // wireframe visible only from the front.
 
 namespace {
-static size_t s_wireframeMeshCount = 0;
+size_t s_wireframeMeshCount = 0;
 
 // Builds the renderable for a WireframeMesh or one of its instances. The geometry,
 // material instances and bounding box are shared; only the target entity differs.
@@ -1008,9 +764,13 @@ void BuildWireframeRenderable(
     filament::IndexBuffer* indexBuffer,
     size_t indexCount,
     bool castShadows,
-    bool isDynamic) {
-  filament::RenderableManager::Builder(2)
-      .boundingBox(boundingBox)
+    bool isDynamic,
+    size_t boneCount) {
+  // GPU-skinned wireframes must not use STATIC geometry (Filament disallows skinning on STATIC),
+  // and their skinned vertices can move outside the rest bounds, so treat them as DYNAMIC.
+  bool const skinned = boneCount > 0;
+  filament::RenderableManager::Builder builder(2);
+  builder.boundingBox(boundingBox)
       .material(0, surfaceInstance)
       .geometry(
           0,
@@ -1031,9 +791,13 @@ void BuildWireframeRenderable(
       .receiveShadows(castShadows)
       .castShadows(castShadows)
       .geometryType(
-          isDynamic ? filament::RenderableManager::Builder::GeometryType::DYNAMIC
-                    : filament::RenderableManager::Builder::GeometryType::STATIC)
-      .build(engine, entity);
+          (isDynamic || skinned) ? filament::RenderableManager::Builder::GeometryType::DYNAMIC
+                                 : filament::RenderableManager::Builder::GeometryType::STATIC);
+  if (skinned) {
+    // Non-buffer skinning path: allocates `boneCount` identity bones; updated via setBones().
+    builder.skinning(boneCount);
+  }
+  builder.build(engine, entity);
 
   auto& tcm = engine.getTransformManager();
   tcm.setTransform(tcm.getInstance(entity), filament::math::mat4f());
@@ -1139,6 +903,131 @@ WireframeBuffers CreateWireframeBuffers(
       indexCount,
       ComputeBoundingBox(positions.data(), positions.size() / 3)};
 }
+
+// De-indexes the triangles like CreateWireframeBuffers, but additionally builds BONE_INDICES
+// (USHORT4, integer) and BONE_WEIGHTS (FLOAT4, normalized) attributes for GPU skinning.
+// `boneIndices` / `boneWeights` are per-NODE (indexed like positions), `weightsPerVertex` entries
+// each; they are de-indexed per corner and padded to 4 influences. The bounds are inflated so posed
+// (skinned) vertices are not culled when they move outside the rest AABB.
+WireframeBuffers CreateSkinnedWireframeBuffers(
+    filament::Engine& engine,
+    mochi::Span<float const> positions,
+    mochi::Span<float const> normals,
+    mochi::Span<int const> indices,
+    mochi::Span<int const> boneIndices,
+    mochi::Span<float const> boneWeights,
+    int weightsPerVertex) {
+  size_t const triangleCount = indices.size() / 3;
+  size_t const vertexCount = triangleCount * 3;
+  size_t const indexCount = triangleCount * 3;
+  int const wpv = std::min(weightsPerVertex, 4);
+
+  constexpr filament::math::float3 kBarycentric[3] = {
+      {1.0f, 0.0f, 0.0f}, {0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+
+  auto* posData = new filament::math::float3[vertexCount];
+  auto* baryData = new filament::math::float3[vertexCount];
+  auto* boneIdxData = new filament::math::ushort4[vertexCount];
+  auto* boneWtData = new filament::math::float4[vertexCount];
+  auto* idxData = new uint32_t[indexCount];
+  std::vector<float> deindexedNormals(vertexCount * 3);
+  for (size_t t = 0; t < triangleCount; ++t) {
+    for (int c = 0; c < 3; ++c) {
+      int const src = indices[t * 3 + c];
+      size_t const dst = t * 3 + c;
+      posData[dst] = {positions[src * 3], positions[src * 3 + 1], positions[src * 3 + 2]};
+      baryData[dst] = kBarycentric[c];
+      idxData[dst] = static_cast<uint32_t>(dst);
+      deindexedNormals[dst * 3] = normals[src * 3];
+      deindexedNormals[dst * 3 + 1] = normals[src * 3 + 1];
+      deindexedNormals[dst * 3 + 2] = normals[src * 3 + 2];
+      filament::math::ushort4 bi{0, 0, 0, 0};
+      filament::math::float4 bw{0.0f, 0.0f, 0.0f, 0.0f};
+      for (int k = 0; k < wpv; ++k) {
+        bi[k] = static_cast<uint16_t>(boneIndices[src * weightsPerVertex + k]);
+        bw[k] = boneWeights[src * weightsPerVertex + k];
+      }
+      boneIdxData[dst] = bi;
+      boneWtData[dst] = bw;
+    }
+  }
+
+  auto* vertexBuffer =
+      filament::VertexBuffer::Builder()
+          .vertexCount(static_cast<uint32_t>(vertexCount))
+          .bufferCount(5)
+          .attribute(
+              filament::VertexAttribute::POSITION, 0, filament::VertexBuffer::AttributeType::FLOAT3)
+          .attribute(
+              filament::VertexAttribute::CUSTOM0, 1, filament::VertexBuffer::AttributeType::FLOAT3)
+          .attribute(
+              filament::VertexAttribute::TANGENTS, 2, filament::VertexBuffer::AttributeType::SHORT4)
+          .normalized(filament::VertexAttribute::TANGENTS)
+          .attribute(
+              filament::VertexAttribute::BONE_INDICES,
+              3,
+              filament::VertexBuffer::AttributeType::USHORT4)
+          .attribute(
+              filament::VertexAttribute::BONE_WEIGHTS,
+              4,
+              filament::VertexBuffer::AttributeType::FLOAT4)
+          .build(engine);
+  vertexBuffer->setBufferAt(
+      engine,
+      0,
+      filament::VertexBuffer::BufferDescriptor(
+          posData, vertexCount * sizeof(filament::math::float3), [](void* buf, size_t, void*) {
+            delete[] static_cast<filament::math::float3*>(buf);
+          }));
+  vertexBuffer->setBufferAt(
+      engine,
+      1,
+      filament::VertexBuffer::BufferDescriptor(
+          baryData, vertexCount * sizeof(filament::math::float3), [](void* buf, size_t, void*) {
+            delete[] static_cast<filament::math::float3*>(buf);
+          }));
+  filament::math::short4* tanData = ComputeTangents(
+      mochi::Span<float const>(deindexedNormals.data(), deindexedNormals.size()), vertexCount);
+  vertexBuffer->setBufferAt(
+      engine,
+      2,
+      filament::VertexBuffer::BufferDescriptor(
+          tanData, vertexCount * sizeof(filament::math::short4), [](void* buf, size_t, void*) {
+            delete[] static_cast<filament::math::short4*>(buf);
+          }));
+  vertexBuffer->setBufferAt(
+      engine,
+      3,
+      filament::VertexBuffer::BufferDescriptor(
+          boneIdxData, vertexCount * sizeof(filament::math::ushort4), [](void* buf, size_t, void*) {
+            delete[] static_cast<filament::math::ushort4*>(buf);
+          }));
+  vertexBuffer->setBufferAt(
+      engine,
+      4,
+      filament::VertexBuffer::BufferDescriptor(
+          boneWtData, vertexCount * sizeof(filament::math::float4), [](void* buf, size_t, void*) {
+            delete[] static_cast<filament::math::float4*>(buf);
+          }));
+
+  auto* indexBuffer = filament::IndexBuffer::Builder()
+                          .indexCount(static_cast<uint32_t>(indexCount))
+                          .bufferType(filament::IndexBuffer::IndexType::UINT)
+                          .build(engine);
+  indexBuffer->setBuffer(
+      engine,
+      filament::IndexBuffer::BufferDescriptor(
+          idxData, indexCount * sizeof(uint32_t), [](void* buf, size_t, void*) {
+            delete[] static_cast<uint32_t*>(buf);
+          }));
+
+  // Tight rest AABB. SetBoneMatrices recomputes the renderable AABB per pose from these bounds and
+  // the bone matrices, so skinned deformation is neither culled nor able to drag the computed scene
+  // floor far below the actual geometry (a static inflated box would do both).
+  filament::Box const box = ComputeBoundingBox(positions.data(), positions.size() / 3);
+
+  return {vertexBuffer, indexBuffer, vertexCount, indexCount, box};
+}
 } // namespace
 
 std::unique_ptr<WireframeMesh> WireframeMesh::CreateWireframeMesh(
@@ -1223,7 +1112,138 @@ WireframeMesh::WireframeMesh(
       _indexBuffer,
       _indexCount,
       _castShadows,
-      _isDynamic);
+      _isDynamic,
+      /*boneCount=*/0);
+}
+
+std::unique_ptr<WireframeMesh> WireframeMesh::CreateSkinnedWireframeMesh(
+    filament::Engine* engine,
+    mochi::Span<float const> positions,
+    mochi::Span<float const> normals,
+    mochi::Span<int const> indices,
+    mochi::Span<int const> boneIndices,
+    mochi::Span<float const> boneWeights,
+    int weightsPerVertex,
+    int boneCount,
+    std::shared_ptr<MaterialInstance> wireframeMaterial,
+    std::shared_ptr<MaterialInstance> surfaceMaterial,
+    bool isClosed) {
+  MOCHI_ASSERT(!positions.empty());
+  MOCHI_ASSERT(positions.size() % 3 == 0, "Expected 3 floats per vertex");
+  MOCHI_ASSERT(normals.size() == positions.size(), "Expected one normal per vertex");
+  MOCHI_ASSERT(indices.size() % 3 == 0, "Expected 3 indices per triangle");
+  MOCHI_ASSERT(weightsPerVertex > 0, "Expected at least one weight per vertex");
+  // Only 4 influences per vertex fit the GPU vertex attributes; more would be silently dropped
+  // without renormalizing, leaving weights that no longer sum to 1 and a visibly under-deformed
+  // skin.
+  MOCHI_ASSERT_VERBOSE(
+      weightsPerVertex <= 4, "Expected at most 4 weights per vertex (GPU skinning limit)");
+  MOCHI_ASSERT(
+      boneIndices.size() == (positions.size() / 3) * static_cast<size_t>(weightsPerVertex),
+      "Expected weightsPerVertex bone indices per node");
+  MOCHI_ASSERT(boneWeights.size() == boneIndices.size(), "Expected one bone weight per bone index");
+  MOCHI_ASSERT(boneCount > 0 && boneCount <= 255, "Expected 1..255 bones");
+  auto mesh = std::unique_ptr<WireframeMesh>(new WireframeMesh(
+      engine,
+      positions,
+      normals,
+      indices,
+      boneIndices,
+      boneWeights,
+      weightsPerVertex,
+      boneCount,
+      std::move(wireframeMaterial),
+      std::move(surfaceMaterial),
+      isClosed));
+  mesh->SetName("SkinnedWireframeMesh" + std::to_string(s_wireframeMeshCount++));
+  return mesh;
+}
+
+WireframeMesh::WireframeMesh(
+    filament::Engine* engine,
+    mochi::Span<float const> positions,
+    mochi::Span<float const> normals,
+    mochi::Span<int const> indices,
+    mochi::Span<int const> boneIndices,
+    mochi::Span<float const> boneWeights,
+    int weightsPerVertex,
+    int boneCount,
+    std::shared_ptr<MaterialInstance> wireframeMaterial,
+    std::shared_ptr<MaterialInstance> surfaceMaterial,
+    bool isClosed)
+    : SceneObject(engine),
+      _surfaceMaterial(std::move(surfaceMaterial)),
+      _wireframeMaterial(std::move(wireframeMaterial)) {
+  auto& em = utils::EntityManager::get();
+  _engine = engine;
+  _entity = em.create();
+  _isDynamic = false;
+  _castShadows = true;
+  _boneCount = static_cast<size_t>(boneCount);
+
+  WireframeBuffers const buffers = CreateSkinnedWireframeBuffers(
+      *_engine, positions, normals, indices, boneIndices, boneWeights, weightsPerVertex);
+  _vertexBuffer = buffers.vertexBuffer;
+  _indexBuffer = buffers.indexBuffer;
+  _vertexCount = buffers.vertexCount;
+  _indexCount = buffers.indexCount;
+  _boundingBox = buffers.boundingBox;
+
+  // Per-bone rest sub-AABBs: the bounds of just the vertices each bone influences (weight > 0), in
+  // the mesh's rest/object frame. SetBoneMatrices transforms each bone's own sub-box (rather than
+  // the whole mesh box) to keep the posed AABB tight. Bones with no influenced vertices stay
+  // invalid (halfExtent.x < 0) and are skipped.
+  _boneRestBoxes.assign(
+      static_cast<size_t>(boneCount), filament::Box{{0.0f, 0.0f, 0.0f}, {-1.0f, -1.0f, -1.0f}});
+  {
+    std::vector<filament::math::float3> boneMin(
+        static_cast<size_t>(boneCount), filament::math::float3{std::numeric_limits<float>::max()});
+    std::vector<filament::math::float3> boneMax(
+        static_cast<size_t>(boneCount),
+        filament::math::float3{std::numeric_limits<float>::lowest()});
+    size_t const vertexCount = positions.size() / 3;
+    for (size_t v = 0; v < vertexCount; ++v) {
+      filament::math::float3 const p{
+          positions[v * 3 + 0], positions[v * 3 + 1], positions[v * 3 + 2]};
+      // Only the first 4 influences reach the GPU (see CreateSkinnedWireframeBuffers), so bones
+      // referenced solely in later slots must not widen a sub-box they never deform.
+      for (int k = 0; k < std::min(weightsPerVertex, 4); ++k) {
+        size_t const idx = v * static_cast<size_t>(weightsPerVertex) + static_cast<size_t>(k);
+        float const w = boneWeights[idx];
+        int const bone = boneIndices[idx];
+        if (w <= 0.0f || bone < 0 || bone >= boneCount) {
+          continue;
+        }
+        boneMin[bone] = min(boneMin[bone], p);
+        boneMax[bone] = max(boneMax[bone], p);
+      }
+    }
+    for (int b = 0; b < boneCount; ++b) {
+      if (boneMin[b].x <= boneMax[b].x) {
+        _boneRestBoxes[b] =
+            filament::Box{(boneMin[b] + boneMax[b]) * 0.5f, (boneMax[b] - boneMin[b]) * 0.5f};
+      }
+    }
+  }
+
+  filament::MaterialInstance::CullingMode const cullingMode = isClosed
+      ? filament::MaterialInstance::CullingMode::BACK
+      : filament::MaterialInstance::CullingMode::NONE;
+  _wireframeMaterial->Get()->setCullingMode(cullingMode);
+  _surfaceMaterial->Get()->setCullingMode(cullingMode);
+
+  BuildWireframeRenderable(
+      *_engine,
+      _entity,
+      _boundingBox,
+      _surfaceMaterial->Get(),
+      _wireframeMaterial->Get(),
+      _vertexBuffer,
+      _indexBuffer,
+      _indexCount,
+      _castShadows,
+      _isDynamic,
+      _boneCount);
 }
 
 bool WireframeMesh::UpdateGeometry(
@@ -1361,6 +1381,74 @@ void WireframeMesh::SetColor(filament::math::float4 color) {
   _wireframeMaterial->Get()->setParameter("color", color);
 }
 
+void WireframeMesh::SetBoneMatrices(mochi::Span<filament::math::mat4f const> bones) {
+  if (_boneCount == 0 || bones.empty()) {
+    return;
+  }
+  auto& rcm = _engine->getRenderableManager();
+  size_t const count = std::min(bones.size(), _boneCount);
+
+  // Recompute a tight posed AABB enclosing the deformed surface. Every skinned vertex is a convex
+  // combination of {bone_i * v}, so unioning each bone's transform of the rest-AABB corners bounds
+  // the deformation. Crucially we transform each bone's OWN sub-box (the bounds of just the
+  // vertices it influences) rather than the whole mesh box: a whole-box-per-bone union over-bounds
+  // badly and drags the computed scene floor far below the mesh (the floor takes the lowest AABB
+  // point). Updating the AABB per pose also keeps the skin from being frustum-culled.
+  filament::math::float3 minPt{
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::max(),
+      std::numeric_limits<float>::max()};
+  filament::math::float3 maxPt{
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::lowest(),
+      std::numeric_limits<float>::lowest()};
+  bool anyValid = false;
+  auto accumulate = [&](filament::math::mat4f const& bone, filament::Box const& box) {
+    filament::math::float3 const c = box.center;
+    filament::math::float3 const h = box.halfExtent;
+    for (int corner = 0; corner < 8; ++corner) {
+      filament::math::float4 const p{
+          c.x + ((corner & 1) ? h.x : -h.x),
+          c.y + ((corner & 2) ? h.y : -h.y),
+          c.z + ((corner & 4) ? h.z : -h.z),
+          1.0f};
+      filament::math::float4 const tp = bone * p;
+      minPt.x = std::min(minPt.x, tp.x);
+      minPt.y = std::min(minPt.y, tp.y);
+      minPt.z = std::min(minPt.z, tp.z);
+      maxPt.x = std::max(maxPt.x, tp.x);
+      maxPt.y = std::max(maxPt.y, tp.y);
+      maxPt.z = std::max(maxPt.z, tp.z);
+    }
+    anyValid = true;
+  };
+  for (size_t b = 0; b < count && b < _boneRestBoxes.size(); ++b) {
+    // Skip bones that influence no vertices (invalid sub-box, halfExtent.x < 0).
+    if (_boneRestBoxes[b].halfExtent.x >= 0.0f) {
+      accumulate(bones[b], _boneRestBoxes[b]);
+    }
+  }
+  // Fallback for meshes without per-bone sub-boxes: bound each bone by the whole rest box.
+  if (!anyValid) {
+    for (size_t b = 0; b < count; ++b) {
+      accumulate(bones[b], _boundingBox);
+    }
+  }
+  filament::Box const posedBox{(minPt + maxPt) * 0.5f, (maxPt - minPt) * 0.5f};
+
+  auto apply = [&](utils::Entity entity) {
+    auto ri = rcm.getInstance(entity);
+    if (ri.isValid()) {
+      rcm.setBones(ri, bones.data(), count, 0);
+      rcm.setAxisAlignedBoundingBox(ri, posedBox);
+    }
+  };
+  apply(_entity);
+  for (utils::Entity const entity : _instanceEntities) {
+    apply(entity);
+  }
+}
+
 void WireframeMesh::SetMaterial(std::shared_ptr<MaterialInstance> /*material*/) {
   MOCHI_LOG_WARNING("WireframeMesh manages its own material; SetMaterial is ignored.");
 }
@@ -1386,7 +1474,8 @@ std::unique_ptr<SceneObject> WireframeMesh::GetInstance() {
       _indexBuffer,
       _indexCount,
       _castShadows,
-      _isDynamic);
+      _isDynamic,
+      _boneCount);
   _instanceEntities.push_back(instanceEntity);
   return std::unique_ptr<WireframeMeshInstance>(
       new WireframeMeshInstance(_engine, instanceEntity, this));

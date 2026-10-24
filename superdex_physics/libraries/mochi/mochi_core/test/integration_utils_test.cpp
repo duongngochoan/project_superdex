@@ -194,6 +194,19 @@ TEST(IntegrationUtils, GetNumSteps) {
   EXPECT_EQ(1, GetNumSteps(IntegrationMethod::SymplecticDIRK22));
 }
 
+TEST(IntegrationUtils, IsReproducibleFromHistory) {
+  // Only the BDF family (BackwardEuler=BDF1, BDF2, BDF3) records a complete integration state that
+  // allows reproducing a completed step from history.
+  static_assert(IsReproducibleFromHistory(IntegrationMethod::BackwardEuler));
+  static_assert(IsReproducibleFromHistory(IntegrationMethod::BDF2));
+  static_assert(IsReproducibleFromHistory(IntegrationMethod::BDF3));
+  static_assert(!IsReproducibleFromHistory(IntegrationMethod::DIRK22));
+  static_assert(!IsReproducibleFromHistory(IntegrationMethod::DIRK23));
+  static_assert(!IsReproducibleFromHistory(IntegrationMethod::DIRK33));
+  static_assert(!IsReproducibleFromHistory(IntegrationMethod::SymplecticDIRK12));
+  static_assert(!IsReproducibleFromHistory(IntegrationMethod::SymplecticDIRK22));
+}
+
 TEST(IntegrationUtils, GetNumStages) {
   EXPECT_EQ(1, GetNumStages(IntegrationMethod::BackwardEuler));
   EXPECT_EQ(1, GetNumStages(IntegrationMethod::BDF2));

@@ -15,10 +15,8 @@
  */
 
 #include <mochi_core/utils/coordinate_space.h>
-#include <mochi_core/utils/coordinate_space_converter.h> // For details::GetAxisDirection
 
 #include <mochi_core/utils/basic_utils.h>
-#include <mochi_core/utils/math_utils.h>
 
 using namespace mochi;
 
@@ -52,34 +50,4 @@ void CoordinateSpace::Validate(Error& error) const {
       !IsFinite(unitsPerMeter) || unitsPerMeter <= 0_r,
       error,
       "CoordinateSpace::unitsPerMeter must be finite and greater than zero.");
-}
-
-// The unit vector, in the coordinates of @p axes, that points in a semantic direction. A
-// convention names each of X, Y and Z with one such direction, so exactly one axis matches
-// @p semantic, either directly or as its opposite.
-[[nodiscard]] static Real3 SemanticAxis(CoordinateSpaceAxes axes, CoordinateSpaceAxes semantic) {
-  auto const wanted = static_cast<int>(semantic);
-  Real3 axis{};
-  for (int i = 0; i < 3; ++i) {
-    int const direction = details::GetAxisDirection(axes, i);
-    // Opposite directions are adjacent in the enum, so >> 1 identifies the axis pair they share.
-    if ((direction >> 1) == (wanted >> 1)) {
-      axis[i] = (direction == wanted) ? 1_r : -1_r;
-    }
-  }
-  MOCHI_ASSERT_VERBOSE(
-      NormSqr(axis) == 1_r, "CoordinateSpaceAxes must name three orthogonal directions.");
-  return axis;
-}
-
-Real3 CoordinateSpace::GetRight() const {
-  return SemanticAxis(axes, CoordinateSpaceAxes::Right);
-}
-
-Real3 CoordinateSpace::GetUp() const {
-  return SemanticAxis(axes, CoordinateSpaceAxes::Up);
-}
-
-Real3 CoordinateSpace::GetForward() const {
-  return SemanticAxis(axes, CoordinateSpaceAxes::Forward);
 }

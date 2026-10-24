@@ -22,15 +22,19 @@
 
 namespace mochi::arm_simd {
 
+// Inactive lanes of the runtime-count LoadTransposed load from here, so they are zero.
+template <class T>
+MOCHI_CONSERVATIVE_CACHE_ALIGN inline constexpr T kZeroTuple[3] = {};
+
 // Byte shuffle pattern lookup table for StoreSelected. Used Simd<double, 2>, Simd<int64_t, 4>
-MOCHI_CACHE_ALIGN static const uint8_t kStoreSelectedShuffleTableD2[4][16] = {
+MOCHI_CONSERVATIVE_CACHE_ALIGN static const uint8_t kStoreSelectedShuffleTableD2[4][16] = {
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
     {8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7},
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}};
 
 // Byte shuffle pattern lookup table for StoreSelected. Used Simd<float, 4>, Simd<int, 4>
-MOCHI_CACHE_ALIGN static const uint8_t kStoreSelectedShuffleTableS4[16][16] = {
+MOCHI_CONSERVATIVE_CACHE_ALIGN static const uint8_t kStoreSelectedShuffleTableS4[16][16] = {
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15},
     {4, 5, 6, 7, 0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15},

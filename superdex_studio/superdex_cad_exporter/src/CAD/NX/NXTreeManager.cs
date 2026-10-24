@@ -11,7 +11,6 @@ using CADRobotExporter.RobotDescription;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Windows.Forms;
 
 namespace NXRobotExporter.CAD.NX
 {
@@ -271,12 +270,9 @@ namespace NXRobotExporter.CAD.NX
             string[] promotedVisual = nodeToPromote.VisualBodiesHandles;
             string[] promotedCollision = nodeToPromote.CollisionBodiesHandles;
             string[] promotedInertial = nodeToPromote.InertialBodiesHandles;
-            double promotedVisualMeshLinear = nodeToPromote.VisualMeshLinear;
-            double promotedVisualMeshAngular = nodeToPromote.VisualMeshAngular;
-            double promotedVisualMeshScale = nodeToPromote.VisualMeshScale;
-            double promotedCollisionMeshLinear = nodeToPromote.CollisionMeshLinear;
-            double promotedCollisionMeshAngular = nodeToPromote.CollisionMeshAngular;
-            double promotedCollisionMeshScale = nodeToPromote.CollisionMeshScale;
+            var promotedVisualMeshing = nodeToPromote.VisualMeshingOptions;
+            var promotedCollisionMeshing = nodeToPromote.CollisionMeshingOptions;
+            bool promotedMeshingOverride = nodeToPromote.MeshingOverride;
             bool promotedPureVisual = nodeToPromote.PureVisual;
             bool promotedPureInertial = nodeToPromote.PureInertial;
 
@@ -289,12 +285,9 @@ namespace NXRobotExporter.CAD.NX
             newRootNode.VisualBodiesHandles = promotedVisual;
             newRootNode.CollisionBodiesHandles = promotedCollision;
             newRootNode.InertialBodiesHandles = promotedInertial;
-            newRootNode.VisualMeshLinear = promotedVisualMeshLinear;
-            newRootNode.VisualMeshAngular = promotedVisualMeshAngular;
-            newRootNode.VisualMeshScale = promotedVisualMeshScale;
-            newRootNode.CollisionMeshLinear = promotedCollisionMeshLinear;
-            newRootNode.CollisionMeshAngular = promotedCollisionMeshAngular;
-            newRootNode.CollisionMeshScale = promotedCollisionMeshScale;
+            newRootNode.VisualMeshingOptions = promotedVisualMeshing;
+            newRootNode.CollisionMeshingOptions = promotedCollisionMeshing;
+            newRootNode.MeshingOverride = promotedMeshingOverride;
             newRootNode.PureVisual = promotedPureVisual;
             newRootNode.PureInertial = promotedPureInertial;
 

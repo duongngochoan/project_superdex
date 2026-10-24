@@ -167,7 +167,6 @@ inline constexpr size_t operator""_uz(unsigned long long int val) {
     - MOCHI_USE_CUDSS                Enable cudss (used for some experimental features with CUDA)
     - MOCHI_USE_EIGEN                Enable Eigen (used for some experimental features)
     - MOCHI_USE_HDF5                 Enable HDF5 (used for binary file IO)
-    - MOCHI_USE_TORCH                Enable Torch (used for neural network evaluation)
     - MOCHI_USE_TRACY                Enable Tracy (used for profiling)
     - MOCHI_USE_MATH_ACCELERATION    Enable math acceleration libraries (e.g. Accelerate on macOS)
 */
@@ -200,10 +199,6 @@ inline constexpr size_t operator""_uz(unsigned long long int val) {
 */
 #ifndef MOCHI_USE_OSC
 #define MOCHI_USE_OSC MOCHI_INTERNAL
-#endif
-
-#ifndef MOCHI_USE_TORCH
-#define MOCHI_USE_TORCH 0
 #endif
 
 #ifndef MOCHI_USE_TRACY
@@ -246,10 +241,10 @@ inline constexpr size_t operator""_uz(unsigned long long int val) {
 #define MOCHI_INCLUDE_PYBIND_SUPPORT 0
 #endif
 
-// Define MOCHI_PMR_USES_JEMALLOC to 1 if jemalloc is used to implement
-// std::pmr::new_delete_resource. A work-around is required in this case.
-#ifndef MOCHI_PMR_USES_JEMALLOC
-#define MOCHI_PMR_USES_JEMALLOC 0
+// Define MOCHI_PMR_ENABLE_JEMALLOC_COMPATIBILITY to 1 when jemalloc is used to implement
+// std::pmr::new_delete_resource. A workaround is required in this case.
+#ifndef MOCHI_PMR_ENABLE_JEMALLOC_COMPATIBILITY
+#define MOCHI_PMR_ENABLE_JEMALLOC_COMPATIBILITY 0
 #endif
 
 #endif // MOCHI_CONFIG_H

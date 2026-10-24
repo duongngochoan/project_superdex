@@ -59,7 +59,7 @@ static void AccumulateAsyncContactForceAdjoints(
     CTimeIntegratorState const& intState,
     CRigidState<GetTimeStep<kGradTarget>()> const& pose,
     CQueryActorContactForces const& /*queryActorContactForces*/,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& activeCollisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& activeCollisions,
     CDiffContactGrad<kGradTarget>& outGrad) {
   if (activeCollisions.empty()) {
     return;
@@ -72,8 +72,8 @@ static void AccumulateAsyncContactForceAdjoints(
   Vec4r outGradientCom = {};
   Vec4r outGradientRot = {};
 
-  // Match the forward async contact assembly path: use local FILO memory for the temporary
-  // response.
+  // Reserve for the largest collision up-front so the per-collision ResizeNoInit below never
+  // reallocates, which the FILO allocator requires.
   MOCHI_FILO_STACK_ALLOCATOR(allocator, 32 * 1024);
   CollisionResponseResult collisionResponse(&allocator);
   collisionResponse.Reserve(activeCollisions, false, true, true);
@@ -107,9 +107,10 @@ static void AccumulateAsyncContactForceAdjoints(
     }
 
     // Accumulation of gradient terms for all contact points.
-    // The implementation matches AssembleRigidBodyAsyncContactResponse.
-    auto const& colliderTransform =
-        reg.get<CRootTransform const>(collision.colliderEntity).worldFromLocalPrev;
+    // The implementation matches the force and torque sums of ComputeRigidContactSums and their
+    // assembly in AssembleRigidBodyAsyncContactResponse.
+    auto const& colliderTransform = GetRootTransform<GetTimeStep<kGradTarget>()>(
+        reg, collision.colliderEntity, reg.get<CRootTransform const>(collision.colliderEntity));
     auto const trans = colliderTransform.VGetTranslation();
     auto const [rot, rotT] = ToVMatrix3x3_WithTranspose(colliderTransform.GetRotation());
     auto const comColliderSpace = DotVecMat3x3(com - trans, rot);
@@ -130,7 +131,7 @@ static void AccumulateAsyncContactForceAdjoints(
   }
 
   ColumnVector<real, RigidSize::kDAll> grad;
-  Store(grad.data(), outGradientCom);
+  Store<RigidSize::kDTrans>(grad.data(), outGradientCom);
   Store<RigidSize::kDRot>(grad.data() + RigidSize::kDTrans, outGradientRot);
   outGrad += grad;
 }
@@ -151,8 +152,7 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
     if (!reg.all_of<TagRigidActor>(e)) {
       continue;
     }
-    auto* activeCollisions =
-        reg.try_get<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e);
+    auto* activeCollisions = reg.try_get<CActiveCollisions</*kIsSync*/ true, TimeStep::Current>>(e);
     if (!activeCollisions) {
       continue;
     }
@@ -208,7 +208,8 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
       }
 
       // Accumulation of gradient terms for all contact points.
-      // The implementation matches AssembleCollisionResponseRange_SyncRigid.
+      // The implementation matches the force and torque sums of ComputeRigidContactSums and their
+      // assembly in AssembleSyncRigidContactSums.
       TimeStep constexpr kTimeStep = GetTimeStep<kGradTarget>();
       Vec4r comA = reg.template get<CRigidState<kTimeStep> const>(e).value.VGetTranslation();
       auto const& stateB = reg.template get<CRigidState<kTimeStep> const>(e2).value;
@@ -232,9 +233,9 @@ static void AccumulateAllSyncRigidContactForceAdjoints(
 
       ColumnVector<real, RigidSize::kDAll> gradA;
       ColumnVector<real, RigidSize::kDAll> gradB;
-      Store(gradA.data(), res);
+      Store<RigidSize::kDTrans>(gradA.data(), res);
       Store<RigidSize::kDRot>(gradA.data() + RigidSize::kDTrans, skPRes - Cross3(comA - comB, res));
-      Store(gradB.data(), -res);
+      Store<RigidSize::kDTrans>(gradB.data(), -res);
       Store<RigidSize::kDRot>(gradB.data() + RigidSize::kDTrans, -skPRes);
 
       outGradA += gradA;

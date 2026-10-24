@@ -16,7 +16,9 @@
 
 #include "rendering/viewport.h"
 #include "app/app.h"
+#include "rendering/measure_tool.h"
 #include "rendering/scene_stage.h"
+#include "rendering/screenshot_framing.h"
 #include "ui/imgui_widgets.h"
 
 #include <mochi_core/mochi_platform.h>
@@ -40,8 +42,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <numbers>
+#include <optional>
+#include <set>
 
 using namespace mochi_renderer;
 
@@ -120,6 +125,7 @@ static float ToolbarButtonSize() {
       ICON_FA_HOME,
       ICON_FA_VIDEO,
       ICON_FA_CUBES,
+      ICON_FA_RULER,
   };
   float maxIconWidth = 0.0f;
   for (char const* icon : kToolbarIcons) {
@@ -172,7 +178,7 @@ Viewport::Viewport(SuperDexStudio* studio, mochi_renderer::SceneViewSettings con
   _renderScene->CreateSunlight();
   _renderScene->CreateIndirectLight();
   _renderScene->CreateGroundPlane();
-  _renderScene->SetIbl(_studio->GetDefaultIbl());
+  _renderScene->SetIbl(_studio->GetCurrentIbl());
   _renderScene->SetSkyboxVisible(false);
   _renderScene->CreateDebugDraw();
   auto const& converter = _studio->GetEditorToRendererSpaceConverter();
@@ -198,6 +204,15 @@ Viewport::Viewport(SuperDexStudio* studio, mochi_renderer::SceneViewSettings con
        .onToggle = [this] { _showGroundGrid = !_showGroundGrid; },
        .getState = [this] { return _showGroundGrid; },
        .shortcut = ImGuiKey_G});
+  // The Measure tool, like the grid, belongs to every viewport rather than to one editor, so it is
+  // registered here. Ctrl+M rather than M: M is already the Bot Editor's Center of Mass toggle.
+  _measureTool = std::make_unique<MeasureTool>(_studio, this);
+  RegisterShowCommand(
+      {.name = "Measure Tool",
+       .onToggle = [this] { _measureTool->ToggleFromShortcut(); },
+       .getState = [this] { return _measureTool->IsActive(); },
+       .isEnabled = [this] { return _measureTool->IsAvailable(); },
+       .shortcut = ImGuiKey_M | ImGuiMod_Ctrl});
 }
 
 Viewport::~Viewport() {
@@ -212,6 +227,135 @@ std::unique_ptr<Viewport> Viewport::Create(
 
 mochi_renderer::Scene* Viewport::GetRenderScene() const {
   return _renderScene.get();
+}
+
+namespace {
+
+// Runs one step of giving a viewport its own size back after a screenshot and returns whether it
+// worked. A step that throws is logged and skipped, so the later steps still run and an exception
+// from the render is kept.
+template <typename Step>
+bool RestoreStep(char const* what, Step const& step) {
+  try {
+    step();
+    return true;
+  } catch (std::exception const& e) {
+    MOCHI_LOG_ERROR("Could not restore the viewport's %s after a screenshot: %s", what, e.what());
+  } catch (...) {
+    MOCHI_LOG_ERROR("Could not restore the viewport's %s after a screenshot.", what);
+  }
+  return false;
+}
+
+} // namespace
+
+bool Viewport::WithRenderSize(
+    int width,
+    int height,
+    std::function<void(mochi::Error&)> const& render,
+    mochi::Error& error) {
+  MOCHI_ERROR_RETURN(error, true);
+  MOCHI_ERROR_IF(
+      width < 1 || height < 1 || width > SuperDexStudio::kMaxScreenshotSide ||
+          height > SuperDexStudio::kMaxScreenshotSide,
+      error,
+      "The render size is empty or larger than the largest image Studio renders.");
+  MOCHI_ERROR_IF(!render, error, "There is nothing to render.");
+  MOCHI_ERROR_IF(_renderTarget == nullptr, error, "The viewport has no render target.");
+  MOCHI_ERROR_IF(_renderScene == nullptr, error, "The viewport has no scene.");
+  MOCHI_ERROR_RETURN(error, true);
+  int ownWidth = 0;
+  int ownHeight = 0;
+  _renderTarget->GetSize(ownWidth, ownHeight);
+  int sceneWidth = 0;
+  int sceneHeight = 0;
+  _renderScene->GetViewportSize(sceneWidth, sceneHeight);
+  // The sizes are restored afterwards, so there have to be some.
+  MOCHI_ERROR_IF(
+      ownWidth < 1 || ownHeight < 1 || sceneWidth < 1 || sceneHeight < 1,
+      error,
+      "The viewport has no size yet.");
+  MOCHI_ERROR_RETURN(error, true);
+  float const fovDeg = _renderScene->GetFieldOfView();
+  float const nearPlane = _renderScene->GetNearPlane();
+  float const farPlane = _renderScene->GetFarPlane();
+  float const orthoHeight = _renderScene->GetOrthographicHeight();
+  CameraMode const cameraMode = _renderScene->GetCameraMode();
+  MOCHI_ERROR_IF(
+      !std::isfinite(fovDeg) || !std::isfinite(nearPlane) || !std::isfinite(farPlane) ||
+          !std::isfinite(orthoHeight) || fovDeg <= 0.0f || fovDeg >= 180.0f || nearPlane <= 0.0f ||
+          farPlane <= nearPlane || orthoHeight <= 0.0f,
+      error,
+      "The viewport's camera has a setting that is not finite or out of range.");
+  MOCHI_ERROR_RETURN(error, true);
+  auto const restore = [&] {
+    bool restored = true;
+    auto const step = [&restored](char const* what, auto const& action) {
+      bool const stepRestored = RestoreStep(what, action);
+      restored = restored && stepRestored;
+    };
+    step("render target size", [&] { _renderTarget->Resize(ownWidth, ownHeight); });
+    step("camera mode", [&] { _renderScene->SetCameraMode(cameraMode); });
+    step("orthographic height", [&] { _renderScene->SetOrthographicHeight(orthoHeight); });
+    step("projection", [&] {
+      _renderScene->SetViewport(sceneWidth, sceneHeight, fovDeg, nearPlane, farPlane);
+    });
+    // A highlighted object sized the overlay to the image; it would stay that size until the next
+    // highlight. An overlay the screenshot created stays too, at the viewport's size: the next
+    // highlight would create it anyway.
+    if (_overlayTarget != nullptr) {
+      step("highlight overlay", [&] { EnsureHighlightOverlay(ownWidth, ownHeight); });
+    }
+    return restored;
+  };
+  // Both projections are widened; the camera uses its own.
+  std::optional<ScreenshotFraming> const framing =
+      FrameScreenshot(fovDeg, width, height, sceneWidth, sceneHeight);
+  if (!framing.has_value()) {
+    MOCHI_ERROR_SET(error, "The screenshot cannot be framed from this view.");
+    return true;
+  }
+  float const widenedOrthoHeight = orthoHeight * static_cast<float>(framing->orthoScale);
+  MOCHI_ERROR_IF(
+      !std::isfinite(widenedOrthoHeight),
+      error,
+      "The viewport's orthographic view is too tall to widen for this image.");
+  MOCHI_ERROR_RETURN(error, true);
+  mochi::Error renderError;
+  // Moves the render's error into @p error, and says so when the restore failed too. One Error
+  // holds one message, so when both failed the render's goes to the log. A failed restore alone is
+  // only returned on a normal exit, so an image the render captured can still be kept; after a
+  // throw it goes into @p error, as nothing is returned then.
+  auto const report = [&](bool restored, bool threw) {
+    if (!renderError.IsOK() && restored) {
+      error.SetFirstError(
+          renderError.GetDescription(), renderError.GetFile(), renderError.GetLine());
+    } else if (!renderError.IsOK()) {
+      MOCHI_LOG_ERROR("Rendering the screenshot failed: %s", renderError.GetDescription());
+      MOCHI_ERROR_SET(
+          error,
+          "Rendering the screenshot failed, and the viewport could not get its own size and view "
+          "back; see the log.");
+    } else if (!restored && threw) {
+      MOCHI_ERROR_SET(
+          error,
+          "The viewport could not get its own size and view back after the screenshot; see the log.");
+    }
+  };
+  // restore() never throws, so an exception from render() reaches the caller unchanged.
+  try {
+    _renderTarget->Resize(width, height);
+    _renderScene->SetOrthographicHeight(widenedOrthoHeight);
+    _renderScene->SetViewport(
+        width, height, static_cast<float>(framing->fovDeg), nearPlane, farPlane);
+    render(renderError);
+  } catch (...) {
+    report(restore(), /*threw=*/true);
+    throw;
+  }
+  bool const restored = restore();
+  report(restored, /*threw=*/false);
+  return restored;
 }
 
 float Viewport::UpdateGroundPlane() {
@@ -526,7 +670,8 @@ void Viewport::ApplyCameraFocus(
     filament::math::double3 from,
     filament::math::double3 to,
     float orthoHeight,
-    std::optional<mochi::Real3> dir) const {
+    std::optional<mochi::Real3> dir,
+    bool animate) const {
   if (dir.has_value()) {
     // View the focal point from the given editor-space direction. Convert it into renderer space
     // (the same way the constructor sets up the initial camera) and derive the orbit yaw/pitch from
@@ -534,10 +679,18 @@ void Viewport::ApplyCameraFocus(
     auto const& converter = _studio->GetEditorToRendererSpaceConverter();
     filament::math::double3 const d =
         normalize(mochi_renderer::ToFilament<double>(converter.DirectionToOutput(*dir)));
+    if (!animate) {
+      _cameraController->LookAt(to + d * length(from - to), to);
+      _renderScene->SetOrthographicHeight(orthoHeight);
+      return;
+    }
     constexpr double kRad2Deg = 180.0 / std::numbers::pi;
     double const yawDeg = std::atan2(d.x, d.z) * kRad2Deg;
     double const pitchDeg = -std::asin(std::clamp(d.y, -1.0, 1.0)) * kRad2Deg;
     _cameraController->LerpOrbitTo(to, length(from - to), yawDeg, pitchDeg, 0.2f, orthoHeight);
+  } else if (!animate) {
+    _cameraController->LookAt(from, to);
+    _renderScene->SetOrthographicHeight(orthoHeight);
   } else {
     _cameraController->SetOrbitPosition(to);
     // Always pass the orthographic height (for both modes) so that when switching
@@ -546,24 +699,64 @@ void Viewport::ApplyCameraFocus(
   }
 }
 
-void Viewport::FocusCameraOnScene(std::optional<mochi::Real3> dir) const {
+void Viewport::GetEmptySceneFocus(
+    filament::math::double3& outFrom,
+    filament::math::double3& outTo,
+    float& outOrthoHeight) const {
+  // With nothing to frame, pull back to the whole ground grid so the view reads as an empty scene
+  // rather than a close-up of nothing.
+  float const halfExtents = 0.5f * _studio->GetAppSettings().viewport.groundGrid.gridExtents;
+  _renderScene->GetCameraFocusOnSphere(
+      {0.0f, _groundPlaneHeight, 0.0f}, halfExtents * std::numbers::sqrt2_v<float>, outFrom, outTo);
+  outOrthoHeight = 2.4f * halfExtents;
+}
+
+void Viewport::FocusCameraOnScene(std::optional<mochi::Real3> dir, bool animate) const {
   filament::math::double3 from = {1.0f, 0.5f, 1.0f};
   filament::math::double3 to = {0.0f, 0.0f, 0.0f};
   float orthoHeight = 10.0f;
-  _renderScene->GetCameraFocusOnAllSceneObjects(from, to, orthoHeight);
-  ApplyCameraFocus(from, to, orthoHeight, dir);
+  // Scene::GetCameraFocusOnAllSceneObjects skips hidden objects, and a highlight hides a selected
+  // object behind an internal stand-in, so it would leave selected actors out of the frame.
+  filament::Box box;
+  bool hasBox = false;
+  for (SceneObject* object : _renderScene->GetSceneObjects()) {
+    if (object == nullptr || object->_internal || !IsShown(object)) {
+      continue;
+    }
+    filament::Box const aabb = object->GetAABB();
+    if (hasBox) {
+      box.unionSelf(aabb);
+    } else {
+      box = aabb;
+    }
+    hasBox = true;
+  }
+  if (hasBox && !box.isEmpty() &&
+      _renderScene->GetCameraFocusOnSphere(box.center, length(box.halfExtent), from, to)) {
+    // The margin Scene::GetCameraFocusOnAllSceneObjects uses.
+    orthoHeight = 2.4f * std::max({box.halfExtent.x, box.halfExtent.y, box.halfExtent.z});
+  } else {
+    GetEmptySceneFocus(from, to, orthoHeight);
+  }
+  ApplyCameraFocus(from, to, orthoHeight, dir, animate);
 }
 
 void Viewport::FocusCameraOnSelectedSceneObject(std::optional<mochi::Real3> dir) const {
+  FocusCameraOnSceneObjects(_selectedObjects, dir);
+}
+
+void Viewport::FocusCameraOnSceneObjects(
+    std::vector<SceneObject*> const& objects,
+    std::optional<mochi::Real3> dir,
+    bool animate) const {
   filament::math::double3 from = {1.0f, 0.5f, 1.0f};
   filament::math::double3 to = {0.0f, 0.0f, 0.0f};
   float orthoHeight = 10.0f;
   bool focused = false;
-  if (_selectedObjects.size() == 1) {
-    focused =
-        _renderScene->GetCameraFocusOnSceneObject(_selectedObjects.back(), from, to, orthoHeight);
-  } else if (_selectedObjects.size() > 1) {
-    // Frame the combined (union) world bounds of the whole selection via its bounding sphere.
+  if (objects.size() == 1) {
+    focused = _renderScene->GetCameraFocusOnSceneObject(objects.back(), from, to, orthoHeight);
+  } else if (objects.size() > 1) {
+    // Frame the combined (union) world bounds of all the objects via its bounding sphere.
     filament::math::float3 boundsMin{
         std::numeric_limits<float>::max(),
         std::numeric_limits<float>::max(),
@@ -572,8 +765,8 @@ void Viewport::FocusCameraOnSelectedSceneObject(std::optional<mochi::Real3> dir)
         std::numeric_limits<float>::lowest(),
         std::numeric_limits<float>::lowest(),
         std::numeric_limits<float>::lowest()};
-    for (SceneObject* selected : _selectedObjects) {
-      filament::Box const box = selected->GetAABB();
+    for (SceneObject* object : objects) {
+      filament::Box const box = object->GetAABB();
       filament::math::float3 const lo = box.center - box.halfExtent;
       filament::math::float3 const hi = box.center + box.halfExtent;
       for (int i = 0; i < 3; ++i) {
@@ -587,10 +780,101 @@ void Viewport::FocusCameraOnSelectedSceneObject(std::optional<mochi::Real3> dir)
       focused = _renderScene->GetCameraFocusOnSphere(center, radius, from, to);
     }
   }
-  if (!focused) {
-    _renderScene->GetCameraFocusOnAllSceneObjects(from, to, orthoHeight);
+  if (!focused && !_renderScene->GetCameraFocusOnAllSceneObjects(from, to, orthoHeight)) {
+    GetEmptySceneFocus(from, to, orthoHeight);
   }
-  ApplyCameraFocus(from, to, orthoHeight, dir);
+  ApplyCameraFocus(from, to, orthoHeight, dir, animate);
+}
+
+std::vector<SceneObject*> Viewport::FindActors(std::string_view path, bool* ambiguous) const {
+  std::vector<SceneObject*> actors;
+  if (ambiguous != nullptr) {
+    *ambiguous = false;
+  }
+  if (_renderScene == nullptr) {
+    return actors;
+  }
+  // Whole segments only: "arm" covers "arm" and "arm/hand", not "armrest".
+  auto const covers = [&path](std::string_view name) {
+    return name.starts_with(path) && (name.size() == path.size() || name[path.size()] == '/');
+  };
+  auto const collect = [&](auto const& matches) {
+    for (SceneObject* object : _renderScene->GetSceneObjects()) {
+      if (object != nullptr && !object->_internal && IsShown(object) &&
+          matches(std::string_view(object->GetName()))) {
+        actors.push_back(object);
+      }
+    }
+  };
+  if (path.empty()) {
+    collect([](std::string_view name) { return !name.empty(); });
+    return actors;
+  }
+  collect(covers);
+  if (actors.empty()) {
+    // The part of each matching name before the path: the actor the match belongs to.
+    std::set<std::string> owners;
+    collect([&covers, &owners](std::string_view name) {
+      for (std::size_t slash = name.find('/'); slash != std::string_view::npos;
+           slash = name.find('/', slash + 1)) {
+        if (covers(name.substr(slash + 1))) {
+          owners.emplace(name.substr(0, slash));
+          return true;
+        }
+      }
+      return false;
+    });
+    if (ambiguous != nullptr) {
+      *ambiguous = owners.size() > 1;
+    }
+  }
+  return actors;
+}
+
+bool Viewport::HasVisibleGeometry() const {
+  if (_renderScene == nullptr) {
+    return false;
+  }
+  return std::ranges::any_of(_renderScene->GetSceneObjects(), [](SceneObject const* object) {
+    return object != nullptr && !object->_internal && object->IsVisible() &&
+        !object->GetAABB().isEmpty();
+  });
+}
+
+void Viewport::SetCameraLookAt(mochi::Real3 const& eye, mochi::Real3 const& target) const {
+  auto const& converter = _studio->GetEditorToRendererSpaceConverter();
+  _cameraController->LookAt(
+      mochi_renderer::ToFilament<double>(converter.TranslationToOutput(eye)),
+      mochi_renderer::ToFilament<double>(converter.TranslationToOutput(target)));
+}
+
+std::pair<mochi::Real3, mochi::Real3> Viewport::GetCameraLookAt() const {
+  auto const& converter = _studio->GetRendererToEditorSpaceConverter();
+  return {
+      converter.TranslationToOutput(
+          mochi_renderer::ToMochi<mochi::real>(_renderScene->GetCameraPosition())),
+      converter.TranslationToOutput(
+          mochi_renderer::ToMochi<mochi::real>(_cameraController->GetOrbitPosition()))};
+}
+
+bool Viewport::IsShown(SceneObject const* object) const {
+  if (object == nullptr) {
+    return false;
+  }
+  int const index = _stage != nullptr ? _stage->GetSceneObjectIndex(object) : -1;
+  if (index >= 0) {
+    StagedActor const& actor = _stage->GetActors()[index];
+    for (StagedActor::Instance const* instance : {&actor.render, &actor.shape}) {
+      if (instance->sceneObject == object) {
+        return instance->visible;
+      }
+    }
+  }
+  return object->IsVisible();
+}
+
+bool Viewport::IsCameraMoving() const {
+  return _cameraController->IsActive();
 }
 
 void Viewport::ShowViewportContents(bool showCameraOrientationGizmo) {
@@ -704,6 +988,16 @@ void Viewport::ShowViewportContents(bool showCameraOrientationGizmo) {
     }
     HandleShowCommandShortcuts();
   }
+
+  // The Measure tool gets the cursor before the drag/selection paths below. While it is active it
+  // has already turned enableViewportPicking / enableSceneObjectDrag off (see
+  // MeasureTool::SetActive), so those paths are gated out and a measure click cannot also reselect
+  // a link or start a force-drag.
+  HandleMeasureToolInput(
+      !orientationGizmoActive && !transformGizmoActive && !transformGizmoToolbarClicked &&
+          !ImGui::GetIO().KeyAlt,
+      renderHeight,
+      fbScale);
 
   // Scene-object drag (left-drag on an object). The drag is issued on press but only commits once
   // the pointer moves past a threshold, so a plain click still falls through to selection. Alt+left
@@ -1143,6 +1437,29 @@ bool Viewport::ShowCameraOrientationToolbar() const {
     ImGui::SetTooltip(isPerspective ? "Perspective (Numpad 5)" : "Orthographic (Numpad 5)");
   }
 
+  // Measure tool, enabled only when availalble (i.e. not during simulation)
+  bool const measureAvailable = _measureTool->IsAvailable();
+  bool const measureActive = _measureTool->IsActive();
+  ImGui::SetCursorScreenPos({startX, startY + 3.0f * rowStride});
+  ImGui::BeginDisabled(!measureAvailable);
+  if (measureActive) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+  }
+  if (ImGui::Button(ICON_FA_RULER "##MeasureTool", {buttonSize, buttonSize})) {
+    // ToggleFromShortcut which opens the panel automatically
+    _measureTool->ToggleFromShortcut();
+    clicked = true;
+  }
+  if (measureActive) {
+    ImGui::PopStyleColor();
+  }
+  ImGui::EndDisabled();
+  if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+    ImGui::SetTooltip(
+        measureAvailable ? "Measure Tool (Ctrl+M)"
+                         : "Measure Tool unavailable while the simulation is running");
+  }
+
   ImGui::PopFont();
   ImGui::PopStyleVar(); // ImGuiStyleVar_FrameRounding
   return clicked;
@@ -1500,6 +1817,45 @@ bool Viewport::ShowTransformGizmoToolbar() {
   return toolbarClicked;
 }
 
+void Viewport::HandleMeasureToolInput(bool canPick, int renderHeight, float fbScale) {
+  // Switch the tool off as soon as an editor withdraws it (e.g. a simulation starts). This has to
+  // happen here, once per frame, rather than in the panel: the panel is closed by default, and the
+  // Show menu and the Ctrl+M shortcut both honour isEnabled -- so an unavailable tool left on would
+  // be unreachable, still picking stale geometry and still holding the picking gates off.
+  if (_measureTool->IsActive() && !_measureTool->IsAvailable()) {
+    _measureTool->SetActive(false);
+  }
+  if (!_measureTool->IsActive()) {
+    return;
+  }
+  // A single step re-pauses within the step, so the tool never sees an unpaused frame and cannot
+  // notice the geometry moved from the pause state alone. Checked before the pick below so a click
+  // on the frame after a step lands on a selection that was already cleared.
+  _measureTool->DiscardSelectionIfPoseChanged();
+  if (!canPick || !ImGui::IsWindowHovered()) {
+    _measureTool->ClearHover();
+    return;
+  }
+  ImVec2 const mousePos = ImGui::GetMousePos();
+  ImVec2 const windowPos = ImGui::GetWindowPos();
+  float const pickX = (mousePos.x - windowPos.x) * fbScale;
+  float const localY = (mousePos.y - windowPos.y) * fbScale;
+  // Filament indexes the framebuffer bottom-up while ImGui is top-down.
+  float const pickY = static_cast<float>(renderHeight) - 1.0f - localY;
+  WorldRay const ray = _renderScene->ScreenPixelToWorldRay(pickX, pickY);
+
+  // Commit on release, and only when the press did not turn into a drag -- the same rule the
+  // selection pick uses, so orbiting the camera never also measures.
+  bool commit = false;
+  if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+    ImVec2 const drag = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
+    constexpr float kDragThresholdPx = 3.0f;
+    commit = drag.x * drag.x + drag.y * drag.y < kDragThresholdPx * kDragThresholdPx;
+  }
+  bool const additive = ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift;
+  _measureTool->ProcessCursorRay(ray.origin, ray.direction, commit, additive);
+}
+
 void Viewport::DrawDebug() {
   auto* dd = GetRenderScene()->GetDebugDraw();
   if (_showGroundGrid) {
@@ -1511,6 +1867,7 @@ void Viewport::DrawDebug() {
       dd->DrawBox(object->GetAABB(), filament::math::float4{1.0f, 0.0f, 0.0f, 1.0f});
     }
   }
+  _measureTool->DrawDebug(dd, &_debugText);
 }
 
 void Viewport::ShowDebugText(ImVec2 contentOrigin, float logicalWidth, float logicalHeight) {

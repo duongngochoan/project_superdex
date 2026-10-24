@@ -32,10 +32,10 @@ namespace superdex::studio {
 
 class AssetManager;
 
-// Tessellates a STEP/CAD file into renderer mesh sections (one section). Calls into the
-// superdex_mesh_cli helper (OpenCascade) via mochi_mesh and performs no renderer work, so it is
-// safe to run off the main thread (e.g. inside an AsyncTask). Returns empty on failure (with @p
-// error set).
+// Tessellates a STEP/CAD file into renderer mesh sections, one per CAD color (each section's
+// baseColor is the file's face/body color). Calls into the superdex_mesh_cli helper (OpenCascade)
+// via mochi_mesh and performs no renderer work, so it is safe to run off the main thread (e.g.
+// inside an AsyncTask). Returns empty on failure (with @p error set).
 std::vector<mochi_renderer::MeshSection> TessellateCadModelFile(
     mochi::Path const& path,
     mochi::mesh::StepTessellationParams const& params,

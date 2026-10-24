@@ -17,11 +17,15 @@
 #include "mochi_physics_test_fixture.h"
 
 #include <mochi_core/test/mochi_test_helpers.h>
+#include <mochi_core/utils/array_utils.h>
 #include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/mochi_physics_experimental.h>
 #include <mochi_physics/src/mochi_actor.h>
+#include <mochi_physics/src/mochi_rigid.h>
+#include <mochi_physics/src/mochi_simulation.h>
 
 #include <functional>
+#include <limits>
 #include <vector>
 
 using namespace mochi;
@@ -33,6 +37,7 @@ static_assert(
 
 real constexpr kApiRelTol = kDefaultNearEqualEpsilon<real>;
 real constexpr kPhysicsMassRelTol = 0.02_r;
+real constexpr kRoundoffTol = 64_r * std::numeric_limits<real>::epsilon();
 
 // =============================================================================
 // Fixtures
@@ -219,12 +224,7 @@ static PhysicsValidationTestCase CreateRodActorTestCase() {
             };
 
             int const numElements = isize(nodes) - 1;
-            // TODO(T255431885): Re-enable
-            // DynamicArray<Real3> elementFrameAxes(numElements, Real3{0_r, 1_r, 0_r});
-            DynamicArray<Real3> elementFrameAxes;
-            for (int i = 0; i < numElements; ++i) {
-              elementFrameAxes.push_back(Real3{0_r, 1_r, 0_r});
-            }
+            DynamicArray<Real3> elementFrameAxes(numElements, Real3{0_r, 1_r, 0_r});
 
             auto shape = CreatePolylineShape(
                 context, nodes, elementFrameAxes, /*isClosedLoop=*/false, test::ExpectOK{});
@@ -429,16 +429,26 @@ TEST_F(ActorMassTest, DefaultDensity) {
   auto constexpr kCenter = kScale / 2_r;
 
   auto [tetCoordinates, tetConnectivity] = test::CreateMinimalTetMeshUnitCube(kScale);
-  auto tetMeshShape = _mochiContext->CreateTetMeshShape(
-      Flatten(MakeSpan(tetCoordinates)), Flatten(MakeSpan(tetConnectivity)), test::ExpectOK{});
-  RigidActorParams params{
-      .shape = tetMeshShape, .colliderType = ColliderType::Box, .isStatic = false};
-  auto* actor = _scene->CreateRigidActor(params, test::ExpectOK{});
-  MOCHI_DEFER(_scene->DestroyActor(actor));
+  auto [triCoordinates, triConnectivity] = test::CreateMinimalTriMeshUnitCube(kScale);
+  // A tetrahedral shape provides its volume and center of mass; for a triangle shape, rigid
+  // creation computes them from its surface.
+  for (ShapeHandle const& shape :
+       {_mochiContext->CreateTetMeshShape(
+            Flatten(MakeSpan(tetCoordinates)),
+            Flatten(MakeSpan(tetConnectivity)),
+            test::ExpectOK{}),
+        _mochiContext->CreateTriMeshShape(
+            Flatten(MakeSpan(triCoordinates)),
+            Flatten(MakeSpan(triConnectivity)),
+            test::ExpectOK{})}) {
+    RigidActorParams params{.shape = shape, .colliderType = ColliderType::Box, .isStatic = false};
+    auto* actor = _scene->CreateRigidActor(params, test::ExpectOK{});
+    MOCHI_DEFER(_scene->DestroyActor(actor));
 
-  EXPECT_NEAR_EQ(kDefaultDensity * kVolume, actor->GetMass(test::ExpectOK{}));
-  EXPECT_NEAR_EQ(kDefaultDensity, actor->GetDensity(test::ExpectOK{}));
-  EXPECT_NEAR_EQ(kCenter, actor->GetRigidCenterOfMassLocal(test::ExpectOK{}));
+    EXPECT_NEAR_EQ(kDefaultDensity * kVolume, actor->GetMass(test::ExpectOK{}));
+    EXPECT_NEAR_EQ(kDefaultDensity, actor->GetDensity(test::ExpectOK{}));
+    EXPECT_NEAR_EQ(kCenter, actor->GetRigidCenterOfMassLocal(test::ExpectOK{}));
+  }
 }
 
 // =============================================================================
@@ -493,6 +503,7 @@ TEST_F(ActorMassTest, RigidActor_Api) {
 
     EXPECT_EQ(0_r, actor->GetMass(test::ExpectNotOK{}));
     EXPECT_EQ(0_r, actor->GetDensity(test::ExpectNotOK{}));
+    actor->SetDensity(kNewDensity, test::ExpectNotOK{});
   }
 }
 
@@ -513,10 +524,14 @@ TEST_F(ActorMassTest, SoftActor_Api) {
 
   EXPECT_NEAR_RTOL(kMass, actor->GetMass(test::ExpectOK{}), kApiRelTol);
   EXPECT_NEAR_RTOL(kDensity, actor->GetDensity(test::ExpectOK{}), kApiRelTol);
+  EXPECT_NEAR_EQ(kScale / 2_r, actor->GetRigidCenterOfMassLocal(test::ExpectOK{}));
 
   actor->SetDensity(kNewDensity, test::ExpectOK{});
   EXPECT_NEAR_RTOL(kNewMass, actor->GetMass(test::ExpectOK{}), kApiRelTol);
   EXPECT_NEAR_RTOL(kNewDensity, actor->GetDensity(test::ExpectOK{}), kApiRelTol);
+  // The lumped mass follows: it adds up to the mass once per DoF component.
+  auto const& lumpedMass = GetRegistry().get<CLumpedMassMatrix const>(GetEntity(actor)).values;
+  EXPECT_NEAR_RTOL(3_r * kNewMass, HSum(MakeConstSpan(lumpedMass)), kApiRelTol);
 }
 
 TEST_F(ActorMassTest, ShellActor_Api) {
@@ -549,12 +564,7 @@ TEST_F(ActorMassTest, RodActor_Api) {
       Real3{1_r, 0_r, 0_r}};
 
   int const numElements = isize(nodes) - 1;
-  // TODO(T255431885): Re-enable
-  // DynamicArray<Real3> elementFrameAxes(numElements, Real3{0_r, 1_r, 0_r});
-  DynamicArray<Real3> elementFrameAxes;
-  for (int i = 0; i < numElements; ++i) {
-    elementFrameAxes.push_back(Real3{0_r, 1_r, 0_r});
-  }
+  DynamicArray<Real3> elementFrameAxes(numElements, Real3{0_r, 1_r, 0_r});
 
   auto shape = CreatePolylineShape(
       _mochiContext, nodes, elementFrameAxes, /*isClosedLoop=*/false, test::ExpectOK{});
@@ -612,6 +622,137 @@ TEST_F(ActorMassTest, ArticulatedActor_Api) {
   actor->SetDensity(1000_r, test::ExpectNotOK{});
 }
 
+// A link welded to the world is static, but keeps the inertia of its shape. A link without a shape
+// has no inertia, and setting its density has no effect.
+TEST_F(ActorMassTest, ArticulatedLink_Api) {
+  auto constexpr kScale = Real3{0.1_r, 0.2_r, 0.3_r};
+  auto constexpr kVolume = kScale[0] * kScale[1] * kScale[2];
+  auto constexpr kDensity = 1000_r;
+  auto constexpr kLinkMass = kDensity * kVolume;
+  auto constexpr kNewDensity = 2000_r;
+  auto constexpr kNewLinkMass = kNewDensity * kVolume;
+
+  auto [coordinates, connectivity] = test::CreateMinimalTetMeshUnitCube(kScale);
+  auto cubeShape = _mochiContext->CreateTetMeshShape(
+      Flatten(MakeSpan(coordinates)), Flatten(MakeSpan(connectivity)), test::ExpectOK{});
+
+  ArticulatedActorParams actorParams;
+  actorParams.joints = {
+      {.type = ArticulatedJointType::Hard},
+      {.type = ArticulatedJointType::Spherical},
+      {.type = ArticulatedJointType::Spherical}};
+  actorParams.links = {
+      {.parentLink = -1,
+       .shape = cubeShape,
+       .colliderType = ColliderType::None,
+       .density = kDensity},
+      {.parentLink = 0,
+       .shape = cubeShape,
+       .colliderType = ColliderType::None,
+       .density = kDensity},
+      {.parentLink = 1, .colliderType = ColliderType::None}};
+  auto* actor = _scene->CreateArticulatedActor(actorParams, test::ExpectOK{});
+  MOCHI_DEFER(_scene->DestroyActor(actor));
+  auto const links = actor->GetNestedLinkActors(test::ExpectOK{});
+  Actor* staticLink = _scene->GetActor(links[0]);
+  Actor* dynamicLink = _scene->GetActor(links[1]);
+  Actor* dummyLink = _scene->GetActor(links[2]);
+  ASSERT_TRUE(staticLink->IsStatic());
+
+  for (Actor* link : {staticLink, dynamicLink}) {
+    EXPECT_NEAR_RTOL(kLinkMass, link->GetMass(test::ExpectOK{}), kApiRelTol);
+    EXPECT_NEAR_RTOL(kDensity, link->GetDensity(test::ExpectOK{}), kApiRelTol);
+  }
+  EXPECT_EQ(0_r, dummyLink->GetMass(test::ExpectOK{}));
+  EXPECT_EQ(0_r, dummyLink->GetDensity(test::ExpectOK{}));
+  dummyLink->SetDensity(kNewDensity, test::ExpectOK{});
+  EXPECT_EQ(0_r, dummyLink->GetMass(test::ExpectOK{}));
+  EXPECT_EQ(0_r, dummyLink->GetDensity(test::ExpectOK{}));
+
+  staticLink->SetDensity(kNewDensity, test::ExpectOK{});
+  EXPECT_NEAR_RTOL(kNewLinkMass, staticLink->GetMass(test::ExpectOK{}), kApiRelTol);
+  EXPECT_NEAR_RTOL(kNewDensity, staticLink->GetDensity(test::ExpectOK{}), kApiRelTol);
+  EXPECT_NEAR_RTOL(kNewLinkMass + kLinkMass, actor->GetMass(test::ExpectOK{}), kApiRelTol);
+}
+
+// A link without a shape takes its inertia from an explicit mass, center of mass, and moment of
+// inertia. It has no volume, so it has no density.
+TEST_F(ActorMassTest, ArticulatedShapelessLinkWithInertia_Api) {
+  auto constexpr kMass = 2_r;
+  auto constexpr kCom = Real3{0.2_r, 0_r, 0_r};
+  auto constexpr kMoi = Real6{0.01_r, 0_r, 0_r, 0.02_r, 0_r, 0.03_r};
+
+  ArticulatedActorParams actorParams;
+  actorParams.joints = {
+      {.type = ArticulatedJointType::Hard},
+      {.type = ArticulatedJointType::Revolute, .axis = Real3{0_r, 0_r, 1_r}}};
+  actorParams.links = {
+      {.parentLink = -1},
+      {.parentLink = 0, .mass = kMass, .centerOfMass = kCom, .momentOfInertia = kMoi}};
+  auto* actor = _scene->CreateArticulatedActor(actorParams, test::ExpectOK{});
+  MOCHI_DEFER(_scene->DestroyActor(actor));
+  Actor* link = _scene->GetActor(actor->GetNestedLinkActors(test::ExpectOK{})[1]);
+
+  EXPECT_NEAR_RTOL(kMass, link->GetMass(test::ExpectOK{}), kApiRelTol);
+  EXPECT_NEAR_RTOL(kMass, actor->GetMass(test::ExpectOK{}), kApiRelTol);
+  EXPECT_EQ(kCom, link->GetRigidCenterOfMassLocal(test::ExpectOK{}));
+  EXPECT_EQ(kMoi, link->GetRigidMomentOfInertiaLocal(test::ExpectOK{}));
+  EXPECT_EQ(0_r, link->GetDensity(test::ExpectOK{}));
+  link->SetDensity(1000_r, test::ExpectOK{});
+  EXPECT_NEAR_RTOL(kMass, link->GetMass(test::ExpectOK{}), kApiRelTol);
+}
+
+// A pendulum whose bob has no shape swings exactly like one whose bob has a shape with the same
+// explicit inertia.
+TEST_F(ActorMassTest, ArticulatedShapelessLinkWithInertia_MatchesShapedLink) {
+  auto constexpr kScale = Real3{0.1_r, 0.1_r, 0.1_r};
+  auto constexpr kMass = 2_r;
+  auto constexpr kCom = Real3{0.3_r, 0_r, 0_r};
+  auto constexpr kMoi = Real6{0.01_r, 0_r, 0_r, 0.01_r, 0_r, 0.01_r};
+
+  auto [coordinates, connectivity] = test::CreateMinimalTetMeshUnitCube(kScale);
+  auto cubeShape = _mochiContext->CreateTetMeshShape(
+      Flatten(MakeSpan(coordinates)), Flatten(MakeSpan(connectivity)), test::ExpectOK{});
+
+  auto createPendulum = [&](ShapeHandle bobShape, Real3 const& origin) {
+    ArticulatedActorParams actorParams;
+    actorParams.worldFromRoot.SetTranslation(origin);
+    actorParams.joints = {
+        {.type = ArticulatedJointType::Hard},
+        {.type = ArticulatedJointType::Revolute, .axis = Real3{0_r, 0_r, 1_r}}};
+    actorParams.links = {
+        {.parentLink = -1},
+        {.parentLink = 0,
+         .shape = bobShape,
+         .colliderType = ColliderType::None,
+         .mass = kMass,
+         .centerOfMass = kCom,
+         .momentOfInertia = kMoi}};
+    Actor* actor = _scene->CreateArticulatedActor(actorParams, test::ExpectOK{});
+    return _scene->GetActor(actor->GetNestedLinkActors(test::ExpectOK{})[1]);
+  };
+  auto constexpr kShapedOrigin = Real3{0_r, 0_r, 0_r};
+  auto constexpr kShapelessOrigin = Real3{0_r, 0_r, 5_r};
+  Actor* shapedBob = createPendulum(cubeShape, kShapedOrigin);
+  Actor* shapelessBob = createPendulum(ShapeHandle{}, kShapelessOrigin);
+
+  for (int i = 0; i < 30; ++i) {
+    _scene->Step(0.01);
+  }
+
+  TransformRT const shaped = shapedBob->GetRootTransform();
+  TransformRT const shapeless = shapelessBob->GetRootTransform();
+  Real3 swingAxis;
+  real swingAngle = 0_r;
+  shaped.GetRotation().ToAxisAngle(&swingAxis, &swingAngle);
+  EXPECT_GT(swingAngle, 0.1_r) << "The pendulum should swing under gravity.";
+  EXPECT_NEAR_TOL(shaped.GetRotation(), shapeless.GetRotation(), 1e-4_r);
+  EXPECT_NEAR_TOL(
+      shaped.GetTranslation() - kShapedOrigin,
+      shapeless.GetTranslation() - kShapelessOrigin,
+      1e-4_r);
+}
+
 TEST_IF_F(MOCHI_ENABLE_ROM_ACTORS, ActorMassTest, RomActor_Api) {
   auto constexpr kScale = Real3{0.2_r, 0.2_r, 0.2_r};
   auto constexpr kVolume = kScale[0] * kScale[1] * kScale[2];
@@ -663,6 +804,131 @@ TEST_F(ActorMassTest, SetInertiaProperties_RigidActor_Roundtrip) {
   auto const moi = actor->GetRigidMomentOfInertiaLocal(test::ExpectOK{});
   EXPECT_EQ(kNewCom, actor->GetRigidCenterOfMassLocal(test::ExpectOK{}));
   EXPECT_SPAN_EQ(kNewMoi, moi);
+}
+
+TEST_F(ActorMassTest, SetInertiaProperties_ComChangeMatchesActorCreatedWithCom) {
+  _scene->SetGravity(Real3{});
+
+  auto [coords, conn] = test::CreateMinimalTetMeshUnitCube(Real3{0.1_r, 0.2_r, 0.3_r});
+  auto shape = _mochiContext->CreateTetMeshShape(
+      Flatten(MakeSpan(coords)), Flatten(MakeSpan(conn)), test::ExpectOK{});
+
+  auto const worldFromLocal = TransformRT{
+      Quaternion::FromAxisAngle(Normalize(Real3{1_r, 2_r, 3_r}), 0.3_r * kPI),
+      Real3{1_r, 2_r, 3_r}};
+  auto constexpr kLinearVel = Real3{0.1_r, -0.2_r, 0.3_r};
+  auto constexpr kAngularVel = Real3{1_r, 2_r, -1.5_r};
+  auto constexpr kMass = 5_r;
+  auto constexpr kNewCom = Real3{0.4_r, -0.3_r, 0.2_r};
+  auto constexpr kMoi = Real6{2_r, 0.1_r, 0.2_r, 3_r, 0.3_r, 4_r};
+
+  // Actor whose CoM is changed while moving.
+  RigidActorParams params{
+      .shape = shape,
+      .worldFromLocal = worldFromLocal,
+      .colliderType = ColliderType::None,
+      .density = 500_r};
+  auto* actor = _scene->CreateRigidActor(params, test::ExpectOK{});
+  MOCHI_DEFER(_scene->DestroyActor(actor));
+  actor->SetVelocity(kLinearVel, kAngularVel, test::ExpectOK{});
+  Real3 const oldCom = actor->GetRigidCenterOfMassLocal(test::ExpectOK{});
+  auto const rootBefore = actor->GetRootTransform();
+
+  actor->SetInertiaProperties(kMass, kNewCom, kMoi, test::ExpectOK{});
+
+  // The root transform is unchanged; the CoM transform follows the new local CoM.
+  EXPECT_EQ(rootBefore, actor->GetRootTransform());
+  EXPECT_NEAR_EQ(
+      rootBefore.TransformPoint(kNewCom),
+      actor->GetCenterOfMassTransform(test::ExpectOK{}).GetTranslation());
+
+  // The rigid velocity field is preserved, so the CoM velocity follows the CoM shift.
+  Real3 const expectedComVel =
+      kLinearVel + Cross(kAngularVel, worldFromLocal.GetRotation() * (kNewCom - oldCom));
+  EXPECT_NEAR_EQ(expectedComVel, actor->GetLinearVelocity(test::ExpectOK{}));
+  EXPECT_NEAR_EQ(kAngularVel, actor->GetAngularVelocity(test::ExpectOK{}));
+
+  // Reference actor created with the new inertia properties, same pose, same velocity field.
+  RigidActorParams refParams{
+      .shape = shape,
+      .worldFromLocal = worldFromLocal,
+      .colliderType = ColliderType::None,
+      .mass = kMass,
+      .centerOfMass = kNewCom,
+      .momentOfInertia = kMoi,
+      .linearVelocity = expectedComVel,
+      .angularVelocity = kAngularVel};
+  auto* refActor = _scene->CreateRigidActor(refParams, test::ExpectOK{});
+  MOCHI_DEFER(_scene->DestroyActor(refActor));
+
+  auto const& reg = GetRegistry();
+  auto const e = GetEntity(actor);
+  for (int i = 0; i < 10; ++i) {
+    _scene->Step(0.01);
+
+    // Passing the same CoM leaves the solver-produced state bit-exact.
+    auto const stateBefore = reg.get<CRigidState<TimeStep::Current> const>(e).value;
+    auto const vComBefore = reg.get<CRigidVel<TimeStep::Current> const>(e).value.GetVCom();
+    auto const rootBeforeSameCom = actor->GetRootTransform();
+    actor->SetInertiaProperties(kMass, kNewCom, kMoi, test::ExpectOK{});
+    EXPECT_EQ(stateBefore, reg.get<CRigidState<TimeStep::Current> const>(e).value);
+    EXPECT_TRUE(
+        Equal<3>(vComBefore, reg.get<CRigidVel<TimeStep::Current> const>(e).value.GetVCom()));
+    EXPECT_EQ(rootBeforeSameCom, actor->GetRootTransform());
+  }
+
+  auto const root = actor->GetRootTransform();
+  auto const refRoot = refActor->GetRootTransform();
+  EXPECT_NEAR_TOL(refRoot, root, kRoundoffTol);
+
+  auto const stateBeforeMassChange = reg.get<CRigidState<TimeStep::Current> const>(e).value;
+  auto const vComBeforeMassChange = reg.get<CRigidVel<TimeStep::Current> const>(e).value.GetVCom();
+  actor->SetInertiaProperties(
+      2_r * kMass, kNewCom, Real6{3_r, 0.1_r, 0.2_r, 4_r, 0.3_r, 5_r}, test::ExpectOK{});
+  EXPECT_EQ(stateBeforeMassChange, reg.get<CRigidState<TimeStep::Current> const>(e).value);
+  EXPECT_TRUE(
+      Equal<3>(
+          vComBeforeMassChange, reg.get<CRigidVel<TimeStep::Current> const>(e).value.GetVCom()));
+  EXPECT_EQ(root, actor->GetRootTransform());
+}
+
+TEST_F(ActorMassTest, SetInertiaProperties_ComChangeRejectedWithConstraintOrTranslationBC) {
+  auto [coords, conn] = test::CreateMinimalTetMeshUnitCube(Real3{0.1_r, 0.2_r, 0.3_r});
+  auto shape = _mochiContext->CreateTetMeshShape(
+      Flatten(MakeSpan(coords)), Flatten(MakeSpan(conn)), test::ExpectOK{});
+  RigidActorParams params{.shape = shape, .colliderType = ColliderType::None, .density = 500_r};
+  auto* actor = _scene->CreateRigidActor(params, test::ExpectOK{});
+  MOCHI_DEFER(_scene->DestroyActor(actor));
+
+  auto constexpr kMass = 5_r;
+  auto constexpr kMoi = Real6{2_r, 0.1_r, 0.2_r, 3_r, 0.3_r, 4_r};
+  auto constexpr kNewCom = Real3{0.4_r, -0.3_r, 0.2_r};
+  Real3 const oldCom = actor->GetRigidCenterOfMassLocal(test::ExpectOK{});
+
+  // A translation BC rejects a CoM change but accepts mass and moment-of-inertia changes.
+  int const translationDof = 0;
+  real const translationValue =
+      actor->GetCenterOfMassTransform(test::ExpectOK{}).GetTranslation()[0];
+  actor->AddBoundaryConditionDofsWorld(
+      MakeSingletonConstSpan(translationDof),
+      MakeSingletonConstSpan(translationValue),
+      test::ExpectOK{});
+  actor->SetInertiaProperties(kMass, kNewCom, kMoi, test::ExpectNotOK{});
+  actor->SetInertiaProperties(kMass, oldCom, kMoi, test::ExpectOK{});
+
+  // Cleared BCs and rotation-only BCs do not restrict the CoM.
+  actor->ClearBoundaryConditions();
+  int const rotationDofs[] = {3, 4, 5};
+  real const rotationValues[] = {0_r, 0_r, 0_r};
+  actor->AddBoundaryConditionDofsWorld(rotationDofs, rotationValues, test::ExpectOK{});
+  actor->SetInertiaProperties(kMass, kNewCom, kMoi, test::ExpectOK{});
+
+  // A constraint rejects a CoM change but accepts mass and moment-of-inertia changes.
+  RigidPivotPositionConstraintParams conParams;
+  conParams.actor = actor->GetHandle();
+  _scene->CreateRigidPivotPositionConstraint(conParams, test::ExpectOK{});
+  actor->SetInertiaProperties(kMass, oldCom, kMoi, test::ExpectNotOK{});
+  actor->SetInertiaProperties(2_r * kMass, kNewCom, kMoi, test::ExpectOK{});
 }
 
 TEST_F(ActorMassTest, SetInertiaProperties_DensityRescale) {

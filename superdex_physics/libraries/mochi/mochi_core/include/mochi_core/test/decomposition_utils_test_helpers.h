@@ -50,26 +50,6 @@ inline void BatchedRotationVariantSvdVals3x3(Span<Matrix3x3r const> F, Span<Real
 }
 
 template <int kBatchSize>
-inline void BatchedRotationVariantSvdValsVecs3x3(
-    Span<Matrix3x3r const> F,
-    Span<Matrix3x3r> U,
-    Span<Real3> Sg,
-    Span<Matrix3x3r> VT) {
-  auto const fm = LoadBatchMatrix3x3<kBatchSize>(F);
-
-  BatchReal3<kBatchSize> sigma MOCHI_NO_INIT;
-  BatchedRotationVariantSvdNormalEigensystem3x3<kBatchSize> normalEigensystem MOCHI_NO_INIT;
-  BatchedRotationVariantSvdVals3x3<kBatchSize>(fm, sigma, normalEigensystem);
-
-  BatchReal3x3<kBatchSize> uBatch MOCHI_NO_INIT, vtBatch MOCHI_NO_INIT;
-  BatchedRotationVariantSvdVecs3x3<kBatchSize>(fm, normalEigensystem, uBatch, vtBatch);
-
-  StoreBatchReal3<kBatchSize>(sigma, Sg);
-  StoreBatchMatrix3x3<kBatchSize>(uBatch, U);
-  StoreBatchMatrix3x3<kBatchSize>(vtBatch, VT);
-}
-
-template <int kBatchSize>
 inline void BatchedRotationVariantSvd3x3(
     Span<Matrix3x3r const> F,
     Span<Matrix3x3r> U,

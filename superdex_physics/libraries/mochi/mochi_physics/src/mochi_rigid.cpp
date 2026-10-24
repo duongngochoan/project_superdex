@@ -66,7 +66,7 @@ void rigid::EntityGetSolution(
   TransformToRawPose(state.value, outSolution.TopRows<RigidSize::kAll>(RigidSize::kAll));
 }
 
-MOCHI_API void rigid::RigidStateToRootTransform(
+void rigid::RigidStateToRootTransform(
     Vec4r const& comLocal,
     TransformRT const& state,
     TransformRT& worldFromLocal) {
@@ -95,7 +95,7 @@ static void AssembleRigidBodyAsyncContactResponse(
     ContactSamples const& sample,
     real dtStage,
     TransformRT const& pose,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     double* outEnergy,
     RigidGradient* outGradient,
     RigidHessian* outHessian) {
@@ -104,10 +104,14 @@ static void AssembleRigidBodyAsyncContactResponse(
       (!outEnergy || *outEnergy == 0.0) && (!outGradient || *outGradient == RigidGradient{}) &&
           (!outHessian || *outHessian == RigidHessian{}),
       "Expected this to be the first assembly term, with zero energy");
+  MOCHI_ASSERT_VERBOSE(
+      kGradTarget == GradTarget::Current || !outHessian,
+      "The contact DResidual only supports GradTarget::Current.");
 
   bool const assemEnergy = (outEnergy != nullptr);
   bool const assemGradient = (outGradient != nullptr);
   bool const assemHessian = (outHessian != nullptr);
+  bool const storeForces = assemGradient && queryActiveContacts;
 
   // Gradient and Hessian accumulation terms across all colliders
   Vec4r outGradientCom = {};
@@ -115,12 +119,6 @@ static void AssembleRigidBodyAsyncContactResponse(
   VMatrix3x3r outHessianCom = {};
   VMatrix3x3r outHessianRot = {};
   VMatrix3x3r outHessianMix = {};
-
-  // Preallocate memory for collision response. Use stack memory if possible. 32 KiB is enough in
-  // most cases.
-  MOCHI_FILO_STACK_ALLOCATOR(allocator, 32 * 1024);
-  CollisionResponseResult collisionResponse(&allocator);
-  collisionResponse.Reserve(collisions, assemEnergy, assemGradient, assemHessian);
 
   // Get the com translation
   auto const com = pose.VGetTranslation();
@@ -131,18 +129,6 @@ static void AssembleRigidBodyAsyncContactResponse(
 
     ContactDetectionResult& contactQuery = collision.collisionResult;
     int const numPoints = isize(contactQuery.sampleIndices);
-    collisionResponse.ResizeNoInit(numPoints, assemEnergy, assemGradient, assemHessian);
-
-    // Compute collision response
-    ComputeCollisionResponse<kGradTarget>(
-        contactQuery,
-        contactParams,
-        config,
-        dtStage,
-        assemEnergy,
-        assemGradient,
-        assemHessian,
-        collisionResponse);
 
     // WARNING: If this implementation is modified, consider modifying also
     // AccumulateAsyncContactForceAdjoints, which is its dual for differentiability.
@@ -167,73 +153,48 @@ static void AssembleRigidBodyAsyncContactResponse(
     //   H_trans-rot   = df_world * sk(r)
     //   H_rot-rot     = sk(r) * df_world * sk(r)
     // In local frame, sk(r) = rot * sk(jVec) * rotT, so each block reduces to
-    // R * (local sandwich) * R^T, which we accumulate per sample and apply once after the loop.
+    // R * (local sandwich) * R^T, which we sum over the contact points and rotate once.
 
     // Fetch the collider's world-from-local rotation and precompute the actor COM in the collider's
     // local frame.
-    auto const& colliderTransform =
-        reg.get<CRootTransform const>(collision.colliderEntity).worldFromLocalPrev;
+    auto const& colliderTransform = GetRootTransform<GetTimeStep<kGradTarget>()>(
+        reg, collision.colliderEntity, reg.get<CRootTransform const>(collision.colliderEntity));
     auto const trans = colliderTransform.VGetTranslation();
     auto const [rot, rotT] = ToVMatrix3x3_WithTranspose(colliderTransform.GetRotation());
     auto const comColliderSpace = DotVecMat3x3(com - trans, rot);
 
-    // Gradient and Hessian accumulation terms for this collider
-    Vec4r res = {};
-    Vec4r skJRes = {};
-    VMatrix3x3r dres = {};
-    VMatrix3x3r dresSkJ = {};
-    VMatrix3x3r skJDresSkJ = {};
-
-    for (int i = 0; i < numPoints; ++i) {
-      // Get weight of the contact sample
-      int const sampleIndex = contactQuery.sampleIndices[i];
-      real const weight = sample.weights[sampleIndex];
-
-      // Get contact position in collider's local frame
-      auto posColliding = ToSimd(GetCollidingPosition<GetTimeStep<kGradTarget>()>(contactQuery, i));
-
-      // Accumulate energy
-      if (assemEnergy) {
-        *outEnergy += collisionResponse.energy[i] * weight;
-      }
-
-      // Compute local lever arm from COM
-      auto const jVec = posColliding - comColliderSpace;
-
-      // Accumulate gradient terms
-      if (assemGradient) {
-        Vec4r collRes = weight * ToSimd(collisionResponse.force[i]);
-        res += collRes;
-        skJRes += Cross3(jVec, collRes);
-      }
-
-      // Accumulate hessian terms
-      if (assemHessian) {
-        VMatrix3x3r collDres = weight * collisionResponse.dforce[i];
-        dres += collDres;
-        VMatrix3x3r collSkJ = Skew3(jVec);
-        VMatrix3x3r collDresSkJ = Dot3x3(collDres, collSkJ);
-        dresSkJ += collDresSkJ;
-        skJDresSkJ += Dot3x3(collSkJ, collDresSkJ);
-      }
+    if (storeForces) {
+      contactQuery.forcePerUnitArea.resize_noinit(numPoints);
+    }
+    RigidContactSums const sums = ComputeRigidContactSums<kGradTarget>(
+        Interval<int>{0, numPoints},
+        contactQuery,
+        contactParams,
+        config,
+        dtStage,
+        sample.weights,
+        comColliderSpace,
+        assemEnergy,
+        assemGradient,
+        assemHessian,
+        storeForces ? MakeSpan(contactQuery.forcePerUnitArea) : Span<Real3>{});
+    if (assemEnergy) {
+      *outEnergy += sums.energy;
     }
 
-    // Rotate the per-collider local-frame accumulators into world frame (R * _ * R^T for
-    // matrices, R * _ for vectors) and accumulate into the actor's gradient/Hessian.
+    // Rotate the per-collider local-frame sums into world frame (R * _ * R^T for matrices, R * _
+    // for vectors) and accumulate into the actor's gradient/Hessian.
     if (assemGradient) {
-      outGradientCom -= DotVecMat3x3(res, rotT);
-      outGradientRot -= DotVecMat3x3(skJRes, rotT);
+      outGradientCom -= DotVecMat3x3(sums.force, rotT);
+      outGradientRot -= DotVecMat3x3(sums.torque, rotT);
     }
 
     if (assemHessian) {
-      outHessianCom -= Dot3x3(rot, Dot3x3(dres, rotT));
-      outHessianRot += Dot3x3(rot, Dot3x3(skJDresSkJ, rotT));
-      outHessianMix += Dot3x3(rot, Dot3x3(dresSkJ, rotT));
-    }
-
-    // Optionally store data for queries
-    if (assemGradient && queryActiveContacts) {
-      contactQuery.forcePerUnitArea = collisionResponse.force;
+      // The Hessian requires GradTarget::Current, whose force derivatives are symmetric, so the
+      // Hessian is symmetric and outHessianMix accumulates its rot-trans block, -sum(sk(jVec) w D).
+      outHessianCom -= Dot3x3(rot, Dot3x3(sums.dForce, rotT));
+      outHessianRot += Dot3x3(rot, Dot3x3(sums.skewDForceSkew, rotT));
+      outHessianMix -= Dot3x3(Dot3x3(rot, sums.skewDForce), rotT);
     }
   }
 
@@ -248,33 +209,15 @@ static void AssembleRigidBodyAsyncContactResponse(
     StoreSubmatrix<RigidSize::kDRot, RigidSize::kDRot, RigidSize::kDAll, RigidSize::kDAll>(
         *outHessian, Int2{RigidSize::kDTrans, RigidSize::kDTrans}, outHessianRot);
     StoreSubmatrix<RigidSize::kDTrans, RigidSize::kDRot, RigidSize::kDAll, RigidSize::kDAll>(
-        *outHessian, Int2{0, RigidSize::kDTrans}, outHessianMix);
+        *outHessian, Int2{0, RigidSize::kDTrans}, Transpose3x3(outHessianMix));
     StoreSubmatrix<RigidSize::kDRot, RigidSize::kDTrans, RigidSize::kDAll, RigidSize::kDAll>(
-        *outHessian, Int2{RigidSize::kDTrans, 0}, Transpose3x3(outHessianMix));
+        *outHessian, Int2{RigidSize::kDTrans, 0}, outHessianMix);
   }
 }
 
 /*****************************************************************************************************
   ECS Dynamic Rigid-body Actor Utils
 */
-
-static void ComputePoseAtStepStart(
-    CTimeIntegratorState const& intState,
-    CRigidState<TimeStep::Previous> const& prevPose,
-    CIntegrationRigidStates& intPoses) {
-  // Pose is a differential variable. Use integration utilities to compute its value at the
-  // beginning of the step.
-  integration::ApplyTimeIntegrationStepStart(intState, intPoses, prevPose, intPoses.stepStart);
-}
-
-void mochi::rigid::ComputeVelocityAtStepStart(
-    CTimeIntegratorState const& intState,
-    CRigidVel<TimeStep::Previous> const& prevVel,
-    CIntegrationRigidVels& intVels) {
-  // Velocity is a differential variable. Use integration utilities to compute its value at the
-  // beginning of the step.
-  integration::ApplyTimeIntegrationStepStart(intState, intVels, prevVel, intVels.stepStart);
-}
 
 static void ComputePoseAtStageStart(
     CTimeIntegratorState const& intState,
@@ -358,7 +301,7 @@ static void HandleSolverDivergence(
   }
 }
 
-MOCHI_API void mochi::rigid::EntityIncrementStep(
+void mochi::rigid::EntityIncrementStep(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CRigidState<TimeStep::Current> const& currPose,
@@ -374,7 +317,31 @@ MOCHI_API void mochi::rigid::EntityIncrementStep(
   currVel.value.SetZero();
 }
 
-MOCHI_API void mochi::rigid::EntityPreFirstStage(
+void mochi::rigid::EntityReconstructPreviousStep(
+    ecs::Included<TagRigidActor>,
+    ecs::Excluded<TagArticulatedLinkActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CRigidBodyInertia const& rigidInertia,
+    CRigidState<TimeStep::Current> const& currPose,
+    CRigidVel<TimeStep::Current> const& currVel,
+    CIntegrationRigidStates const& intPoses,
+    CIntegrationRigidVels const& intVels,
+    CRigidState<TimeStep::Previous>& outPrevPose,
+    CRigidVel<TimeStep::Previous>& outPrevVel,
+    CRootTransform& outRootTransform) {
+  // Transform and velocity are both differential variables.
+  auto const method = simParams->integrationMethod;
+  integration::ReconstructPreviousPoseFromHistoryOrExtrapolate(
+      method, time.value, intPoses, currPose, currVel, outPrevPose);
+  integration::ReconstructPreviousVelocityFromHistoryOrCopy(method, intVels, currVel, outPrevVel);
+
+  // Keep worldFromLocalPrev root-transform consistent.
+  RigidStateToRootTransform(
+      rigidInertia.GetCenterOfMassLocal(), outPrevPose.value, outRootTransform.worldFromLocalPrev);
+}
+
+void mochi::rigid::EntityPreFirstStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CTimeIntegratorState const& intState,
@@ -383,11 +350,11 @@ MOCHI_API void mochi::rigid::EntityPreFirstStage(
     CIntegrationRigidStates& intPoses,
     CIntegrationRigidVels& intVels) {
   MOCHI_PROFILE_SCOPE();
-  ComputePoseAtStepStart(intState, prevPose, intPoses);
-  ComputeVelocityAtStepStart(intState, prevVel, intVels);
+  integration::ApplyTimeIntegrationStepStart(intState, intPoses, prevPose, intPoses.stepStart);
+  integration::ApplyTimeIntegrationStepStart(intState, intVels, prevVel, intVels.stepStart);
 }
 
-MOCHI_API void mochi::rigid::EntityPreStage(
+void mochi::rigid::EntityPreStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CRigidBodyInertia const& rigidInertia,
@@ -404,7 +371,7 @@ MOCHI_API void mochi::rigid::EntityPreStage(
   ComputeVelocityAtStageStart(intState, intVels, stageStartVel);
 }
 
-MOCHI_API void mochi::rigid::EntityPostStage(
+void mochi::rigid::EntityPostStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CConvergenceStatus const& convergence,
@@ -430,7 +397,7 @@ MOCHI_API void mochi::rigid::EntityPostStage(
   intVels.stages[intState.currentStage].value = currVel.value;
 }
 
-MOCHI_API void mochi::rigid::EntityPostLastStage(
+void mochi::rigid::EntityPostLastStage(
     ecs::Included<TagRigidActor>,
     ecs::Excluded<TagArticulatedLinkActor>,
     CRigidBodyInertia const& rigidInertia,
@@ -454,36 +421,40 @@ void rigid::SetupCollidingJacobiansImpl(
     CDofOffset const& dofOffset,
     CContactSamples<TimeStep::Current> const& samples,
     CCollJacs<CollRole::Colliding>& outJacobians,
-    MatrixView<real const> jacAux,
-    Span<int const> dofsAux) {
+    ContactJac::AuxView jacAux,
+    Span<int const> dofsAux,
+    int internalDofOffset) {
   MOCHI_PROFILE_SCOPE();
 
-  // Create sync-rigid differentiable map, shared by all Jacobians
-  DMapSyncRigid dsyncRigid(0, dofOffset.dofsOffset, jacAux, dofsAux);
-  DMap<DMapSyncRigid> dmapSyncRigid(&dsyncRigid);
+  // Create rigid-structure differentiable map, shared by all Jacobians
+  DMapRigidStructure drigidStructure(0, dofOffset.dofsOffset);
+  DMap<DMapRigidStructure> dmapRigidStructure(&drigidStructure);
 
   // Compute Jacobians
   for (auto& jac : outJacobians) {
-    if (jac.type == ContactType::Sync) {
-      auto& jacs = *jac.jacs;
-      if (jac.bothRigid) {
-        dmapSyncRigid.GetJac(jac.query->sampleIndices, jacs);
-      } else {
-        // Create regular differentiable map
-        DMapRTInput dtransform(
-            0,
-            state,
-            transform,
-            dofOffset.dofsOffset,
-            samples.positions,
-            jac.query->jacColliderFromWorld,
-            jacAux,
-            dofsAux);
-        DMap<DMapRTInput> dmap(&dtransform);
-        dmap.GetJac(jac.query->sampleIndices, jacs);
-      }
-      jacs[0].CompressIndices();
+    // Pairs without contacts keep their invalidated, inactive slices.
+    if (!jac.isSync || jac.query->sampleIndices.empty()) {
+      continue;
     }
+    auto jacs = jac.PrepareJacs(1);
+    if (jac.useContactSums) {
+      dmapRigidStructure.GetJac(jac.query->sampleIndices, jacs);
+    } else {
+      // Create regular differentiable map
+      DMapRTInput dtransform(
+          0,
+          state,
+          transform,
+          dofOffset.dofsOffset,
+          samples.positions,
+          jac.query->jacColliderFromWorld);
+      DMap<DMapRTInput> dmap(&dtransform);
+      dmap.GetJac(jac.query->sampleIndices, jacs);
+    }
+    if (jacAux) {
+      jacs[0].SetJacAux(jacAux, dofOffset.dofsOffset, dofsAux, internalDofOffset);
+    }
+    jacs[0].CompressIndices();
   }
 }
 
@@ -492,37 +463,40 @@ void rigid::SetupColliderJacobiansImpl(
     CDofOffset const& dofOffset,
     CRigidBodyInertia const& rigidInertia,
     CCollJacs<CollRole::Collider>& outJacobians,
-    MatrixView<real const> jacAux,
-    Span<int const> dofsAux) {
+    ContactJac::AuxView jacAux,
+    Span<int const> dofsAux,
+    int internalDofOffset) {
   MOCHI_PROFILE_SCOPE();
 
   // Create differentiable maps
-  DMapRTOutput dtransform(
-      0, state, dofOffset.dofsOffset, rigidInertia.GetCenterOfMassLocal(), jacAux, dofsAux);
+  DMapRTOutput dtransform(0, state, dofOffset.dofsOffset, rigidInertia.GetCenterOfMassLocal());
   DMap<DMapRTOutput> dmap(&dtransform);
-  DMapSyncRigid dsyncRigid(0, dofOffset.dofsOffset, jacAux, dofsAux);
-  DMap<DMapSyncRigid> dmapSyncRigid(&dsyncRigid);
+  DMapRigidStructure drigidStructure(0, dofOffset.dofsOffset);
+  DMap<DMapRigidStructure> dmapRigidStructure(&drigidStructure);
 
   // Compute Jacobians
   for (auto& jac : outJacobians) {
-    auto& jacs = *jac.jacs;
-    if (jac.bothRigid) {
-      dmapSyncRigid.GetJac(jac.query->sampleIndices, jacs);
+    auto jacs = jac.PrepareJacs(1);
+    if (jac.useContactSums) {
+      dmapRigidStructure.GetJac(jac.query->sampleIndices, jacs);
     } else {
       dtransform.SetData(jac.query);
       dmap.GetJac({}, jacs);
+    }
+    if (jacAux) {
+      jacs[0].SetJacAux(jacAux, dofOffset.dofsOffset, dofsAux, internalDofOffset);
     }
     jacs[0].CompressIndices();
   }
 }
 
-template <ContactType kContactType>
+template <bool kIsSync>
 void mochi::rigid::SetupActiveCollisionNormals(
     ecs::RequiredTag<TagRigidActor>,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     CContactSamples<TimeStep::Current> const& samples,
     CRootTransform const& transform,
-    CActiveCollisions<kContactType, TimeStep::Current>& activeCollisions) {
+    CActiveCollisions<kIsSync, TimeStep::Current>& activeCollisions) {
   MOCHI_PROFILE_SCOPE();
 
   MOCHI_ASSERT_VERBOSE(
@@ -563,15 +537,15 @@ void mochi::rigid::SetupActiveCollisionNormals(
   }
 }
 
-#define MOCHI_SPECIALIZE_SETUP_ACTIVE_COLLISIONS_KINEMATICS(contactType) \
-  template void mochi::rigid::SetupActiveCollisionNormals<contactType>(  \
-      ecs::RequiredTag<TagRigidActor>,                                   \
-      ecs::CtxGlobal<CSimulationParams const>,                           \
-      CContactSamples<TimeStep::Current> const&,                         \
-      CRootTransform const&,                                             \
-      CActiveCollisions<contactType, TimeStep::Current>&);
-MOCHI_SPECIALIZE_SETUP_ACTIVE_COLLISIONS_KINEMATICS(ContactType::Sync);
-MOCHI_SPECIALIZE_SETUP_ACTIVE_COLLISIONS_KINEMATICS(ContactType::Async);
+#define MOCHI_SPECIALIZE_SETUP_ACTIVE_COLLISIONS_KINEMATICS(isSync) \
+  template void mochi::rigid::SetupActiveCollisionNormals<isSync>(  \
+      ecs::RequiredTag<TagRigidActor>,                              \
+      ecs::CtxGlobal<CSimulationParams const>,                      \
+      CContactSamples<TimeStep::Current> const&,                    \
+      CRootTransform const&,                                        \
+      CActiveCollisions<isSync, TimeStep::Current>&);
+MOCHI_SPECIALIZE_SETUP_ACTIVE_COLLISIONS_KINEMATICS(/*kIsSync*/ true);
+MOCHI_SPECIALIZE_SETUP_ACTIVE_COLLISIONS_KINEMATICS(/*kIsSync*/ false);
 #undef MOCHI_SPECIALIZE_SETUP_ACTIVE_COLLISIONS_KINEMATICS
 
 static void EntityPostNewSolutionImpl(
@@ -650,7 +624,7 @@ void mochi::rigid::EntityAssemble(
     CExternalForces const& externalForces,
     CColliderInfo const& colliderInfo,
     CContactSamples<TimeStep::Current> const* contactSample,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>* activeCollisions) {
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>* activeCollisions) {
   MOCHI_PROFILE_SCOPE();
 
   // If this is an input grad target, all we need to do is resize the residual to 0
@@ -671,10 +645,14 @@ void mochi::rigid::EntityAssemble(
   RigidHessian* hessian = params.assemDRes ? &tempHessian : nullptr;
 
   // Compute async contact term first. It assumes that energy starts at zero.
-  bool bContactEnabled = hasContactTag && activeCollisions && !activeCollisions->empty() &&
-      IsAssemblyNeeded(StateDependency::FirstOrder, false /*inputDependency*/, gradTarget);
+  bool bContactEnabled = hasContactTag && activeCollisions &&
+      IsAssemblyNeeded(StateDependency::FirstOrder, false /*inputDependency*/, gradTarget) &&
+      activeCollisions->HasContact();
   if (bContactEnabled) {
     MOCHI_ASSERT_VERBOSE(contactSample, "Contact sample must exist for contact.");
+    MOCHI_ASSERT(
+        gradTarget == GradTarget::Current || !params.assemDRes,
+        "The contact DResidual only supports GradTarget::Current.");
     ContactEvalConfig config{
         .psdDRes = params.psdDRes,
         .addPadding = ShouldAddPenaltyPadding(colliderInfo.type),
@@ -708,7 +686,12 @@ void mochi::rigid::EntityAssemble(
   if (hasGravityTag &&
       IsAssemblyNeeded(StateDependency::ZeroOrder, false /*inputDependency*/, gradTarget)) {
     AddRigidBodyGravity(
-        currPose.value, rigidInertia, ToReal3(sceneGravity->accel), energy, gradient);
+        currPose.value,
+        stageStartPose.value,
+        rigidInertia,
+        ToReal3(sceneGravity->accel),
+        energy,
+        gradient);
   }
 
   // Compute inertial terms
@@ -785,6 +768,27 @@ void mochi::rigid::EntityAssemble(
   }
 }
 
+// Expands the caller-specified moment of inertia (upper triangle) into a full symmetric tensor.
+static VMatrix3x3r UserMomentOfInertia(RigidActorParams const& params, Error& error) {
+  MOCHI_ASSERT_VERBOSE(params.momentOfInertia.has_value(), "Expected a moment of inertia.");
+  Real6 const& inI = *params.momentOfInertia;
+  MOCHI_ERROR_IF_NOT(
+      IsFinite(inI),
+      error,
+      "Unable to create dynamic rigid actor. Moment-of-inertia tensor must be finite.");
+  MOCHI_ERROR_RETURN(error, {});
+  if (!IsMomentOfInertiaValid(inI)) {
+    MOCHI_LOG_WARNING(
+        "Moment-of-inertia tensor of rigid actor \"%s\" is not physically valid: principal moments must be non-negative and satisfy the triangle inequality.",
+        params.name.c_str());
+  }
+  return VMatrix3x3r{
+      Vec4r{inI[0], inI[1], inI[2]}, // ixx, ixy, ixz
+      Vec4r{inI[1], inI[3], inI[4]}, // ixy, iyy, iyz
+      Vec4r{inI[2], inI[4], inI[5]}, // ixz, iyz, izz
+  };
+}
+
 // Called at the end of InitRigidActor if the actor is dynamic (not static)
 static void InitRigidActor_Dynamic(
     entt::registry& reg,
@@ -810,15 +814,20 @@ static void InitRigidActor_Dynamic(
   reg.emplace<CConvergenceStatus>(e);
 
   // Surface discretization
-  std::unique_ptr<CFemSurfaceDiscretization> surfDiscr =
-      nullptr; // Temporary for initialization. Not stored as component to reduce memory footprint.
   std::shared_ptr<TriangularMesh const> boundaryMesh;
   if (meshComponent) {
     boundaryMesh = meshComponent->mesh;
+    bool hasZeroAreaTriangle = false;
+    for (int i = 0; i < boundaryMesh->GetNumElements(); ++i) {
+      hasZeroAreaTriangle |= boundaryMesh->GetElementMeasure(i) == 0_r;
+    }
+    MOCHI_ERROR_IF(
+        hasZeroAreaTriangle,
+        error,
+        "Unable to create dynamic rigid actor. The shape mesh has a zero-area triangle.");
+    MOCHI_ERROR_RETURN(error);
     reg.emplace<CFemSurfaceDiscretizationLite>(
         e, CFemSurfaceDiscretizationLite::Create(params.boundaryElementType, *boundaryMesh));
-    surfDiscr = std::make_unique<CFemSurfaceDiscretization>(
-        CFemSurfaceDiscretization::Create(params.boundaryElementType, *boundaryMesh));
   }
 
   // Center-of-mass (if there is mass)
@@ -835,15 +844,15 @@ static void InitRigidActor_Dynamic(
   if (shapePtr) {
     // Get or compute volume
     std::optional<real> volume = shapePtr->GetVolume();
-    if (!volume && surfDiscr) {
-      // Compute volume by computing the mass with a density of 1.
-      // If we do this, then store the center-of-mass for later use.
-      surfDiscr->Visit([&](auto const& discrImpl) {
-        comLocal = Vec4r{};
-        volume = 0_r;
-        ComputeCenterOfMassFem(
-            MakeConstSpan(discrImpl.femElements), /*density*/ 1_r, *comLocal, *volume);
-      });
+    if (!volume && boundaryMesh) {
+      // Compute the volume, and store the center-of-mass for later use.
+      comLocal = Vec4r{};
+      volume = 0_r;
+      ComputeVolumeAndCentroid(
+          boundaryMesh->GetNodeCoordinates(),
+          boundaryMesh->GetElementConnectivity(),
+          *comLocal,
+          *volume);
     }
     MOCHI_ERROR_IF(
         !volume.has_value() || (*volume <= 0_r),
@@ -895,47 +904,25 @@ static void InitRigidActor_Dynamic(
       comLocal = ToSimd(*params.centerOfMass);
     } else if (comLocal) {
       // Already computed (see above)
-    } else if (auto center = shapePtr->GetCentroid()) {
-      // Already computed by the Shape
-      comLocal = ToSimd(*center);
-    } else if (surfDiscr) {
-      // Compute the center-of-mass (density does not matter for this).
-      surfDiscr->Visit([&](auto const& discrImpl) {
-        comLocal = Vec4r{};
-        real massIgnored = 0_r;
-        ComputeCenterOfMassFem(
-            MakeConstSpan(discrImpl.femElements), /*density*/ 1_r, *comLocal, massIgnored);
-      });
     } else {
-      MOCHI_ERROR_SET(error, "Cannot create dynamic rigid actor. Center-of-mass unknown.");
-      return;
+      // Already computed by the Shape, which reported the volume
+      auto const center = shapePtr->GetCentroid();
+      MOCHI_ASSERT_VERBOSE(center.has_value(), "Shapes report their volume and centroid together.");
+      comLocal = ToSimd(*center);
     }
 
     // Compute moment of inertia.
     VMatrix3x3r moi;
     if (params.momentOfInertia) {
-      Real6 const& inI = *params.momentOfInertia;
-      MOCHI_ERROR_IF_NOT(
-          IsFinite(inI),
-          error,
-          "Unable to create dynamic rigid actor. Moment-of-inertia tensor must be finite.");
+      moi = UserMomentOfInertia(params, error);
       MOCHI_ERROR_RETURN(error);
-      if (!IsMomentOfInertiaValid(inI)) {
-        MOCHI_LOG_WARNING(
-            "Moment-of-inertia tensor of rigid actor \"%s\" is not physically valid: principal moments must be non-negative and satisfy the triangle inequality.",
-            params.name.c_str());
-      }
-      moi = VMatrix3x3r{
-          Vec4r{inI[0], inI[1], inI[2]}, // ixx, ixy, ixz
-          Vec4r{inI[1], inI[3], inI[4]}, // ixy, iyy, iyz
-          Vec4r{inI[2], inI[4], inI[5]}, // ixz, iyz, izz
-      };
-    } else if (surfDiscr) {
-      surfDiscr->Visit([&](auto const& discrImpl) {
-        auto moiTwo = ComputeSecondMomentOfInertiaFem(
-            MakeConstSpan(discrImpl.femElements), *density, *comLocal);
-        moi = SecondMomentToMomentOfInertia(moiTwo);
-      });
+    } else if (boundaryMesh) {
+      auto moiTwo = ComputeSecondMomentOfInertia(
+          boundaryMesh->GetNodeCoordinates(),
+          boundaryMesh->GetElementConnectivity(),
+          *density,
+          *comLocal);
+      moi = SecondMomentToMomentOfInertia(moiTwo);
     } else {
       MOCHI_ERROR_SET(error, "Cannot create dynamic rigid actor. Moment-of-inertia unknown.");
       return;
@@ -949,11 +936,27 @@ static void InitRigidActor_Dynamic(
     if (params.hasGravity) {
       reg.emplace<TagUseGravity>(e);
     }
+  } else if (
+      params.mass.has_value() && *params.mass > 0_r && params.centerOfMass.has_value() &&
+      params.momentOfInertia.has_value()) {
+    // A shapeless articulated link with explicit inertia. It has no volume, so no density.
+    MOCHI_ERROR_IF_NOT(
+        IsFinite(*params.mass) && IsFinite(*params.centerOfMass),
+        error,
+        "Unable to create dynamic rigid actor. Mass and center of mass must be finite.");
+    MOCHI_ERROR_RETURN(error);
+    VMatrix3x3r const moi = UserMomentOfInertia(params, error);
+    MOCHI_ERROR_RETURN(error);
+    reg.emplace<CRigidBodyInertia>(e, ToSimd(*params.centerOfMass), moi, *params.mass);
+    reg.emplace<TagUseInertia>(e);
+    if (params.hasGravity) {
+      reg.emplace<TagUseGravity>(e);
+    }
   } else {
-    // This actor has no shape. It must be a dummy link in an articulated actor. Such actors have no
-    // volume, nor mass. However, systems elsewhere still expect it to have CRigidBodyInertia, even
-    // though all the values will be zero. TODO: Remove this requirement.
-    reg.emplace<CRigidBodyInertia>(e);
+    // This actor has no shape and no explicit inertia. It must be a massless dummy link in an
+    // articulated actor. Systems elsewhere still expect it to have CRigidBodyInertia, even though
+    // all the values will be zero. TODO: Remove this requirement.
+    reg.emplace<CRigidBodyInertia>(e, Vec4r{}, VMatrix3x3r{}, 0_r);
   }
 
   // Scaled time step
@@ -1005,13 +1008,16 @@ static void InitRigidActor_Dynamic(
 
   // Components to detect and compute contact against other actors
   if (useContact) {
-    MOCHI_ASSERT(surfDiscr, "Surface discretization is missing.");
+    MOCHI_ASSERT(boundaryMesh, "Surface mesh is missing.");
     reg.emplace<TagUseContact>(e);
+
+    // Temporary for initialization. Not stored as component to reduce memory footprint.
+    auto const surfDiscr =
+        CFemSurfaceDiscretization::Create(params.boundaryElementType, *boundaryMesh);
 
     // Active boundary faces.
     CActiveBoundaryFaces* activeBoundaryFaces = nullptr;
     if (params.boundarySubsampling) {
-      MOCHI_ERROR_IF_NOT(boundaryMesh, error, "A boundary mesh is required for hyper-reduction.");
       MOCHI_ERROR_IF_NOT(
           params.boundarySubsampling->subsamplingDensity >= 0_r &&
               params.boundarySubsampling->subsamplingDensity <= 1_r,
@@ -1020,14 +1026,14 @@ static void InitRigidActor_Dynamic(
       MOCHI_ERROR_RETURN(error);
       if (params.boundarySubsampling->subsamplingDensity < 1_r) {
         activeBoundaryFaces = &reg.emplace<CActiveBoundaryFaces>(
-            e, CreateActiveBoundaryFaces(*params.boundarySubsampling, boundaryMesh, *surfDiscr));
+            e, CreateActiveBoundaryFaces(*params.boundarySubsampling, boundaryMesh, surfDiscr));
       }
     }
 
     // Initialize contact sample with respect to the root transform.
-    int const numSamples = surfDiscr->GetNumQuadPoints();
+    int const numSamples = surfDiscr.GetNumQuadPoints();
     auto& contactSamples = reg.emplace<CContactSamples<TimeStep::Current>>(e, numSamples);
-    surfDiscr->Visit([&](auto& discrImpl) {
+    surfDiscr.Visit([&](auto& discrImpl) {
       constexpr int kNumQuadsPerFace = std::decay_t<decltype(discrImpl)>::kNumQuads;
       int const numBoundFaces = boundaryMesh->GetNumElements();
 
@@ -1042,11 +1048,11 @@ static void InitRigidActor_Dynamic(
       for (int i = 0; i < numBoundFaces; ++i) {
         bool const storePointAsActive = activeBoundaryFaces && activeBoundaryFaces->Contains(i);
         auto& posLocalQuads = discrImpl.femElements[i].mapEvaluated;
-        auto& normalLocalQuads = discrImpl.femElements[i].normals;
+        Real3 const normalLocal = discrImpl.femElements[i].Normal();
         for (int j = 0; j < kNumQuadsPerFace; ++j) {
           contactSamples.positions[count] = posLocalQuads[j];
           contactSamples.weights[count] = discrImpl.femElements[i].quadWeights[j];
-          (*contactSamples.normals)[count] = normalLocalQuads[j];
+          (*contactSamples.normals)[count] = normalLocal;
           if (storePointAsActive) {
             contactSamples.activePositions.push_back(posLocalQuads[j]);
             contactSamples.activeIndices.push_back(count);
@@ -1055,23 +1061,32 @@ static void InitRigidActor_Dynamic(
         }
       }
 
-      // Create BSH tree to accelerate collision detection.
-      contactSamples.bsh = activeBoundaryFaces ? MakeConstSpan(contactSamples.activePositions)
-                                               : MakeConstSpan(contactSamples.positions);
+      // Create SphereTree to accelerate collision detection.
+      // Increasing kMaxSamplePointsPerLeaf makes the spatial partitioning faster/coarser.
+      // Decreasing it makes the partitioning slower/finer. Do not decrease it too much because we
+      // don't want to have leaf nodes with only one point (might as well test the point not the
+      // sphere).
+      int constexpr kMaxSamplePointsPerLeaf = 16;
+      auto const samplePoints = activeBoundaryFaces ? MakeConstSpan(contactSamples.activePositions)
+                                                    : MakeConstSpan(contactSamples.positions);
+      contactSamples.bsh = SphereOctTree::FromPoints(samplePoints, kMaxSamplePointsPerLeaf);
+#if MOCHI_DEBUG && MOCHI_ASSERT_ENABLED
+      contactSamples.bsh->AssertTreeIsValid(samplePoints);
+#endif
     });
 
     // Emplace helper component to map stage-start and current contact results
-    reg.emplace<CContactCorrespondence<ContactType::Async>>(e, numSamples);
-    reg.emplace<CContactCorrespondence<ContactType::Sync>>(e, numSamples);
+    reg.emplace<CContactCorrespondence</*kIsSync*/ false>>(e, numSamples);
+    reg.emplace<CContactCorrespondence</*kIsSync*/ true>>(e, numSamples);
 
-    reg.emplace<CConservativePotentialColliders<ContactType::Async>>(e);
-    reg.emplace<CConservativePotentialColliders<ContactType::Sync>>(e);
-    reg.emplace<CPotentialColliders<ContactType::Async>>(e);
-    reg.emplace<CPotentialColliders<ContactType::Sync>>(e);
-    reg.emplace<CActiveCollisions<ContactType::Async, TimeStep::Current>>(e);
-    reg.emplace<CActiveCollisions<ContactType::Async, TimeStep::StageStart>>(e);
-    reg.emplace<CActiveCollisions<ContactType::Sync, TimeStep::Current>>(e);
-    reg.emplace<CActiveCollisions<ContactType::Sync, TimeStep::StageStart>>(e);
+    reg.emplace<CConservativePotentialColliders</*kIsSync*/ false>>(e);
+    reg.emplace<CConservativePotentialColliders</*kIsSync*/ true>>(e);
+    reg.emplace<CPotentialColliders</*kIsSync*/ false>>(e);
+    reg.emplace<CPotentialColliders</*kIsSync*/ true>>(e);
+    reg.emplace<CActiveCollisions</*kIsSync*/ false, TimeStep::Current>>(e, /*numPartitions*/ 1);
+    reg.emplace<CActiveCollisions</*kIsSync*/ false, TimeStep::StageStart>>(e, /*numPartitions*/ 1);
+    reg.emplace<CActiveCollisions</*kIsSync*/ true, TimeStep::Current>>(e, /*numPartitions*/ 1);
+    reg.emplace<CActiveCollisions</*kIsSync*/ true, TimeStep::StageStart>>(e, /*numPartitions*/ 1);
     reg.emplace<CCollJacs<CollRole::Colliding>>(e);
   }
 
@@ -1083,9 +1098,6 @@ static void InitRigidActor_Dynamic(
   auto& dofInfo = reg.emplace<CActorDofInfo>(e);
   dofInfo.poseSize = RigidSize::kAll;
   dofInfo.dofsSize = RigidSize::kDAll;
-
-  // Sparsity pattern
-  reg.emplace<CFullSparsityPattern>(e, MakeDenseSparsityGraph(dofInfo.dofsSize, dofInfo.dofsSize));
 
   // Per-actor SNLE data
   reg.emplace<CActorSnle>(
@@ -1201,10 +1213,10 @@ void mochi::InitRigidActor(
         } else if (auto* bvObb = std::get_if<Obb>(&bv)) {
           // Use the sphere that inscribes the box. It should be a good match for the mesh, if the
           // mesh really is in the approximate shape of a sphere
-          sphereColl.shape = Sphere{bvObb->GetCenter(), bvObb->GetHalfExtents()[0]};
+          sphereColl.shape = Sphere{bvObb->GetCenter(), Min(bvObb->GetHalfExtents())};
         } else if (auto* bvAabb = std::get_if<Aabb>(&bv)) {
           // Similarly, use the sphere that inscribes the AABB.
-          sphereColl.shape = Sphere{bvAabb->GetCenter(), bvAabb->GetHalfExtents()[0]};
+          sphereColl.shape = Sphere{bvAabb->GetCenter(), Min(bvAabb->GetHalfExtents())};
         } else {
           // Fallback: Just wrap the shape in a sphere. Expand bv to make sure it is large enough
           // to contain both.
@@ -1251,7 +1263,8 @@ void mochi::InitRigidActor(
 
           // Get or request the GridSdf.
           bool isPending = false;
-          sdfCollider.shape = gridSdfShape->RequestGridSdf(gridSdfParams, &isPending);
+          sdfCollider.shape = gridSdfShape->RequestGridSdf(gridSdfParams, &isPending, error);
+          MOCHI_ERROR_RETURN(error);
 
           // If the GridSdf is being computed asynchronously, then add a component.
           // We will wait for completion before the next simulation step.
@@ -1282,9 +1295,8 @@ void mochi::InitRigidActor(
     MOCHI_ERROR_RETURN(error);
   }
 
-  // This bounding volume contains all nodes of the mesh and the shape of the collider.
-  reg.emplace<CBoundingVolume<TimeStep::Current>>(e, bv);
-  reg.emplace<CBoundingVolume<TimeStep::Previous>>(e, bv);
+  // This bounding volume contains all active nodes of the mesh and the shape of the collider.
+  reg.emplace<CBoundingVolume>(e, bv);
 
   // Rigid velocity component
   auto& rigidVelocity = reg.emplace<CPrevRigidVelocity>(e);
@@ -1366,6 +1378,27 @@ void mochi::rigid::UpdateVSym(
   outVel.value.UpdateVSymIfDirty(static_cast<real>(time->DeltaTime()));
 }
 
+void mochi::rigid::UpdateMaxGeometrySpeed(
+    ecs::RequiredTag<TagRigidActor>,
+    ecs::Excluded<TagStaticActor>,
+    CRigidState<TimeStep::Current> const& state,
+    CRigidVel<TimeStep::Current> const& vel,
+    CRootTransform const& transform,
+    CBoundingVolume const& bounds,
+    CConservativeStepBounds& outStepBounds) {
+  Aabb const worldAabb = GetAabb(TransformShape(transform.worldFromLocal, bounds.localShape));
+  VMatrix3x3r const rotationVelocityGradientT = vel.value.GetFiniteRotationVelocityGradientT();
+
+  Vec4r const aabbCenterOffset = worldAabb.VGetCenter() - state.value.VGetTranslation();
+  Vec4r const centerVelocity =
+      vel.value.GetVCom() + DotVecMat3x3(aabbCenterOffset, rotationVelocityGradientT);
+
+  // This bounds each velocity component over the AABB, so its norm bounds every point's speed.
+  Vec4r const velocityRadius =
+      DotVecMat3x3(worldAabb.VGetHalfExtents(), Abs(rotationVelocityGradientT));
+  outStepBounds.maxGeometrySpeed = Norm<3>(Abs(centerVelocity) + velocityRadius);
+}
+
 void mochi::rigid::TransportGradient(
     ColumnVectorView<real const> delta,
     ColumnVectorView<real> outGradient,
@@ -1389,7 +1422,9 @@ void InitializeOnce(entt::registry& reg) {
 
 real GetActorMass(entt::registry const& reg, entt::entity actor) {
   MOCHI_ASSERT(reg.all_of<TagRigidActor>(actor), "Expected rigid actor.");
-  MOCHI_ASSERT(!reg.any_of<TagStaticActor>(actor), "Cannot get mass of static actor.");
+  MOCHI_ASSERT(
+      !reg.all_of<TagStaticActor>(actor) || reg.all_of<TagArticulatedLinkActor>(actor),
+      "Cannot get mass of static actor.");
   return reg.get<CRigidBodyInertia>(actor).GetMass();
 }
 } // namespace mochi::rigid

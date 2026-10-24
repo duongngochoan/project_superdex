@@ -20,6 +20,19 @@
 
 namespace mochi::fem {
 
+// Regularization constants of the membrane collapse barrier (see ShellWork). Each saturates its
+// term once g ≳ ε^(−1/n), where n = 3, 4, 5 for the energy, residual, and tangent, respectively.
+// The residual and tangent saturate at g ≈ gMax = 2¹⁶ in single precision (2¹²⁸ in double),
+// keeping them (∝ k·gMax⁴ and k·gMax⁵) far from overflow. They can't use
+// std::numeric_limits<real>::min(): their numerators stay O(1) at collapse, so ε directly sets the
+// saturated value. The energy is accumulated in double and saturates at k·A·√DBL_MAX.
+static real constexpr kMembraneCollapseBarrierInvMaxG =
+    MOCHI_USE_DOUBLE_PRECISION ? 0x1p-128_r : 0x1p-16_r;
+static real constexpr kMembraneCollapseBarrierResEps = Sqr(Sqr(kMembraneCollapseBarrierInvMaxG));
+static real constexpr kMembraneCollapseBarrierDResEps =
+    kMembraneCollapseBarrierResEps * kMembraneCollapseBarrierInvMaxG;
+static double constexpr kMembraneCollapseBarrierEnergyEps = 0x1p-512; // ≈ 1 / √DBL_MAX
+
 /// @brief Gather 6-node bending stencil positions into batched layout.
 ///
 /// @warning Sentinel nodes (globalIdx == kSentinelIndex) are mapped to meshNodes[0], producing
@@ -59,6 +72,7 @@ bool ShellWork(
     real membraneMu,
     real bendingAlpha,
     real bendingBeta,
+    real membraneCollapseBarrierStiffness,
     bool projectPsd,
     real stiffnessDampingFactor,
     NdArray<BatchReal<kBatchSize>, kBendingStencilDofs> const* stageStartDisp) {
@@ -133,11 +147,12 @@ bool ShellWork(
 
   // When both b and db_dv are needed from curEdges, use fused function to share normals.
   bool const needCurB = (evalObj || evalRes);
-  bool const needBendingDeriv = (evalRes || evalDRes);
+  bool const needDerivs = (evalRes || evalDRes);
 
   V2x2 curB MOCHI_NO_INIT;
-  NdArray<V2x2, kBendingStencilNodes, kSpaceDim3> db_dv_edges MOCHI_NO_INIT;
-  if (needCurB && needBendingDeriv) {
+  NdArray<BatchSymMatrix2x2<kBatchSize>, kBendingStencilNodes, kSpaceDim3> db_dv_edges
+      MOCHI_NO_INIT;
+  if (needCurB && needDerivs) {
     SecondFundamentalFormAndDEdges<kBatchSize>(curEdges, curB, db_dv_edges);
   } else if (needCurB) {
     curB = SecondFundamentalForm<kBatchSize>(curEdges);
@@ -180,17 +195,81 @@ bool ShellWork(
         StaticCast<Vd>(refArea);
   }
 
-  NdArray<V2x2, kBendingStencilNodes, kSpaceDim3> db_dx MOCHI_NO_INIT;
-  NdArray<V2x2, kTriangleNodes, kSpaceDim3> da_dx MOCHI_NO_INIT;
+  NdArray<BatchSymMatrix2x2<kBatchSize>, kBendingStencilNodes, kSpaceDim3> db_dx MOCHI_NO_INIT;
+  NdArray<BatchSymMatrix2x2<kBatchSize>, kTriangleNodes, kSpaceDim3> da_dx MOCHI_NO_INIT;
   V2x2 dpsi_da MOCHI_NO_INIT;
-  if (needBendingDeriv) {
+  // Residual-only membrane stress; dpsi_da alone also drives the SVK geometric stiffness.
+  V2x2 membraneResStress MOCHI_NO_INIT;
+  if (needDerivs) {
     db_dx = DSecondFundamentalFormDx<kBatchSize>(db_dv_edges, stencilGlobalNodes);
     da_dx = DMetricDx<kBatchSize>(curPosX);
     dpsi_da = V{0.5_r} * DPsiSVK<kBatchSize>(epsilonEff, AInv, effLambda, effMu);
+    membraneResStress = dpsi_da;
+  }
+
+  // Membrane collapse barrier k·⟨g⟩³, g = tr(C⁻¹) − 2. Evaluated at the plain strain with unscaled
+  // k, so stiffness damping remains based on the SVK reference stiffness alone.
+  if (membraneCollapseBarrierStiffness > 0_r) {
+    // With mixed C = A⁻¹a = I + 2ε, g = −2 tr(adj(C)·ε) / det C. Taking adj(C) from the current
+    // metric and det C = |e₀ × e₁|² / det A from the current edges keeps g accurate both near the
+    // reference configuration (small ε) and near collapse (small C).
+    V2x2 const C = Dot(AInv, Metric<kBatchSize>(curPosX));
+    V2x2 const adjC = Transpose(Cofactor(C));
+    V const detC = NormSqr(Cross(curEdges[0], curEdges[2])) / detA;
+
+    // Normalizing by tr C, with u = det C / tr C = 1 / tr(C⁻¹) and Ĉ = adj(C) / tr C,
+    //   g = p / u,  p = max(−2 tr(adj(C)·ε) / tr C, 0) = max(1 − 2u, 0) ∈ [0, 1],
+    //   dg/da = −C⁻¹ C⁻¹ A⁻¹ = M̂ / u²,  M̂ = −Ĉ Ĉ A⁻¹,
+    // where p and M̂ stay bounded (Ĉ has unit trace) and u ≈ 1 / g → 0 near collapse. Collapse to
+    // a point (C = 0) makes p = 0/0, but u ≤ tr C / 4 gives p → 1 along every path, so p saturates
+    // wherever the tr C floor is active. This also covers padding lanes, whose outputs are unused.
+    V const trC = Trace(C);
+    V const trCFloor{std::numeric_limits<real>::min()};
+    V const invTrC = V{1_r} / Max(trC, trCFloor);
+    V const u = detC * invTrC;
+    V const p =
+        Select(trC >= trCFloor, Max(V{-2_r} * Trace(Dot(adjC, epsilon)) * invTrC, V{0_r}), V{1_r});
+    V const vK{membraneCollapseBarrierStiffness};
+
+    // The exact energy k·A·p³/u³, stress 3k·p²·M̂/u⁴, and Gauss–Newton tangent
+    // 6k·A·p/u⁵ · (M̂ : ∂a/∂x)⊗(M̂ : ∂a/∂x) diverge as u → 0. Each is regularized independently by
+    // adding a constant ε to its own power uⁿ (n = 3, 4, 5), so it saturates smoothly once
+    // g ≳ ε^(−1/n), keeping every term finite even at total collapse.
+    //
+    // NOTE: With separate ε's, the residual and tangent are deliberately NOT derivatives of the
+    // regularized energy (as in BatchDKelvinInversion). Each term is its exact value times
+    // uⁿ / (uⁿ + ε), so the force still points along the barrier gradient and the tangent stays
+    // PSD. The trade-off: the residual and tangent saturate near total collapse (g ≈ gMax), while
+    // the energy keeps growing far beyond, which helps only objective-based line searches (the
+    // default residual-norm line search never assembles the energy).
+    if (evalObj) {
+      Vd const pD = StaticCast<Vd>(p);
+      Vd const uD = StaticCast<Vd>(u);
+      *outEnergy += StaticCast<Vd>(vK * refArea) * pD * pD * pD /
+          (uD * uD * uD + Vd{kMembraneCollapseBarrierEnergyEps});
+    }
+
+    if (needDerivs) {
+      V2x2 const adjCHat = invTrC * adjC;
+      V2x2 const MHat = -Dot(Dot(adjCHat, adjCHat), AInv);
+      V const u2 = u * u;
+      V const u4 = u2 * u2;
+      if (evalRes) {
+        membraneResStress = membraneResStress +
+            (V{3_r} * vK * p * p / (u4 + V{kMembraneCollapseBarrierResEps})) * MHat;
+      }
+      if (evalDRes) {
+        AddMembraneCollapseBarrierDResidual<kBatchSize>(
+            da_dx,
+            MHat,
+            V{6_r} * vK * refArea * p / (u4 * u + V{kMembraneCollapseBarrierDResEps}),
+            *outDRes);
+      }
+    }
   }
 
   if (evalRes) {
-    AddMembraneResidual<kBatchSize>(da_dx, dpsi_da, refArea, *outRes);
+    AddMembraneResidual<kBatchSize>(da_dx, membraneResStress, refArea, *outRes);
     AddBendingResidual<kBatchSize>(db_dx, sEff, AInv, refArea, effAlpha, effBeta, *outRes);
   }
 
@@ -231,6 +310,7 @@ static_assert(kDefaultFemBatchSize != 1, "Avoid duplicate explicit instantiation
       BatchDouble<BatchSize>*,                                                   \
       NdArray<BatchReal<BatchSize>, kBendingStencilDofs>*,                       \
       NdArray<BatchReal<BatchSize>, kBendingStencilDofs * kBendingStencilDofs>*, \
+      real,                                                                      \
       real,                                                                      \
       real,                                                                      \
       real,                                                                      \

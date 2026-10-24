@@ -250,4 +250,10 @@ TEST_F(RigidActorParamsTest, InvalidParams) {
     params2.boundarySubsampling->strategy = boundarySubsamplingStrategy;
     ASSERT_EQ(nullptr, _scene->CreateRigidActor(params2, test::ExpectNotOK{}));
   }
+
+  // Mesh with a zero-area triangle
+  connectivity.emplace_back(0, 0, 1);
+  params.shape = _mochiContext->CreateTriMeshShape(
+      Flatten(MakeConstSpan(coordinates)), Flatten(MakeConstSpan(connectivity)), test::ExpectOK{});
+  ASSERT_EQ(nullptr, _scene->CreateRigidActor(params, test::ExpectNotOK{}));
 }

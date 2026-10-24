@@ -64,9 +64,6 @@ SimplicialMesh::SimplicialMesh(
   _elementBarycenters =
       CalcElementBarycenters(nodeCoordinates, elementConnectivity, numNodesPerElement);
 
-  // Aabb
-  _aabb = CalcAabb(_coordinates);
-
   // Build the adjacency list of all simplices  shared by a given node
   _nodeElementAdjacency =
       BuildSimplicialMeshAdjacency(_coordinates.size(), _connectivity, numNodesPerElement);
@@ -84,6 +81,9 @@ SimplicialMesh::SimplicialMesh(
   for (int i : _connectivity) {
     _connectivityActiveNodes.push_back(_allToActiveMap[i]);
   }
+
+  // Aabb
+  _aabb = CalcAabb(_coordinatesActiveNodes);
 
   // The remaining protected data members are initialized by the derived class because different
   // algorithms are used depending on the element type.

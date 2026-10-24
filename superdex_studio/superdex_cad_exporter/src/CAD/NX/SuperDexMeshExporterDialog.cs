@@ -209,10 +209,12 @@ namespace CADRobotExporter.CAD.NX
                     if (!string.IsNullOrEmpty(selectedFile))
                     {
                         meshFilePath = selectedFile;
-                        if (SaveMesh())
+                        if (SaveMesh(out List<string> writtenPaths))
                         {
-                            nxUI.NXMessageBox.Show(
-                                "Save Mesh", NXMessageBox.DialogType.Information, "Export complete!");
+                            CADRobotExporter.UI.ExportCompleteDialog.ShowMeshExportComplete(
+                                writtenPaths,
+                                ownerHandle: CADRobotExporter.Utilities.NativeWindowWrapper
+                                    .GetHostMainWindowHandle());
                         }
                     }
                 }
@@ -284,8 +286,9 @@ namespace CADRobotExporter.CAD.NX
             return plist;
         }
 
-        private bool SaveMesh()
+        private bool SaveMesh(out List<string> writtenPaths)
         {
+            writtenPaths = new List<string>();
             if (workPart == null)
             {
                 nxUI.NXMessageBox.Show(
@@ -442,6 +445,18 @@ namespace CADRobotExporter.CAD.NX
                         "Save Mesh",
                         NXMessageBox.DialogType.Warning,
                         "Couldn't delete temporary STEP file: \n" + ex.Message);
+                }
+            }
+
+            if (exported)
+            {
+                foreach (MeshExportOutput output in outputs)
+                {
+                    writtenPaths.Add(output.Path);
+                }
+                if (keepStepFile)
+                {
+                    writtenPaths.Add(stepPath);
                 }
             }
 

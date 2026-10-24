@@ -26,6 +26,7 @@
 #include <misc/cpp/imgui_stdlib.h>
 #include <mochi_physics/utils/mochi_prefab.h>
 #include <mochi_renderer/type_conversions.h>
+#include <picojson/picojson.h>
 #include <superdex_robotics/utils/bot_utils.h>
 #include <superdex_robotics/utils/math_utils.h>
 
@@ -34,6 +35,7 @@
 #include <cmath>
 #include <filesystem>
 #include <numbers>
+#include <span>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
@@ -480,6 +482,30 @@ bool ImGui::InputText(
     return InputText(
         label, (char*)str->c_str(), str->capacity() + 1, flags, InputTextCallback, &cb_user_data);
   }
+}
+
+bool ImGui::InputTextMultiline(
+    char const* label,
+    mochi::DynamicString* str,
+    ImVec2 const& size,
+    ImGuiInputTextFlags flags,
+    ImGuiInputTextCallback callback,
+    void* user_data) {
+  IM_ASSERT((flags & ImGuiInputTextFlags_CallbackResize) == 0);
+  flags |= ImGuiInputTextFlags_CallbackResize;
+
+  InputTextCallback_UserData cb_user_data{};
+  cb_user_data.Str = str;
+  cb_user_data.ChainCallback = callback;
+  cb_user_data.ChainCallbackUserData = user_data;
+  return InputTextMultiline(
+      label,
+      (char*)str->c_str(),
+      str->capacity() + 1,
+      size,
+      flags,
+      InputTextCallback,
+      &cb_user_data);
 }
 
 bool ImGui::NameInputWithCollisionCheck(
@@ -2400,6 +2426,31 @@ void ImGui::ItemTooltipWrapped(char const* text) {
   ImGui::EndTooltip();
 }
 
+void ImGui::ReadOnlyTextBlock(char const* id, std::string const& text, ImFont* font, int maxLines) {
+  if (font != nullptr) {
+    ImGui::PushFont(font);
+  }
+  int lineCount = 1;
+  for (char const c : text) {
+    if (c == '\n') {
+      ++lineCount;
+    }
+  }
+  float const height =
+      ImGui::GetTextLineHeight() * static_cast<float>(std::min(lineCount, maxLines)) +
+      ImGui::GetStyle().FramePadding.y * 2.0f;
+  // ReadOnly: ImGui never writes back, so pointing at the immutable string's buffer is safe.
+  ImGui::InputTextMultiline(
+      id,
+      const_cast<char*>(text.c_str()),
+      text.size() + 1,
+      ImVec2(-FLT_MIN, height),
+      ImGuiInputTextFlags_ReadOnly);
+  if (font != nullptr) {
+    ImGui::PopFont();
+  }
+}
+
 static char const* CamelCaseToDisplayName(char const* name, char* buf, int bufSize) {
   // Serialization names sometimes carry a leading underscore to sort a key first in JSON (e.g.
   // "_comment"); it is not part of the human-readable name.
@@ -2460,13 +2511,13 @@ static bool SimpleReflectionStruct_Internal(
     SimpleReflectionWidgetOverride overrideFn,
     SimpleReflectionReadOnlyPredicate readOnlyFn = nullptr);
 
-// Default-constructed instance of `typeInfo`, used to render the widget an unset optional would
-// get. Built once per type and kept for the process: the unset branch is immediate-mode, so it
-// re-runs every frame the field is visible, and the instance is never mutated (the widget is
-// disabled). Returns null if the type cannot be constructed.
-static void* GetUnsetOptionalPreview(SReflect::TypeInfo const& typeInfo) {
-  static std::unordered_map<SReflect::TypeInfo const*, void*> previews;
-  auto const [it, inserted] = previews.try_emplace(&typeInfo, nullptr);
+// Default-constructed instance of `typeInfo`, cached once per type for the process. Used both to
+// render the widget an unset optional would get, and to source the default values that drive the
+// per-field "revert to default" buttons. The instance is never mutated. Returns null if the type
+// cannot be default-constructed.
+static void* GetDefaultInstance(SReflect::TypeInfo const& typeInfo) {
+  static std::unordered_map<SReflect::TypeInfo const*, void*> instances;
+  auto const [it, inserted] = instances.try_emplace(&typeInfo, nullptr);
   if (inserted) {
     it->second = typeInfo.New();
   }
@@ -2491,6 +2542,74 @@ DragScalarField(char const* label, void* fieldPtr, char const* units, float min,
     }
   }();
   return DragScalarN(label, dataType, value, 1, 0.01f, &scalarMin, &scalarMax, fmt);
+}
+
+static std::vector<std::span<std::string const>>& ArrayLabelStack() {
+  static std::vector<std::span<std::string const>> stack;
+  return stack;
+}
+
+void ImGui::PushReflectionArrayLabels(std::span<std::string const> labels) {
+  ArrayLabelStack().push_back(labels);
+}
+
+void ImGui::PopReflectionArrayLabels() {
+  ArrayLabelStack().pop_back();
+}
+
+// A tree node with one row per element plus add / remove-last buttons, so the array can grow from
+// empty. Scalar elements take @p fieldInfo's units and range.
+static bool ResizableArrayField(
+    char const* label,
+    SReflect::ArrayTypeInfo const& arrInfo,
+    void* arrPtr,
+    SReflect::FieldTypeInfo const* fieldInfo) {
+  SReflect::TypeInfo const& elemInfo = *arrInfo._innerTypeInfo;
+  size_t const count = arrInfo.GetNumElements(arrPtr);
+  std::span<std::string const> const elemLabels =
+      ArrayLabelStack().empty() ? std::span<std::string const>{} : ArrayLabelStack().back();
+
+  bool const open = TreeNode(label, "%s (%zu)", label, count);
+  if (!elemLabels.empty() && count != elemLabels.size()) {
+    SameLine();
+    TextColored(ImVec4(1.0f, 0.65f, 0.15f, 1.0f), ICON_FA_EXCLAMATION_TRIANGLE);
+    ItemTooltipWrapped(("Expected " + std::to_string(elemLabels.size()) + " elements").c_str());
+  }
+  if (!open) {
+    return false;
+  }
+
+  using CT = SReflect::CoreType;
+  bool const isScalar = elemInfo._coreType == CT::CT_int32 || elemInfo._coreType == CT::CT_float ||
+      elemInfo._coreType == CT::CT_double;
+  bool changed = false;
+  for (size_t i = 0; i < count; ++i) {
+    std::string const elemLabel =
+        i < elemLabels.size() ? elemLabels[i] : "[" + std::to_string(i) + "]";
+    PushID(static_cast<int>(i));
+    changed |= SimpleReflectionField(
+        elemLabel.c_str(), elemInfo, arrInfo.GetElement(arrPtr, i), isScalar ? fieldInfo : nullptr);
+    PopID();
+  }
+
+  if (SmallButton(ICON_FA_PLUS)) {
+    arrInfo.SetNumElements(arrPtr, count + 1);
+    if (count > 0) {
+      elemInfo.Set(arrInfo.GetElement(arrPtr, count - 1), arrInfo.GetElement(arrPtr, count));
+    }
+    changed = true;
+  }
+  ItemTooltipWrapped("Add an element, copying the last one");
+  SameLine();
+  BeginDisabled(count == 0);
+  if (SmallButton(ICON_FA_MINUS)) {
+    arrInfo.SetNumElements(arrPtr, count - 1);
+    changed = true;
+  }
+  ItemTooltipWrapped("Remove the last element");
+  EndDisabled();
+  TreePop();
+  return changed;
 }
 
 static bool SimpleReflectionField(
@@ -2626,7 +2745,7 @@ static bool SimpleReflectionField(
           // Show the widget the value would get, greyed out, so an unset optional still reads as
           // the type it holds. Needs an instance to point at.
           BeginDisabled();
-          if (void* preview = GetUnsetOptionalPreview(*optInfo._innerTypeInfo)) {
+          if (void* preview = GetDefaultInstance(*optInfo._innerTypeInfo)) {
             SimpleReflectionField(label, *optInfo._innerTypeInfo, preview, nullptr);
           } else {
             TextDisabled("%s (unset)", label);
@@ -2649,6 +2768,10 @@ static bool SimpleReflectionField(
       }
       case SReflect::CoreType::CT_array: {
         auto const& arrInfo = static_cast<SReflect::ArrayTypeInfo const&>(typeInfo);
+        if (arrInfo.CanResize()) {
+          changed = ResizableArrayField(label, arrInfo, fieldPtr, fieldInfo);
+          break;
+        }
         size_t const count = arrInfo.GetNumElements(fieldPtr);
         SReflect::CoreType const elemType = arrInfo._innerTypeInfo->_coreType;
 
@@ -2699,12 +2822,86 @@ static bool SimpleReflectionField(
   return changed;
 }
 
+// Compares two instances of a reflected type by value. Serializes both and compares, mirroring how
+// Simple Reflection itself detects default-valued fields (for NoSerializeDefaults). Going through
+// the field-by-field JSON keeps the check value-semantic, so it is not tripped up by padding bytes
+// that a raw memcmp of a trivially-copyable struct (e.g. TransformRT) would include.
+static bool ReflectedValuesEqual(SReflect::TypeInfo const& typeInfo, void const* a, void const* b) {
+  picojson::value ja;
+  picojson::value jb;
+  typeInfo.Serialize(a, ja);
+  typeInfo.Serialize(b, jb);
+  return ja.serialize(false) == jb.serialize(false);
+}
+
+// True for field types SimpleReflectionField draws as a single ImGui item (one drag/input/combo).
+// The revert button is a borderless overlay on the widget's right edge and relies on
+// SetNextItemAllowOverlap, which only flags a single item -- so multi-component widgets (Real3,
+// TransformRT, colors, small arrays) and multi-line widgets (nested structs, tree-node arrays) are
+// excluded: the overlay would mis-place or fail to receive clicks over their sub-items.
+static bool IsRevertableWidget(SReflect::TypeInfo const& typeInfo) {
+  using CT = SReflect::CoreType;
+  CT const ct = typeInfo._coreType;
+  return ct == CT::CT_float || ct == CT::CT_double || ct == CT::CT_int32 || ct == CT::CT_bool ||
+      ct == CT::CT_enum || ct == CT::CT_string;
+}
+
+// Renders a revertable field whose value differs from its default. The widget is drawn exactly as
+// it would be otherwise -- same label (so its ImGui ID is stable and an in-progress drag never
+// loses focus when the value crosses its default) and same width -- and a borderless "revert to
+// default" button is overlaid on the right edge of the value frame, so the layout never shifts.
+// Returns true if the value changed this frame.
+static bool SimpleReflectionFieldWithRevert(
+    char const* label,
+    SReflect::FieldTypeInfo const& field,
+    void* fieldPtr,
+    void const* defaultFieldPtr) {
+  SReflect::TypeInfo const& innerType = *field._innerTypeInfo;
+
+  ImVec2 const rowStart = GetCursorScreenPos();
+  float const frameWidth = CalcItemWidth();
+  float const buttonSize = GetFrameHeight();
+
+  // Let the borderless button (submitted next) sit on top of, and receive clicks over, the widget.
+  SetNextItemAllowOverlap();
+  bool changed = SimpleReflectionField(label, innerType, fieldPtr, &field);
+  ImVec2 const layoutCursor = GetCursorScreenPos();
+
+  // Transparent hit target over the frame's right edge; the icon is drawn on top of it, brightening
+  // on hover. InvisibleButton keeps it borderless and background-free regardless of the theme.
+  ImVec2 const buttonPos(rowStart.x + frameWidth - buttonSize, rowStart.y);
+  SetCursorScreenPos(buttonPos);
+  bool const pressed = InvisibleButton("##revert", ImVec2(buttonSize, buttonSize));
+  bool const highlight = IsItemHovered() || IsItemActive();
+  ItemTooltipWrapped("Revert to default");
+
+  ImU32 const iconColor = GetColorU32(highlight ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+  ImVec2 const iconSize = CalcTextSize(ICON_FA_UNDO);
+  ImVec2 const iconPos(
+      buttonPos.x + (buttonSize - iconSize.x) * 0.5f,
+      buttonPos.y + (buttonSize - iconSize.y) * 0.5f);
+  GetWindowDrawList()->AddText(iconPos, iconColor, ICON_FA_UNDO);
+
+  // Restore the cursor so the next field flows from where the widget left off, not the overlay.
+  SetCursorScreenPos(layoutCursor);
+
+  if (pressed) {
+    innerType.Set(defaultFieldPtr, fieldPtr);
+    changed = true;
+  }
+  return changed;
+}
+
 static bool SimpleReflectionStruct_Internal(
     SReflect::StructTypeInfo const& structInfo,
     void* structPtr,
     SimpleReflectionWidgetOverride overrideFn,
     SimpleReflectionReadOnlyPredicate readOnlyFn) {
   bool changed = false;
+  // Default-constructed instance of this struct, the source of per-field default values for the
+  // revert buttons. Null if the struct is not default-constructible, in which case revert is
+  // simply not offered.
+  void* const defaultStructPtr = GetDefaultInstance(structInfo);
   for (SReflect::FieldTypeInfo const* field : structInfo._fields) {
     if (field->HasAttribute<SReflect::Attribute_HideFromEditor>()) {
       continue;
@@ -2730,7 +2927,19 @@ static bool SimpleReflectionStruct_Internal(
       handled = overrideFn(label, *field, fieldPtr);
     }
     if (!handled) {
-      changed |= SimpleReflectionField(label, *field->_innerTypeInfo, fieldPtr, field);
+      SReflect::TypeInfo const& innerType = *field->_innerTypeInfo;
+      void const* defaultFieldPtr =
+          defaultStructPtr != nullptr ? field->GetFieldPtr(defaultStructPtr) : nullptr;
+      // Offer an inline revert only for editable single-item widgets whose value has drifted from
+      // the type's default. Read-only fields keep the plain widget: reverting them is not allowed.
+      bool const canRevert = defaultFieldPtr != nullptr && !isReadOnly &&
+          IsRevertableWidget(innerType) &&
+          !ReflectedValuesEqual(innerType, fieldPtr, defaultFieldPtr);
+      if (canRevert) {
+        changed |= SimpleReflectionFieldWithRevert(label, *field, fieldPtr, defaultFieldPtr);
+      } else {
+        changed |= SimpleReflectionField(label, innerType, fieldPtr, field);
+      }
     }
 
     if (isReadOnly) {

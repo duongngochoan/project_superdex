@@ -18,7 +18,6 @@
 
 #include <mochi_core/element_operations/fem_gravity.h>
 #include <mochi_core/elements/tetrahedral/finite_element.h>
-#include <mochi_core/elements/tetrahedral/simplex_quadrature.h>
 #include <mochi_core/geometry/tetrahedral_mesh.h>
 #include <mochi_core/utils/batch_config.h>
 #include <mochi_core/utils/batch_types.h>
@@ -54,11 +53,7 @@ static void BenchmarkGravityWork(benchmark::State& state, GravityWorkMode mode) 
   DynamicArray<ElementT> elements;
   elements.reserve(kNumElements);
   for (int i = 0; i < kNumElements; ++i) {
-    elements.emplace_back(
-        0,
-        mesh.GetNodeCoordinates(),
-        mesh.GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature1);
+    elements.emplace_back(0, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity());
   }
 
   NdArray<NdArray<real, kDim>, kBatchSize> displacements{};
@@ -80,6 +75,7 @@ static void BenchmarkGravityWork(benchmark::State& state, GravityWorkMode mode) 
     }
     batchedDisp[d] = Load<V>(staging);
   }
+  NdArray<V, kDim> const batchedStageStartDisp{};
 
   BatchDouble<kBatchSize> energy{0.0};
   NdArray<V, kDim> res{};
@@ -90,6 +86,7 @@ static void BenchmarkGravityWork(benchmark::State& state, GravityWorkMode mode) 
         elementIndices,
         MakeConstSpan(elements),
         batchedDisp,
+        batchedStageStartDisp,
         evalObj ? &energy : nullptr,
         evalRes ? &res : nullptr,
         kGravity,

@@ -24,6 +24,7 @@
 
 #include <mochi_core/articulated_body/articulated_body.h>
 #include <mochi_core/element_operations/fem_rod.h>
+#include <mochi_core/integration/integration_utils.h>
 #include <mochi_core/linear_algebra/matrix.h>
 #include <mochi_core/utils/array_utils.h>
 #include <mochi_core/utils/debug.h>
@@ -42,11 +43,10 @@ enum class TimeTarget { StepStart = 0, StageStart = 1, StepEnd = 2 };
 
 namespace mochi::integration {
 
-// Joint-layout metadata needed to time-integrate an articulated reduced pose. Bundles the spans
-// that the articulated-pose @ref AddWeightedDifferences overload forwards to the mochi_core
-// articulated helpers.
+// Joint-layout metadata needed to time-integrate an articulated reduced pose.
 struct ArticulatedIntegrationMetadata {
   Span<ArticulatedJointType const> jointTypes;
+  Span<Real3 const> jointAxes;
   Span<ArticulatedDofInfo const> dofInfo;
   Span<ArticulatedPoseInfo const> poseInfo;
 };
@@ -162,6 +162,26 @@ void AddWeightedDifferences(
   out.SetRotation(Normalize(Quaternion::FromRotationVector(deltaRot) * base.GetRotation()));
 }
 
+template <typename CoeffsT, typename GetValueT>
+void AddWeightedRigidBodyVelDifferences(
+    RigidBodyVel const& base,
+    GetValueT&& getValue,
+    CoeffsT const& coeffs,
+    Int2 range,
+    RigidBodyVel& out) {
+  ColumnVector<real, RigidBodyVel::kRawSize> baseVector;
+  base.ToRawValues(baseVector);
+  ColumnVector<real, RigidBodyVel::kRawSize> deltaVector = {}; // Weighted-average delta.
+  for (int s = range[0]; s < range[1]; ++s) {
+    ColumnVector<real, RigidBodyVel::kRawSize> valVector;
+    getValue(s).ToRawValues(valVector);
+    deltaVector += coeffs[s] * (valVector - baseVector);
+  }
+  // Add the delta to the base and store in the result.
+  baseVector += deltaVector;
+  out.FromRawValues(baseVector);
+}
+
 /// @brief Implementation for RigidBodyVel.
 template <typename CoeffsT>
 void AddWeightedDifferences(
@@ -171,17 +191,34 @@ void AddWeightedDifferences(
     CoeffsT const& coeffs,
     Int2 range,
     RigidBodyVel& out) {
-  ColumnVector<real, RigidBodyVel::kRawSize> baseVector;
-  base.ToRawValues(baseVector);
-  ColumnVector<real, RigidBodyVel::kRawSize> deltaVector = {}; // Weighted-average delta.
+  AddWeightedRigidBodyVelDifferences(
+      base, [&](int s) -> RigidBodyVel const& { return vals[s].value; }, coeffs, range, out);
+}
+
+/// @brief Implementation for ArticulatedJointVelocities.
+template <typename CoeffsT>
+void AddWeightedDifferences(
+    std::monostate /* unused */,
+    DynamicArray<RigidBodyVel> const& base,
+    Span<ArticulatedJointVelocities const> vals,
+    CoeffsT const& coeffs,
+    Int2 range,
+    DynamicArray<RigidBodyVel>& out) {
+#if MOCHI_ASSERT_VERBOSE_ENABLED
+  MOCHI_ASSERT_VERBOSE(out.size() == base.size(), "Size mismatch");
   for (int s = range[0]; s < range[1]; ++s) {
-    ColumnVector<real, RigidBodyVel::kRawSize> valVector;
-    vals[s].value.ToRawValues(valVector);
-    deltaVector += coeffs[s] * (valVector - baseVector);
+    MOCHI_ASSERT_VERBOSE(vals[s].value.size() == base.size(), "Size mismatch");
   }
-  // Add the delta to the base and store in the result.
-  baseVector += deltaVector;
-  out.FromRawValues(baseVector);
+#endif
+
+  for (int i = 0; i < isize(base); ++i) {
+    AddWeightedRigidBodyVelDifferences(
+        base[i],
+        [&](int s) -> RigidBodyVel const& { return vals[s].value[i]; },
+        coeffs,
+        range,
+        out[i]);
+  }
 }
 
 /// @brief Implementation for articulated pose.
@@ -230,11 +267,8 @@ void AddWeightedDifferences(
   for (int j = 0; j < numElements; ++j) {
     int const twistDofIndex = j * fem::kNumRodFields + (fem::kNumRodFields - 1);
     real const deltaTheta = out.displacements[twistDofIndex] - base.displacements[twistDofIndex];
-    Real3 const baseTangent = rod::ComputeRodElementTangent(meshNodes, base.displacements, j);
-    Real3 const outTangent = rod::ComputeRodElementTangent(meshNodes, out.displacements, j);
-    out.frameAxes[j] = ToReal3(
-        fem::TransportFrameAxis(
-            ToSimd(baseTangent), ToSimd(outTangent), deltaTheta, ToSimd(base.frameAxes[j])));
+    out.frameAxes[j] = rod::TransportRodElementFrameAxis(
+        meshNodes, base.displacements, out.displacements, base.frameAxes[j], deltaTheta, j);
   }
 }
 
@@ -293,6 +327,99 @@ void ApplyTimeIntegration(
   }
 }
 
+/// The following functions compute conceptually:
+/// out = curr - dt * vel.
+
+/// @brief Implementation for Euclidean-space vectors.
+inline void RetractByDelta(
+    std::monostate /* unused */,
+    real dt,
+    ColumnVectorView<real const> curr,
+    ColumnVectorView<real const> vel,
+    ColumnVectorView<real> out) {
+  out = curr - dt * vel;
+}
+
+/// @brief Implementation for TransformRT. The rotation is retracted by the finite step that the
+/// velocity describes, so that the retracted pose, the current pose and the velocity are coherent.
+inline void RetractByDelta(
+    std::monostate /* unused */,
+    real dt,
+    TransformRT const& curr,
+    RigidBodyVel const& vel,
+    TransformRT& out) {
+  out.SetTranslation(curr.VGetTranslation() - dt * vel.GetVCom());
+  out.SetRotation(Normalize(
+      Quaternion::FromRotationVector(vel.GetFiniteStepRotationVector(-dt)) * curr.GetRotation()));
+}
+
+/// @brief Implementation for articulated pose. Free and spherical joint rotations are retracted by
+/// the finite step that the joint velocity describes. Revolute and prismatic joint velocities are
+/// exact rates, so their coordinates are retracted linearly.
+inline void RetractByDelta(
+    ArticulatedIntegrationMetadata const& metadata,
+    real dt,
+    ColumnVectorView<real const> curr,
+    Span<RigidBodyVel const> jointVels,
+    ColumnVectorView<real> out) {
+  // Stack memory for up to 500 reduced DoFs
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 500 * sizeof(real));
+  int const reducedDofsSize = articulated::GetReducedDofsSize(metadata.dofInfo);
+  ColumnVector<real> deltaJointsLie(reducedDofsSize, &allocator);
+  articulated::compound::GetArticulatedJointVelocities(
+      metadata.jointTypes, metadata.jointAxes, metadata.dofInfo, jointVels, deltaJointsLie);
+  deltaJointsLie *= -dt;
+  for (int i = 0; i < isize(jointVels); ++i) {
+    ArticulatedJointType const type = metadata.jointTypes[i];
+    if (type == ArticulatedJointType::Free || type == ArticulatedJointType::Spherical) {
+      Store<RigidSize::kDRot>(
+          &deltaJointsLie[metadata.dofInfo[i].GetRotOffset()],
+          jointVels[i].GetFiniteStepRotationVector(-dt));
+    }
+  }
+  articulated::AddLieDeltaToReducedPose(
+      metadata.jointTypes, metadata.dofInfo, metadata.poseInfo, curr, deltaJointsLie, out);
+  articulated::NormalizeQuaternions(metadata.jointTypes, metadata.poseInfo, out);
+}
+
+/// @brief Implementation for rod pose (displacement-twist + frame axes).
+inline void RetractByDelta(
+    Span<Real3 const> meshNodes,
+    real dt,
+    RodPose const& curr,
+    ColumnVectorView<real const> vel,
+    RodPose& out) {
+  // Retract displacement+twist DoFs.
+  int const numDofs = isize(curr.displacements);
+  out.displacements.Resize(numDofs);
+  out.displacements = curr.displacements - dt * vel;
+
+  // Parallel-transport and twisting of frame axes.
+  int const numElements = isize(curr.frameAxes);
+  out.frameAxes.resize_noinit(numElements);
+  for (int j = 0; j < numElements; ++j) {
+    real const twist = -dt * vel[j * fem::kNumRodFields + (fem::kNumRodFields - 1)];
+    out.frameAxes[j] = rod::TransportRodElementFrameAxis(
+        meshNodes, curr.displacements, out.displacements, curr.frameAxes[j], twist, j);
+  }
+}
+
+/// @brief Copy the exact begin-of-step value from the integration history when the method and a
+/// non-empty history allow it.
+///
+/// @return true if @p outPrev was recovered from history; false if the caller must fall back to an
+/// estimate.
+template <ValueContainer T, typename OutT>
+[[nodiscard]] bool TrySetPreviousFromHistory(
+    IntegrationMethod method,
+    IntegrationBundle<T> const& integration,
+    OutT& outPrev) {
+  if (IsReproducibleFromHistory(method) && !integration.prevSteps.empty()) {
+    outPrev.value = integration.prevSteps[0].value; // history: exact
+    return true;
+  }
+  return false;
+}
 } // namespace details
 
 // Concept to ensure PrevT can be static_cast to T const&
@@ -353,6 +480,59 @@ void ApplyTimeIntegration(
     OutT& out) {
   details::ApplyTimeIntegration<kTargetTime>(
       std::monostate{}, intState, integration, static_cast<T&>(out));
+}
+
+/// @brief Entry function to reconstruct a step-start value with metadata.
+template <typename MetadataT, ValueContainer T, typename CurrT, ValueContainer DT, typename OutT>
+  requires TimeIntegrationCompatible<CurrT, OutT, T>
+void ReconstructPreviousPoseFromHistoryOrExtrapolate(
+    MetadataT const& metadata,
+    IntegrationMethod method,
+    CSceneTime const& time,
+    IntegrationBundle<T> const& integration,
+    CurrT const& curr,
+    DT const& derivative,
+    OutT& outPrev) {
+  if (details::TrySetPreviousFromHistory(method, integration, outPrev)) {
+    return;
+  }
+  // An infinite quasistatic step cannot define a constant-velocity backward extrapolation.
+  double const timeStep = time.DeltaTime();
+  real const dt = static_cast<real>(IsFinite(timeStep) ? timeStep : CSceneTime::kDefaultTimeStep);
+  details::RetractByDelta(
+      metadata,
+      dt,
+      static_cast<T const&>(curr).value,
+      derivative.value,
+      static_cast<T&>(outPrev).value);
+}
+
+/// @brief Entry function to reconstruct a step-start value without metadata.
+template <ValueContainer T, typename CurrT, ValueContainer DT, typename OutT>
+  requires TimeIntegrationCompatible<CurrT, OutT, T>
+void ReconstructPreviousPoseFromHistoryOrExtrapolate(
+    IntegrationMethod method,
+    CSceneTime const& time,
+    IntegrationBundle<T> const& integration,
+    CurrT const& curr,
+    DT const& derivative,
+    OutT& outPrev) {
+  ReconstructPreviousPoseFromHistoryOrExtrapolate(
+      std::monostate{}, method, time, integration, curr, derivative, outPrev);
+}
+
+/// @brief Function to set a step-start value.
+template <ValueContainer T, typename CurrT, typename OutT>
+  requires TimeIntegrationCompatible<CurrT, OutT, T>
+void ReconstructPreviousVelocityFromHistoryOrCopy(
+    IntegrationMethod method,
+    IntegrationBundle<T> const& integration,
+    CurrT const& curr,
+    OutT& outPrev) {
+  if (details::TrySetPreviousFromHistory(method, integration, outPrev)) {
+    return;
+  }
+  outPrev.value = curr.value; // copy current
 }
 
 void ClearMultiStepIntegrationData(entt::registry& reg, entt::entity e);

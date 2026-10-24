@@ -42,6 +42,7 @@ namespace mochi {
       return the full stored mesh, which may include nodes unused by any element connectivity.
       Accessors for the active-node mesh, containing only nodes referenced by connectivity,
       contain the word Active in the method name.
+      GetAabb() and GetObb() bound only the active nodes.
 */
 class SimplicialMesh {
  public:
@@ -100,7 +101,9 @@ class SimplicialMesh {
     // NOTE: Performs dynamic memory allocation but cost seems negligible.
     std::vector<bool> seenNodes(GetNumNodes(), false);
     outNodes.clear();
-    outNodes.reserve(elementIndices.size() * _numNodesPerElement);
+    outNodes.reserve(
+        Min(elementIndices.size() * static_cast<size_t>(_numNodesPerElement),
+            static_cast<size_t>(GetNumActiveNodes())));
     Span<int const> connec = GetFlatConnectivity();
     for (int elemIdx : elementIndices) {
       MOCHI_ASSERT_VERBOSE(elemIdx >= 0 && elemIdx < GetNumElements(), "Element out of range.");
@@ -161,10 +164,10 @@ class SimplicialMesh {
   // Get the total "measure" (area of triangle or volume of tetrahedron) for the whole mesh
   real GetTotalMeasure() const;
 
-  // Get the axis-aligned bounding box that contains all the nodes
+  // Get the axis-aligned bounding box that contains all the active nodes
   Aabb const& GetAabb() const;
 
-  // Get an oriented bounding box that contains all the nodes
+  // Get an oriented bounding box that contains all the active nodes
   Obb GetObb() const;
 
   inline Span<int const> GetAdjacentElements(int nodeIndex) const;

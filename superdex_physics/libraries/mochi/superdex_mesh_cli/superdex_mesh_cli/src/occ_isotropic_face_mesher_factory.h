@@ -32,12 +32,12 @@ namespace mochi::mesh::cli::occ {
 /// retry with, so a face the CGAL path cannot handle still gets triangulated.
 class IsotropicFaceMesherFactory : public IMeshTools_MeshAlgoFactory {
  public:
-  /// @param targetEdgeLength Target 3D edge length for uniform meshing.
+  /// @param sizing Per-face target edge length and deflections. Must outlive the factory.
   /// @param gradedInterior Grade interior sampling towards the boundary's density; see
   ///        @ref IsotropicFaceMesher.
   /// @param stats Fallback tally shared by every face; may be null. Must outlive the factory.
   IsotropicFaceMesherFactory(
-      double targetEdgeLength,
+      FaceSizingField const& sizing,
       bool gradedInterior,
       FaceMeshFallbackStats* stats);
 
@@ -48,7 +48,7 @@ class IsotropicFaceMesherFactory : public IMeshTools_MeshAlgoFactory {
           const override;
 
  private:
-  double _targetEdgeLength{};
+  FaceSizingField const* _sizing{};
   bool _gradedInterior{};
   FaceMeshFallbackStats* _stats{};
   // Stateless and const-correct, so it is safe to share across BRepMesh_FaceDiscret's workers.

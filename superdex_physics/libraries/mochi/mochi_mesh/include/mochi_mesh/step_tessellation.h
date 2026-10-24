@@ -20,7 +20,10 @@
 #include <mochi_core/utils/error.h>
 #include <mochi_mesh/mochi_mesh_cli_types.h>
 
+#include <cstdint>
+#include <optional>
 #include <string_view>
+#include <vector>
 
 namespace mochi::mesh {
 
@@ -37,5 +40,28 @@ namespace mochi::mesh {
 /// error.
 [[nodiscard]] MeshData
 TessellateStep(std::string_view stepFilePath, StepTessellationParams const& params, Error& error);
+
+/// @brief The tessellated faces of one STEP face color (see @ref TessellateStepByColor).
+struct StepColorMesh {
+  /// Face color as 8-bit sRGB packed `0xRRGGBB`, keyed exactly as @ref StepFaceColorInfo and
+  /// @ref StepFaceColorSizing; empty for the faces with no color.
+  std::optional<uint32_t> rgb;
+  /// Triangle mesh in the renderer's Y-up frame, in metres (nodesPerElement == 3).
+  MeshData mesh;
+};
+
+/// @brief As @ref TessellateStep, but split into one mesh per resolved face color.
+///
+/// Face colors resolve as in @ref ReadStepFaceColors.
+///
+/// @param[in] stepFilePath Filesystem path to the STEP file (UTF-8).
+/// @param[in] params Tessellation quality parameters.
+/// @param[in,out] error Error status.
+/// @return One entry per color that has triangles: the uncolored faces first (if any), then the
+/// colors in ascending rgb order. Empty on error.
+[[nodiscard]] std::vector<StepColorMesh> TessellateStepByColor(
+    std::string_view stepFilePath,
+    StepTessellationParams const& params,
+    Error& error);
 
 } // namespace mochi::mesh

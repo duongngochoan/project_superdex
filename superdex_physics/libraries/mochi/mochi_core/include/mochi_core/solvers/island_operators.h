@@ -23,7 +23,9 @@
 #include <mochi_core/mochi_platform.h>
 #include <mochi_core/solvers/actor_preconditioner.h>
 #include <mochi_core/solvers/interaction_matrix_info.h>
+#include <mochi_core/solvers/per_actor_preconditioner.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <numeric>
@@ -34,77 +36,6 @@
 #include <vector>
 
 namespace mochi {
-
-// Forward declaration.
-template <typename T>
-struct IslandOperators;
-
-template <typename T>
-struct ActorPrecApplyer {
-  int offset;
-  int size;
-  std::reference_wrapper<ActorPreconditioner<T>> prec;
-
-  void operator()(ColumnVectorView<T const> x, ColumnVectorView<T> y) const {
-    prec.get().Solve(x.MiddleRows(offset, size), y.MiddleRows(offset, size));
-  }
-
-  void ConcurrentSolve(
-      ColumnVectorView<T const> x,
-      ColumnVectorView<T> Px,
-      ParallelWorkerInfo const& data) const {
-    MOCHI_ASSERT_VERBOSE(data.rBegin >= 0 && data.rBegin <= data.rEnd, "Invalid row range.");
-    if ((offset < data.rEnd) && (data.rBegin < offset + size)) {
-      prec.get().ConcurrentSolve(
-          x.MiddleRows(offset, size),
-          Px.MiddleRows(offset, size),
-          ParallelWorkerInfo{
-              .workerId = data.workerId,
-              .numWorkers = data.numWorkers,
-              .rBegin = Max(data.rBegin - offset, 0),
-              .rEnd = Min(data.rEnd - offset, size),
-              .barrier = data.barrier});
-    }
-  }
-};
-
-template <typename T>
-struct PerActorPrec final : Preconditioner<T> {
-  static constexpr auto kType = PreconditionerType::PerActor;
-
-  std::vector<ActorPrecApplyer<T>> actorPrecs;
-
-  explicit PerActorPrec(std::vector<ActorPrecApplyer<T>>&& actorPrecs)
-      : actorPrecs(std::move(actorPrecs)) {}
-
-  void Solve(ColumnVectorView<T const> x, ColumnVectorView<T> y) const override {
-    // TODO[T175051452]: Introduce efficient parallelization.
-    for (auto const& prec : actorPrecs) {
-      prec(x, y);
-    }
-  }
-
-  void ConcurrentSolve(
-      ColumnVectorView<T const> x,
-      ColumnVectorView<T> Px,
-      ParallelWorkerInfo const& data) const override {
-    MOCHI_ASSERT_VERBOSE(data.rBegin >= 0 && data.rBegin <= data.rEnd, "Invalid row range.");
-    for (auto const& prec : actorPrecs) {
-      if ((prec.offset < data.rEnd) && (data.rBegin < prec.offset + prec.size)) {
-        prec.ConcurrentSolve(x, Px, data);
-      }
-    }
-  }
-
-  void Update(IslandOperators<T> const& A) {
-    // Note that MakePerActorPrec updates the actor preconditioners if they already exist.
-    *this = std::move(A.MakePerActorPrec());
-  }
-
-  constexpr PreconditionerType GetType() const override {
-    return kType;
-  }
-};
 
 /*******************************************************************
   IslandOperators
@@ -195,8 +126,9 @@ struct IslandOperators {
 #endif // MOCHI_ASSERT_VERBOSE_ENABLED
   }
 
-  // Construct or update the per-actor preconditioner.
-  auto MakePerActorPrec() const {
+  // Construct missing actor preconditioners, update existing ones, and return each
+  // preconditioner with its island-wide row offset and row count.
+  auto MakePerActorPreconditionerEntries() const {
     auto const numActors = isize(_actorMatrices);
     MOCHI_ASSERT(
         _actorPreconditioners.size() == numActors,
@@ -245,22 +177,36 @@ struct IslandOperators {
       }
     });
 
-    // Construct the per-actor preconditioner.
-    std::vector<ActorPrecApplyer<T>> actorPrecApplyiers;
-    actorPrecApplyiers.reserve(numActors);
+    std::vector<ActorPreconditionerEntry<T>> actorPreconditionerEntries;
+    actorPreconditionerEntries.reserve(numActors);
     for (int aIndex = 0; aIndex < numActors; ++aIndex) {
       auto const& [offset, A] = _actorMatrices[aIndex];
-      actorPrecApplyiers.push_back({offset, GetNumRows(A), *_actorPreconditioners[aIndex].get()});
+      actorPreconditionerEntries.push_back(
+          {offset, GetNumRows(A), *_actorPreconditioners[aIndex].get()});
     }
 
-    return PerActorPrec<T>{std::move(actorPrecApplyiers)};
+    return actorPreconditionerEntries;
   }
 
   // Return the number of rows of the global system.
-  [[nodiscard]] int Rows() const;
+  [[nodiscard]] int Rows() const {
+    if (_actorMatrices.empty()) {
+      return 0;
+    } else {
+      auto const& [offset, lastMatrix] = _actorMatrices.back();
+      return offset + GetNumRows(lastMatrix);
+    }
+  }
 
   // Return the number of columns of the global system.
-  [[nodiscard]] int Cols() const;
+  [[nodiscard]] int Cols() const {
+    if (_actorMatrices.empty()) {
+      return 0;
+    } else {
+      auto const& [offset, lastMatrix] = _actorMatrices.back();
+      return offset + GetNumCols(lastMatrix);
+    }
+  }
 
   // Const reference to the actor matrices.
   [[nodiscard]] auto const& GetActorMatrices() const;
@@ -302,23 +248,10 @@ struct IslandOperators {
 };
 
 template <typename T>
-int IslandOperators<T>::Rows() const {
-  if (_actorMatrices.empty()) {
-    return 0;
-  } else {
-    auto const& [offset, lastMatrix] = _actorMatrices.back();
-    return offset + GetNumRows(lastMatrix);
-  }
-}
-
-template <typename T>
-int IslandOperators<T>::Cols() const {
-  if (_actorMatrices.empty()) {
-    return 0;
-  } else {
-    auto const& [offset, lastMatrix] = _actorMatrices.back();
-    return offset + GetNumCols(lastMatrix);
-  }
+void PerActorPrec<T>::Update(IslandOperators<T> const& A) {
+  _actorPrecs = A.MakePerActorPreconditionerEntries();
+  UpdateSolveItems();
+  _concurrentSolvePlan.reset();
 }
 
 template <typename T>
@@ -334,10 +267,9 @@ auto const& IslandOperators<T>::GetInteractionMatrices() const {
 template <typename T>
 template <typename InVector, typename OutVector>
 void IslandOperators<T>::Apply(InVector const& x, OutVector&& Ax) const {
-  if (Rows() == 0)
-    MOCHI_UNLIKELY {
-      return;
-    }
+  if (Rows() == 0) MOCHI_UNLIKELY {
+    return;
+  }
   if (_workerRowRanges.empty()) {
     constexpr int kNumNzPerWorker = 25000; // Empirically chosen value. Optimized for x.Cols() == 1.
     _numWorkers =
@@ -401,6 +333,12 @@ void IslandOperators<T>::ApplyToRange(InVector const& x, OutVector&& Ax, Idx row
   }
 }
 
+// TODO(T290274539): Rows are split evenly by count, but the matrix-vector product's cost per row
+// varies with the stored values of the actor and interaction matrices in that row, plus a fixed
+// cost per row and per actor. The per-actor preconditioner favors the same ranges, since writing
+// rows another worker owns costs cache-line transfers and a final all-worker barrier, but its cost
+// per row differs (e.g., block Jacobi's is uniform). Choose ranges that balance both. See
+// D121889725.
 template <typename T>
 std::vector<int> GetRowRangesPerWorker(IslandOperators<T> const& ops, int numWorkers) {
   MOCHI_ASSERT_VERBOSE(numWorkers > 0, "Invalid number of workers.");

@@ -20,6 +20,7 @@
 #include <superdex_robotics/utils/file_utils.h>
 
 #include <filesystem>
+#include <set>
 
 namespace superdex::robotics {
 
@@ -165,7 +166,7 @@ ReadBotArchiveMetadata(std::string_view extractedDir, superdex::Error& error);
 // Bot scene archives (.mochi_bot_scene_archive)
 // ---------------------------------------------------------------------------
 
-#if MOCHI_INTERNAL
+#if SUPERDEXROBOTICS_WITH_BOT_SCENE
 constexpr std::string_view kSceneArchiveMetadataFile = ".mochi_bot_scene_archive_metadata";
 constexpr std::string_view kSceneArchiveExtension = ".mochi_bot_scene_archive";
 
@@ -194,8 +195,12 @@ struct BotSceneArchiveMetadata {
  * multi-root topology (identical to the strategy used by @ref ArchiveBot) so that path
  * resolution works identically after extraction.
  *
+ * Bots given as raw .superdex_bot files are archived with @ref ArchiveBot into the scene archive,
+ * beside where the raw bot sits, and the archived scene file points at those archives. No files
+ * are written beside the sources.
+ *
  * Requirements:
- *  - Every bots[].path must reference a .superdex_bot_archive (raw .superdex_bot is rejected).
+ *  - Every bots[].path must reference a .superdex_bot or .superdex_bot_archive.
  *  - params.src must end with .mochi_bot_scene.
  *  - params.dst must end with .mochi_bot_scene_archive.
  *
@@ -203,6 +208,21 @@ struct BotSceneArchiveMetadata {
  *     `.mochi_bot_scene_archive` path).
  * @param[in,out] error Error status. Check @ref Error::IsOK for success. */
 MOCHI_API void ArchiveBotScene(ArchiveParams const& params, superdex::Error& error);
+
+/* @brief Collect a .mochi_scene/.mochi_prefab file and every file it references -- shapes, render
+ * models, flow files, and nested prefabs, transitively -- as canonical absolute paths. These are
+ * the files @ref ArchiveBotScene archives for a base scene or spawnable prefab.
+ *
+ * References resolve exactly as prefab::AddToScene resolves them when the prefab loads: `./` from
+ * the referencing prefab's directory, absolute as-is, anything else from @p prefabPath's own
+ * directory.
+ *
+ * @param[in] prefabPath The .mochi_scene or .mochi_prefab file.
+ * @param[in,out] error Error status. Check @ref Error::IsOK for success.
+ * @return The prefab file and its dependencies, or an empty set on failure. */
+[[nodiscard]] MOCHI_API std::set<std::filesystem::path> CollectPrefabFiles(
+    std::filesystem::path const& prefabPath,
+    superdex::Error& error);
 
 /* @brief Extract a .mochi_bot_scene_archive to a content-hash-keyed cache directory.
  *
@@ -219,6 +239,14 @@ ExtractBotSceneArchiveToCache(std::string_view archiveFile, superdex::Error& err
  * @return Absolute path to the target .mochi_bot_scene file, or empty on failure. */
 [[nodiscard]] MOCHI_API DynamicString
 GetExtractedBotSceneArchiveTarget(std::string_view extractedDir, superdex::Error& error);
-#endif // MOCHI_INTERNAL
+
+/* @brief Read metadata from an extracted bot scene archive.
+ *
+ * @param[in] extractedDir Directory produced by ExtractBotSceneArchiveToCache.
+ * @param[in,out] error Error status.
+ * @return The archive metadata, or default-constructed on failure. */
+[[nodiscard]] MOCHI_API BotSceneArchiveMetadata
+ReadBotSceneArchiveMetadata(std::string_view extractedDir, superdex::Error& error);
+#endif // SUPERDEXROBOTICS_WITH_BOT_SCENE
 
 } // namespace superdex::robotics

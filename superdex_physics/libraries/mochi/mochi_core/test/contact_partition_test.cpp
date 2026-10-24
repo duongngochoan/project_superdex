@@ -39,27 +39,6 @@ static std::array<T, kNumSamples> InitializeSamples(
   return result;
 }
 
-static std::array<IndexGroups, kNumSamples> InitializeIndexGroups() {
-  // Define some index groups. IndexGroup::src is irrelevant, partitions are defined based on
-  // IndexGroup::dst and IndexGroup::count. To create different index groups, all we need to do is
-  // vary e.g. IndexGroup::dst.
-  IndexGroup indA{0, 0, 4};
-  IndexGroup indB{0, 1, 4};
-  IndexGroup indC{0, 2, 4};
-  IndexGroup indD{0, 3, 4};
-
-  // Define some combinations of index groups. These will define the number of partitions.
-  std::array<IndexGroups, kNumPartitions> groups{
-      IndexGroups{{indA}},
-      IndexGroups{{indA, indB}},
-      IndexGroups{{indB}},
-      IndexGroups{{indC, indD, indA}}};
-
-  // Define index groups for a set of samples
-  std::array<int, kNumSamples> samples{{0, 1, 0, 2, 3, 1, 3, 0, 1, 0}};
-  return InitializeSamples(groups, samples);
-}
-
 static std::array<int, kNumSamples> InitializeIds() {
   // Define some ids.
   std::array<int, kNumPartitions> ids{{-1, 0, 1, 2}};
@@ -67,6 +46,20 @@ static std::array<int, kNumSamples> InitializeIds() {
   // Define ids for a set of samples
   std::array<int, kNumSamples> samples{{2, 1, 1, 3, 1, 0, 3, 2, 0, 1}};
   return InitializeSamples(ids, samples);
+}
+
+static std::array<DynamicArray<int>, kNumSamples> InitializeBoneIds() {
+  // Define some distinct sets of governing bone ids, sorted and unique as BoneIdsDescriptor
+  // requires.
+  std::array<DynamicArray<int>, kNumPartitions> groups{
+      DynamicArray<int>{0},
+      DynamicArray<int>{0, 1},
+      DynamicArray<int>{1},
+      DynamicArray<int>{2, 3, 4}};
+
+  // Define bone-id sets for a set of samples
+  std::array<int, kNumSamples> samples{{0, 1, 0, 2, 3, 1, 3, 0, 1, 0}};
+  return InitializeSamples(groups, samples);
 }
 
 static void TestPartitions(Span<ContactPartition const> partitions) {
@@ -88,14 +81,6 @@ static void TestPartitions(Span<ContactPartition const> partitions) {
   EXPECT_TRUE(all.GetSubsetSize() == all.GetFullSetSize());
 }
 
-TEST(ContactPartition, IndexGroups) {
-  auto samples = InitializeIndexGroups();
-  auto partitions = CreateContactPartitions<IndexGroupsDescriptor>(samples);
-
-  EXPECT_EQ(partitions.size(), 4);
-  TestPartitions(partitions);
-}
-
 TEST(ContactPartition, Ids) {
   auto samples = InitializeIds();
   auto partitions = CreateContactPartitions<IdDescriptor>(samples);
@@ -104,12 +89,29 @@ TEST(ContactPartition, Ids) {
   TestPartitions(partitions);
 }
 
+TEST(ContactPartition, BoneIds) {
+  auto samples = InitializeBoneIds();
+  auto partitions = CreateContactPartitions<BoneIdsDescriptor>(samples);
+
+  EXPECT_EQ(partitions.size(), 4);
+  TestPartitions(partitions);
+  for (auto const& partition : partitions) {
+    EXPECT_TRUE(std::holds_alternative<DynamicArray<int>>(partition.GetDofDescriptors()[0]));
+  }
+}
+
 TEST(ContactPartition, Combined) {
-  auto partitionsA = CreateContactPartitions<IndexGroupsDescriptor>(InitializeIndexGroups());
+  auto partitionsA = CreateContactPartitions<BoneIdsDescriptor>(InitializeBoneIds());
   auto partitionsB = CreateContactPartitions<IdDescriptor>(InitializeIds());
   auto partitions = CombinePartitions(partitionsA, partitionsB);
 
-  EXPECT_GE(partitions.size(), 4);
-  EXPECT_LE(partitions.size(), kNumSamples);
+  // 7 distinct (bone set, id) pairs occur across the samples.
+  EXPECT_EQ(partitions.size(), 7);
   TestPartitions(partitions);
+  for (auto const& partition : partitions) {
+    auto const descriptors = partition.GetDofDescriptors();
+    ASSERT_EQ(descriptors.size(), 2);
+    EXPECT_TRUE(std::holds_alternative<DynamicArray<int>>(descriptors[0]));
+    EXPECT_TRUE(std::holds_alternative<int>(descriptors[1]));
+  }
 }

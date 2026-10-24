@@ -32,7 +32,6 @@
 #include <mochi_core/utils/task_scheduler.h>
 
 #include <limits>
-#include <unordered_set>
 
 using namespace mochi;
 
@@ -238,9 +237,6 @@ static void KrylovSolveZ(
     SnleProblem<real>& problemForward,
     ColumnVectorView<real const> rhs,
     ColumnVectorView<real> outZ) {
-  auto const& islandDofInfo = reg.get<CIslandDofInfo>(island);
-  int const numDofs = islandDofInfo.dofsSize;
-
   // Retrieve backpropagation solver stats component.
   auto& islandBackPropSolverStats = reg.get<CIslandBackPropSolverStats>(island);
 
@@ -253,9 +249,8 @@ static void KrylovSolveZ(
 
   // Get outer and inner solver parameters
   auto const& backpropParams = reg.ctx<CBackPropagationSolverParams const>();
-  auto const& simParams = reg.ctx<CSimulationParams const>();
   NewtonSolverParams newtonParamsForward;
-  GetIslandNewtonParams(numDofs, simParams, newtonParamsForward);
+  GetIslandNewtonParams(reg, island, newtonParamsForward);
   KrylovSolverParams& innerLParams = newtonParamsForward.lParams;
   innerLParams.absTol = backpropParams.innerSolverAbsTol;
 
@@ -277,10 +272,15 @@ static void KrylovSolveZ(
     GetHessianVectorProduct(reg, island, GradTarget::Current, problemForward, in, out);
   };
 
+  // Only the first solve has a new operator: the island preconditioner was last used with another
+  // matrix (e.g., by the forward solve), and later solves use the same approxHessian.
+  bool hasOperatorChanged = true;
+
   // Create callable preconditioner: solves hat(dres) * z = r using the inner linear solver
   auto precOp = [&](ColumnVectorView<real const> in, ColumnVectorView<real> out) {
     out.SetZero();
-    precLinearSolver.Solve(approxHessian, in, out, /*hasOperatorChanged*/ false);
+    precLinearSolver.Solve(approxHessian, in, out, hasOperatorChanged, InitialGuessHint::Zero);
+    hasOperatorChanged = false;
   };
 
   // Initialize solution
@@ -301,13 +301,15 @@ static void KrylovSolveZ(
       backpropParams.outerSolverMaxIter,
       pcgStatusCheck,
       /*abortIfNotSpd*/ true,
-      backpropParams.verbosity);
+      backpropParams.verbosity,
+      /*usePolakRibiere*/ true,
+      InitialGuessHint::Zero);
 
-  // If PCG aborted due to non-SPD, fall back to MINRES
-  if (!outerResult.converged && outerResult.numIterDone < backpropParams.outerSolverMaxIter) {
+  // If PCG diverged, fall back to MINRES.
+  if (outerResult.convergence == LinearSolverConvergenceStatus::Diverged) {
     if (backpropParams.verbosity >= VerbosityLevel::Warning) {
       MOCHI_LOG_WARNING(
-          "PCG aborted at iteration %d (likely non-SPD). Falling back to MINRES.",
+          "PCG diverged at iteration %d (likely non-SPD). Falling back to MINRES.",
           outerResult.numIterDone);
     }
 
@@ -330,14 +332,18 @@ static void KrylovSolveZ(
         precOp,
         backpropParams.outerSolverMaxIter,
         minresStatusCheck,
-        backpropParams.verbosity);
+        backpropParams.verbosity,
+        InitialGuessHint::Zero);
 
-    if (backpropParams.verbosity >= VerbosityLevel::Verbose) {
+    if (outerResult.convergence == LinearSolverConvergenceStatus::Diverged &&
+        backpropParams.verbosity >= VerbosityLevel::Warning) {
+      MOCHI_LOG_WARNING("MINRES diverged at iteration %d.", outerResult.numIterDone);
+    } else if (backpropParams.verbosity >= VerbosityLevel::Verbose) {
       MOCHI_LOG(
           "MINRES: Finished after %d iterations, final resNorm = %f, converged = %d",
           outerResult.numIterDone,
           outerResult.residualNorm,
-          outerResult.converged);
+          IsConverged(outerResult.convergence));
     }
 
     if (backpropParams.verbosity >= VerbosityLevel::Warning && backpropParams.validateFiniteDiff) {
@@ -371,7 +377,7 @@ static void KrylovSolveZ(
         "PCG: Finished after %d iterations, final resNorm = %f, converged = %d",
         outerResult.numIterDone,
         outerResult.residualNorm,
-        outerResult.converged);
+        IsConverged(outerResult.convergence));
   }
 
   // Record statistics
@@ -398,9 +404,8 @@ static void NewtonSolveZ(
 
   // Configure NR solver
   // ------------------------------------------------------------------------
-  auto const& simParams = reg.ctx<CSimulationParams const>();
   NewtonSolverParams newtonParams;
-  GetIslandNewtonParams(numDofs, simParams, newtonParams);
+  GetIslandNewtonParams(reg, island, newtonParams);
   // Apply general back-propagation parameters
   // - Currently, the back-propagation solver uses regular residual-based line search, but in the
   // test examples line-search never acted in practice.
@@ -645,258 +650,6 @@ void mochi::BackPropagationSolve(entt::registry& reg) {
   eachTask.Wait();
 }
 
-// Assign/Acquire to global Jacobian matrices, using CSceneStateOffset to determine block offset
-static void AssignDResBlk(
-    entt::registry& reg,
-    Span<entt::entity const> actors,
-    MatrixView<real> dRes,
-    MatrixView<real const> dResBlk) {
-  for (auto const& r : actors) {
-    int rOffGlobal = reg.get<CSceneStateOffset const>(r).dofsOffset;
-    int rOff = reg.get<CDofOffset const>(r).dofsOffset;
-    int rDofs = reg.get<CActorDofInfo const>(r).dofsSize;
-    for (auto const& c : actors) {
-      int cOffGlobal = reg.get<CSceneStateOffset const>(c).dofsOffset;
-      int cOff = reg.get<CDofOffset const>(c).dofsOffset;
-      int cDofs = reg.get<CActorDofInfo const>(c).dofsSize;
-      dRes.Block(rOffGlobal, cOffGlobal, rDofs, cDofs) = dResBlk.Block(rOff, cOff, rDofs, cDofs);
-    }
-  }
-}
-
-static void AcquireDResBlk(
-    entt::registry& reg,
-    Span<entt::entity const> actors,
-    MatrixView<real const> dRes,
-    MatrixView<real> dResBlk) {
-  for (auto const& r : actors) {
-    int rOffGlobal = reg.get<CSceneStateOffset const>(r).dofsOffset;
-    int rOff = reg.get<CDofOffset const>(r).dofsOffset;
-    int rDofs = reg.get<CActorDofInfo const>(r).dofsSize;
-    for (auto const& c : actors) {
-      int cOffGlobal = reg.get<CSceneStateOffset const>(c).dofsOffset;
-      int cOff = reg.get<CDofOffset const>(c).dofsOffset;
-      int cDofs = reg.get<CActorDofInfo const>(c).dofsSize;
-      dResBlk.Block(rOff, cOff, rDofs, cDofs) = dRes.Block(rOffGlobal, cOffGlobal, rDofs, cDofs);
-    }
-  }
-}
-
-void mochi::ComputeHqx(
-    int numIslandDofs,
-    Span<entt::entity const> actors,
-    CActorSnle const& actorSnle,
-    CDofOffset const& dofOffset,
-    CActorDerivedStateInfo const& derivedStateInfo,
-    CForwardPropContainerDerivedStateJac& outDerivedState) {
-  int cols = derivedStateInfo.dofsSize;
-  outDerivedState.actors = actors;
-  outDerivedState.numIslandDofs = numIslandDofs;
-  outDerivedState.data.Resize(numIslandDofs, cols);
-
-  // Fill the mixed Hessian H_{qx} = [df/dδ]
-  // Note that [df/dδ] is a block diagonal matrix because this term is due to inertial term.
-  // This is why we can store the corresponding columns of the derived state matrix in the per-actor
-  // struct: CForwardPropContainerDerivedStateJac
-  outDerivedState.data.SetZero();
-  outDerivedState.data.MiddleRows(dofOffset.dofsOffset, derivedStateInfo.dofsSize) =
-      actorSnle.UseReduced() ? ToMatrix(AsConstView(actorSnle.reducedDResidual))
-                             : ToMatrix(AsConstView(actorSnle.fullDResidual));
-}
-
-void mochi::ComputeDqDDerivedState(
-    int numIslandDofs,
-    LU<real> const& invDRes,
-    Span<entt::entity const> actors,
-    CActorSnle const& actorSnle,
-    CDofOffset const& dofOffset,
-    CActorDerivedStateInfo const& derivedStateInfo,
-    CForwardPropContainerDerivedStateJac& outDerivedState) {
-  // Compute H_{qx} = [df/dδ]
-  ComputeHqx(numIslandDofs, actors, actorSnle, dofOffset, derivedStateInfo, outDerivedState);
-
-  // Solve for dqk/dδ = -[df/dqk]^{-1} * H_{qx}
-  outDerivedState.data *= -1_r;
-  invDRes.LeftSolveInPlace(outDerivedState.data);
-}
-
-static void ShiftDqDDerivedState(
-    int numIslandDofs,
-    MatrixView<real> outJacCurr,
-    MatrixView<real> outJacOld,
-    entt::entity e,
-    entt::registry& reg,
-    CDofOffset const& dofOffset,
-    CActorDofInfo const& dofInfo,
-    CActorDerivedStateInfo const& derivedStateInfo,
-    CForwardPropContainerDerivedStateJac const& derivedState,
-    CDiffContainerDerivedState& outDerivedState) {
-  int cols = derivedStateInfo.dofsSize;
-  MatrixView<real const> derivedStateMat(derivedState.data.data(), numIslandDofs, cols);
-
-  auto jacCurrActor = outJacCurr.MiddleCols(dofOffset.dofsOffset, dofInfo.dofsSize);
-  auto jacOldActor = outJacOld.MiddleCols(dofOffset.dofsOffset, dofInfo.dofsSize);
-  // The data structure CForwardPropContainerDerivedStateJac stores the sub-matrix dqk/dδ of size:
-  //   |numIslandDofs| x |#derived state of the actor|
-  // The matrix is computed via:
-  //   dqk/dδ = -[df/dqk]^{-1} [df/dδ]
-  for (int row = 0; row < numIslandDofs; row++) {
-    // CDiffContainerDerivedState = dqk_row/dδ
-    outDerivedState = derivedStateMat.Row(row).Transpose();
-    // CDiffContainerState = dqk_row/dq_k-1 = dqk_row/dδ * dδ/dq_k-1
-    ecs::TryInvokeOnEntity(rigid::ProjectDerivedStateGradient, reg, e);
-    ecs::TryInvokeOnEntity(rigid::ShiftDerivedStateGradient, reg, e);
-    // dqk_row/dq_k-1 = dqk_row/dq_k-1 + dqk_row/dδ * dδ/dq_k-1
-    jacCurrActor.Row(row) += reg.get<CDiffContainerState const>(e).Transpose();
-    // CDiffContainerState = dqk_row/dq_k-2 = dqk_row/dδ * dδ/dq_k-2
-    // In the case of rigid body, this is just an assignment
-    ecs::TryInvokeOnEntity(rigid::ProjectDerivedStateGradient, reg, e);
-    // dqk_row/dq_k-2 = dqk_row/dδ * dδ/dq_k-2
-    jacOldActor.Row(row) = reg.get<CDiffContainerState const>(e).Transpose();
-  }
-}
-
-static void StepJacobianSolveIslandAsync(
-    entt::registry& reg,
-    entt::entity island,
-    CIslandMembers const& members,
-    CIslandDescendants const& descendants,
-    MatrixView<real> outJacCurr) {
-  MOCHI_PROFILE_SCOPE();
-  MOCHI_ASSERT(!descendants.actors.empty(), "Empty islands should have been pruned");
-
-  // General settings and SNLE forward problem for mixed Hessian assembly
-  auto const& islandDofInfo = reg.get<CIslandDofInfo>(island);
-  int const solutionSize = islandDofInfo.poseSize;
-  int const dofsSize = islandDofInfo.dofsSize;
-
-  // Initialize island assemble problem
-  SnleProblemFunctions<real> functions;
-  functions.onPostNewSolution = [](auto& /*problem*/) {}; // Not currently used.
-  functions.onPostNewIncrement = [](auto& /*problem*/) {}; // Not currently used.
-  functions.assemble = [&](SnleProblem<real>& problem, AssemblyParams const& params) {
-    solver::AssembleIslandPipeline(reg, island, params, problem);
-  };
-  SnleProblem<real> problem(dofsSize, solutionSize, std::move(functions));
-
-  // Set the stage-start state
-  solver::PreFirstStageLocalPipeline(reg, descendants);
-  solver::PreStageLocalPipeline(reg, descendants, problem);
-
-  // Assemble problem with psdDRes=false, notifying exact Hessian
-  AssemblyParams paramsExactDRes = {
-      .assemObj = false, .assemRes = false, .assemDRes = true, .psdDRes = false};
-  problem.UpdateObjResDRes(paramsExactDRes);
-
-  // Direct factorization using LU
-  LU<real> invDRes(ToMatrix(problem.GetDResidual()));
-
-  // Derivative with respect to previous state
-  paramsExactDRes.gradTarget = GradTarget::Previous;
-  problem.SetAssemblyFunction([&](SnleProblem<real>& problem, AssemblyParams const& params) {
-    mochi::solver::AssembleIslandPipeline(reg, island, params, problem);
-  });
-  problem.InvalidateCachedData();
-  problem.UpdateObjResDRes(paramsExactDRes);
-  // dqk/dqk-1 = -[d2f/dqk2]^{-1} * d2f/dqk/dqk-1
-  auto jacCurrBlk = ToMatrix(problem.GetDResidual());
-  jacCurrBlk *= -1_r;
-  invDRes.LeftSolveInPlace(jacCurrBlk);
-  AssignDResBlk(reg, members.actors, outJacCurr, jacCurrBlk);
-
-  // Derivative with respect to delta
-  paramsExactDRes.gradTarget = GradTarget::PreviousDelta;
-  problem.SetAssemblyFunction([&](SnleProblem<real>& problem, AssemblyParams const& params) {
-    mochi::solver::AssembleIslandPipeline(reg, island, params, problem);
-  });
-  problem.InvalidateCachedData();
-  problem.UpdateObjResDRes(paramsExactDRes);
-  // dqk/dδ = -[d2f/dqk2]^{-1} * d2f/dqk/dδ
-  ecs::InvokeForEach(
-      ComputeDqDDerivedState,
-      reg,
-      members.actors,
-      dofsSize,
-      std::cref(invDRes),
-      MakeConstSpan(members.actors));
-}
-
-static void StepJacobianShiftActor(
-    MatrixView<real> jacCurr,
-    MatrixView<real> jacOld,
-    entt::registry& reg,
-    CForwardPropContainerDerivedStateJac const& derivedState) {
-  MOCHI_PROFILE_SCOPE();
-
-  // Initialize jacobian blocks to zero
-  Matrix<real> jacCurrBlk(derivedState.numIslandDofs, derivedState.numIslandDofs);
-  Matrix<real> jacOldBlk(derivedState.numIslandDofs, derivedState.numIslandDofs);
-  AcquireDResBlk(reg, derivedState.actors, jacCurr, jacCurrBlk);
-
-  // Assuming that we have computed CForwardPropContainerDerivedStateJac, which stores dqk/dδ
-  // The following call propagates Jacobian to compute:
-  //   dqk/dqk-1 += dqk/dδ * dδ/dqk-1
-  //   dqk/dqk-2  = dqk/dδ * dδ/dqk-2
-  // This is same computation as BackPropagation, but applied row-by-row, i.e.:
-  // We extract dqk_i/dδ and store this vector into CDiffContainerDerivedState
-  // We can then use the backpropagation functionality to compute:
-  //   dqk_i/dqk-1 += dqk_i/dδ * dδ/dqk-1
-  //   dqk_i/dqk-2  = dqk_i/dδ * dδ/dqk-2
-  ecs::InvokeForEach<ecs::policy::AllowFullRegistryAccess>(
-      ShiftDqDDerivedState,
-      reg,
-      derivedState.actors,
-      derivedState.numIslandDofs,
-      AsView(jacCurrBlk),
-      AsView(jacOldBlk));
-
-  // assign to scene-wise global jacobian matrix
-  AssignDResBlk(reg, derivedState.actors, jacCurr, jacCurrBlk);
-  AssignDResBlk(reg, derivedState.actors, jacOld, jacOldBlk);
-}
-
-void mochi::StepJacobianSolve(entt::registry& reg, MatrixView<real> jacCurr) {
-  MOCHI_PROFILE_SCOPE();
-
-  // Initialize Jacobian matrix to zero
-  jacCurr.SetZero();
-
-  reg.view<CIslandMembers const, CIslandDescendants const>().each(
-      [&](entt::entity island,
-          CIslandMembers const& members,
-          CIslandDescendants const& descendants) {
-        // The island pre-step operation is also needed for forward-propagation
-        PreStepIslandAsync(reg, descendants);
-        // Now forward-propagate each island
-        StepJacobianSolveIslandAsync(reg, island, members, descendants, jacCurr);
-        // The island post-step operation is not needed for forward-propagation
-      });
-}
-
-void mochi::StepJacobianShiftAndProject(
-    entt::registry& reg,
-    MatrixView<real> outJacCurr,
-    MatrixView<real> outJacOld) {
-  MOCHI_PROFILE_SCOPE();
-  // Initialize Jacobian matrix to zero
-  outJacOld.SetZero();
-
-  // Shift each stateNew island exactly once, keyed on the stored grouping (the actors list each
-  // actor recorded in ComputeHqx), not the current CIslandMembers: GetStepJacobian has since
-  // restored stateCurr/stateOld, so current islanding can differ from stateNew's. De-duplicate by
-  // the island's first member so a split/merged current island can't double- or under-apply it.
-  std::unordered_set<entt::id_type> processedIslands;
-  reg.view<CForwardPropContainerDerivedStateJac const>().each(
-      [&](entt::entity /*e*/, CForwardPropContainerDerivedStateJac const& derivedState) {
-        if (derivedState.actors.empty()) {
-          return;
-        }
-        if (processedIslands.insert(static_cast<entt::id_type>(derivedState.actors[0])).second) {
-          StepJacobianShiftActor(AsView(outJacCurr), AsView(outJacOld), reg, derivedState);
-        }
-      });
-}
-
 void mochi::EmplaceDifferentiabilityComponents(
     int numDerivedStateDofs,
     entt::registry& reg,
@@ -912,18 +665,14 @@ void mochi::EmplaceDifferentiabilityComponents(
   diffInputInfo.dofsSize = 0;
   reg.emplace_or_replace<CDiffInputOffset>(e);
 
-  // Emplace components to store temporary gradient data during the forward/back-propagation step.
+  // Emplace components to store temporary gradient data during the back-propagation step.
   reg.emplace<CDiffContainerState>(e, dofInfo.dofsSize);
   reg.emplace<CDiffContainerDerivedState>(e, numDerivedStateDofs);
   reg.emplace<CDiffForceGrad>(e, dofInfo.dofsSize);
-  reg.emplace<CForwardPropContainerDerivedStateJac>(e);
 
   // Emplace components to store adjoints per-entity across BackPropagate calls.
   reg.emplace<CDiffStateGrad>(e, dofInfo.dofsSize);
   reg.emplace<CDiffDerivedStepGrad>(e, numDerivedStateDofs);
-
-  // Emplace actor data
-  reg.emplace<CSceneStateOffset>(e);
 }
 
 void mochi::EmplaceDifferentiableContactComponents(
@@ -965,8 +714,8 @@ void mochi::ResetBackPropagationContainers(
 void mochi::PrepareContactForceAdjoints(
     CQueryActorContactForces const& /*queryActorContactForces*/,
     [[maybe_unused]] CRequiresFarSdfEvaluation const* farSdfEval,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& outActiveCollisionsAsync,
-    CActiveCollisions<ContactType::Sync, TimeStep::Current>& outActiveCollisionsSync,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& outActiveCollisionsAsync,
+    CActiveCollisions</*kIsSync*/ true, TimeStep::Current>& outActiveCollisionsSync,
     CCollJacs<CollRole::Collider>* outColliderJacs) {
   MOCHI_ASSERT_VERBOSE(
       !farSdfEval, "Far SDF evaluation is not compatible with contact-force queries.");
@@ -1006,8 +755,6 @@ void InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CDiffInputOffset>(reg);
   ecs::RegisterComponent<CDiffContainerState>(reg);
   ecs::RegisterComponent<CDiffContainerDerivedState>(reg);
-  ecs::RegisterComponent<CForwardPropContainerDerivedStateJac>(reg);
-  ecs::RegisterComponent<CSceneStateOffset>(reg);
   ecs::RegisterComponent<CDiffForceGrad>(reg);
   ecs::RegisterComponent<CDiffTargetPoseGrad>(reg);
   ecs::RegisterComponent<CDiffStateGrad>(reg);

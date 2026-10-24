@@ -19,9 +19,11 @@
 #include "mochi_discretization_functions.h"
 #include "mochi_hyper_reduction.h"
 #include "mochi_rom_jacobian.h"
+#include "mochi_shape.h"
 #include "mochi_soft_rom_components.h"
 #include "mochi_soft_rom_polynomial_crom_systems.h"
 
+#include <mochi_core/contact/contact_types.h>
 #include <mochi_core/geometry/tetrahedral_map.h>
 #include <mochi_core/linear_algebra/qr.h>
 #include <mochi_core/mochi_config.h>
@@ -111,14 +113,14 @@ static std::pair<int, int> EmplaceRigidTransform(
 
   Real3 rigidPivotPos = {};
   int rigidPivotEleIdx = -1;
-  auto const& femLowVolDisc = reg.get<CFemVolumeDiscretizationP1Q1 const>(e);
+  auto const& femVolDisc = reg.get<CFemVolumeDiscretizationP1Q1 const>(e);
   bool const grp = mesh.GetRigidPivot(rigidPivotEleIdx, rigidPivotPos);
   MOCHI_ASSERT(grp);
   MOCHI_ASSERT(rigidPivotEleIdx >= 0);
-  MOCHI_ASSERT(rigidPivotEleIdx < isize(femLowVolDisc.femElements));
+  MOCHI_ASSERT(rigidPivotEleIdx < isize(femVolDisc.femElements));
   reg.emplace_or_replace<CMeshPivot>(e, rigidPivotPos);
 
-  auto const& pivotElement = femLowVolDisc.femElements[rigidPivotEleIdx];
+  auto const& pivotElement = femVolDisc.femElements[rigidPivotEleIdx];
   auto const& evalPt =
       reg.emplace_or_replace<CRigidTransformEvalPoint>(e, pivotElement, rigidPivotPos);
   MOCHI_ASSERT(
@@ -457,34 +459,12 @@ static void InitializeHyperReductionIfApplicable(
   reg.emplace<CActiveUniqueNodes>(e, tetMeshShape->GetMesh(), activeVolElems, activeBdFaces);
 
   /*
-   * IMPORTANT: updating the mass matrix needs to be done
+   * IMPORTANT: updating the soft mass needs to be done
    * AFTER emplacing active elements which internally store their weights,
    * and the same soft mass updating must be done every time the active
    * elements are changed
    */
-  auto const& actorSnle = reg.get<CActorSnle const>(e);
-  auto const& material = reg.get<CSoftMaterialParams const>(e);
-  auto& femHighVolDisc = reg.get<CFemVolumeDiscretizationP1Q4>(e);
-  auto const& l2g = reg.get<CLocal2GlobalMap const>(e);
-  auto const& nbs = reg.get<CNodalBasedStructure const>(e);
-  auto& massMatrix = reg.get<CMassMatrix>(e);
-  auto const& sparsity = reg.get<CFullSparsityPattern const>(e);
-  // rather than hardwiring the template, we can deduce it so it is more generic
-  auto& perElemMass =
-      reg.get<CPerElementMassMatrix<std::remove_cvref_t<decltype(femHighVolDisc)>>>(e);
-  auto& lumpedMass = reg.get<CLumpedMassMatrix>(e);
-
-  soft::UpdateSoftMass(
-      actorSnle,
-      l2g,
-      nbs,
-      material,
-      femHighVolDisc,
-      sparsity,
-      massMatrix,
-      perElemMass,
-      lumpedMass,
-      &activeVolElems);
+  ecs::InvokeOnEntity(&soft::UpdateSoftMass, reg, e);
 
   /*
    * if applicable, emplace the dynamic sample mesh strategy
@@ -549,6 +529,10 @@ void mochi::rom::InitSoftActorRom(
   // preconditions (todo: this is not complete)
   //
   MOCHI_ASSERT(shapePtr->GetMesh(), "Cannot initialize ROM actor without valid mesh.");
+  MOCHI_ERROR_IF(
+      flow && flow->flow && flow->flow->numDofs > ColliderJacDofs::kMaxDoFs - RigidSize::kDAll,
+      error,
+      "Deep Flow has more DoFs than supported for collider Jacobians.");
   MOCHI_ERROR_IF_NOT(
       static_cast<int>(romParams.romProjectionStrategy) >= 0 &&
           romParams.romProjectionStrategy < experimental::RomProjectionStrategy::Count,
@@ -628,9 +612,6 @@ void mochi::rom::InitSoftActorRom(
   // -------------------------------------------------------------------
   // 3. more storage things
   // -------------------------------------------------------------------
-  reg.emplace_or_replace<CReducedSparsityPattern>(
-      e, MakeDenseSparsityGraph(romProperties.reducedDofsDim, romProperties.reducedDofsDim));
-
   // Enabled reduced SNLE.
   reg.get<CActorSnle>(e).EnableReduced(
       Matrix<real>::Zero(romProperties.reducedDofsDim, romProperties.reducedDofsDim));

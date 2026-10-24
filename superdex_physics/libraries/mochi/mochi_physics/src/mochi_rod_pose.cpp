@@ -22,6 +22,24 @@
 
 namespace mochi::rod {
 
+Aabb CalcDeformedRodCenterlineAabb(
+    Span<Real3 const> meshNodes,
+    ColumnVectorView<real const> displacements) {
+  MOCHI_ASSERT_VERBOSE(isize(meshNodes) >= 2, "Rod must have at least 2 nodes");
+  MOCHI_ASSERT_VERBOSE(
+      isize(displacements) == isize(meshNodes) * fem::kNumRodFields, "displacements size mismatch");
+
+  Vec4r min = ToSimd(meshNodes[0], 0_r) + Load<Vec4r>(&displacements[0]);
+  Vec4r max = min;
+  for (int i = 1; i < isize(meshNodes); ++i) {
+    int const offset = i * fem::kNumRodFields;
+    Vec4r const pos = ToSimd(meshNodes[i], 0_r) + Load<Vec4r>(&displacements[offset]);
+    min = Min(min, pos);
+    max = Max(max, pos);
+  }
+  return Aabb{Set(min, 3, 0_r), Set(max, 3, 0_r)};
+}
+
 Real3 ComputeRodElementTangent(
     Span<Real3 const> meshNodes,
     ColumnVectorView<real const> displacement,
@@ -35,6 +53,20 @@ Real3 ComputeRodElementTangent(
   Real3 const x1 = meshNodes[i1] +
       Real3{displacement[offset1], displacement[offset1 + 1], displacement[offset1 + 2]};
   return Normalize(x1 - x0);
+}
+
+Real3 TransportRodElementFrameAxis(
+    Span<Real3 const> meshNodes,
+    ColumnVectorView<real const> refDisplacement,
+    ColumnVectorView<real const> outDisplacement,
+    Real3 const& refAxis,
+    real twist,
+    int elementIndex) {
+  Vec4r const refTangent =
+      ToSimd(ComputeRodElementTangent(meshNodes, refDisplacement, elementIndex));
+  Vec4r const outTangent =
+      ToSimd(ComputeRodElementTangent(meshNodes, outDisplacement, elementIndex));
+  return ToReal3(fem::TransportFrameAxis(refTangent, outTangent, twist, ToSimd(refAxis)));
 }
 
 void ApplyLieDeltaToPose(
@@ -60,11 +92,9 @@ void ApplyLieDeltaToPose(
   outDisplacement = refDisplacement + dofDelta;
 
   for (int i = 0; i < numElements; ++i) {
-    Vec4r const refTangent = ToSimd(ComputeRodElementTangent(meshNodes, refDisplacement, i));
-    Vec4r const outTangent = ToSimd(ComputeRodElementTangent(meshNodes, outDisplacement, i));
     real const twist = dofDelta[i * fem::kNumRodFields + (fem::kNumRodFields - 1)];
-    outAxes[i] =
-        ToReal3(fem::TransportFrameAxis(refTangent, outTangent, twist, ToSimd(refAxes[i])));
+    outAxes[i] = TransportRodElementFrameAxis(
+        meshNodes, refDisplacement, outDisplacement, refAxes[i], twist, i);
   }
 }
 

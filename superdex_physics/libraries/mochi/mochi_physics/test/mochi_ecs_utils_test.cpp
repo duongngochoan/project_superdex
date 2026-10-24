@@ -24,6 +24,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <utility>
 
 using namespace mochi;
 using namespace mochi::ecs;
@@ -232,6 +233,17 @@ TEST(HandleUtils, RoundTripConsistency) {
     ConstraintHandle constraintHandle = GetConstraintHandle(entity, scene);
     EXPECT_EQ(ExtractEntity(constraintHandle), entity);
   }
+}
+
+TEST(EcsUtils, TryGet) {
+  entt::registry reg;
+  entt::entity const present = reg.create();
+  entt::entity const absent = reg.create();
+  reg.emplace<int>(present);
+  auto& storage = reg.storage<int>();
+  EXPECT_EQ(TryGet(storage, present), &reg.get<int>(present));
+  EXPECT_EQ(TryGet(std::as_const(storage), present), &reg.get<int>(present));
+  EXPECT_EQ(TryGet(storage, absent), nullptr);
 }
 
 } // namespace

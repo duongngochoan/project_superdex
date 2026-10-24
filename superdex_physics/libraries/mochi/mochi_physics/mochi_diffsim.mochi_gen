@@ -1,10 +1,27 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 namespace diffsim;
+
+// @brief Default finite-difference epsilon used by back-propagation solvers.
+constant real kDefaultBackPropagationEpsFiniteDiff; # Fwd. declared because value depends on real precision.
 
 // @brief Parameters of the solve in differentiability back-propagation.
 struct diffsim::BackPropagationSolverParams [no_reflection] {
 
   // @brief Verbosity level of the back-propagation solver's logging.
-  VerbosityLevel verbosity = Warning;
+  VerbosityLevel verbosity = VerbosityLevel::Warning;
 
   // @brief Use a Newton solver for the outer adjoint solve instead of the default Krylov solver.
   bool useNewtonOuterSolver = false;
@@ -18,9 +35,9 @@ struct diffsim::BackPropagationSolverParams [no_reflection] {
   // @brief Relative convergence tolerance for the outer solver.
   real outerSolverRelTol = 1e-10;
 
-  // @brief Convergence-checking mode for the outer solver.
   # TODO(T273020090): Enable NonLinearSolverConvergenceMode::PerActorWeighted.
-  NonLinearSolverConvergenceMode outerSolverConvergenceMode = Global;
+  // @brief Convergence-checking mode for the outer solver.
+  NonLinearSolverConvergenceMode outerSolverConvergenceMode = NonLinearSolverConvergenceMode::Global;
 
   // @brief Absolute convergence tolerance for the inner (linear) solver.
   real innerSolverAbsTol = 1e-10;
@@ -37,10 +54,10 @@ struct diffsim::BackPropagationSolverParams [no_reflection] {
 struct diffsim::BackPropagationSceneStats [no_reflection] {
 
   // @brief Total wall-clock time spent in the last back-propagation step.
-  double totalDurationSec [units(s)];
+  double totalDurationSec [units("s")];
 
   // @brief Wall-clock time spent in the adjoint solve of the last back-propagation step.
-  double solveDurationSec [units(s)];
+  double solveDurationSec [units("s")];
 
   // @brief Maximum number of outer-solver iterations across all islands in the last
   // back-propagation step.
@@ -62,10 +79,10 @@ struct diffsim::BackPropagationSceneStats [no_reflection] {
 // @details For accuracy reasons, differentiability is only recommended in double precision.
 // Differentiability is only supported for rigid and articulated actors, and requires
 // @ref SolverParams::integrationMethod to be @ref IntegrationMethod::BackwardEuler. It adds
-// internal data to support the invocation of the functions @ref BackPropagate and
-// @ref GetStepJacobian. It also calls @ref experimental::ApplyImprovedConvergenceSettings, and it
-// logs warnings when overriding non-default scene or actor settings selected by the user. Consider
-// changing those settings to retain the same simulation behavior if the scene is used elsewhere.
+// internal data to support the invocation of the function @ref BackPropagate. It also calls
+// @ref experimental::ApplyImprovedConvergenceSettings, and it logs warnings when overriding
+// non-default scene or actor settings selected by the user. Consider changing those settings to
+// retain the same simulation behavior if the scene is used elsewhere.
 //
 // @param[in] scene The scene to make differentiable.
 fn diffsim::MakeSceneDifferentiable(Scene* scene) -> void [mochi_error];
@@ -127,22 +144,6 @@ fn diffsim::PrepareBackPropagate(Scene* scene, StateHandle stateNew, StateHandle
 //
 // @param[in] scene The differentiable scene.
 fn diffsim::BackPropagate(Scene* scene) -> void [release_gil, mochi_error];
-
-// @brief Forward mode differentiation through the step function.
-//
-// @details Provides the full column-major Jacobian matrices with the following sizes:
-// outJacCurr = dq_t/dq_t-1 (|q| x |q|) and outJacOld = dq_t/dq_t-2 (|q| x |q|). The rows and
-// columns of the Jacobian matrices are sorted according to the order given in Scene.GetActors().
-// The input states are three consecutive states captured during a simulated trajectory:
-// stateNew = state_t, stateCurr = state_t-1, stateOld = state_t-2.
-//
-// @param[in] scene The differentiable scene.
-// @param[in] stateNew State handle at step t.
-// @param[in] stateCurr State handle at step t-1.
-// @param[in] stateOld State handle at step t-2.
-// @param[out] outJacCurr Jacobian dq_t/dq_t-1, column-major, sized |q| x |q|.
-// @param[out] outJacOld Jacobian dq_t/dq_t-2, column-major, sized |q| x |q|.
-fn diffsim::GetStepJacobian(Scene* scene, StateHandle stateNew, StateHandle stateCurr, StateHandle stateOld, Span<real> outJacCurr, Span<real> outJacOld) -> void [mochi_error];
 
 // @brief Convert in-place gradient wrt rigid-actor state from local (Lie-parameterized)
 // representation to full rotation-vector representation.

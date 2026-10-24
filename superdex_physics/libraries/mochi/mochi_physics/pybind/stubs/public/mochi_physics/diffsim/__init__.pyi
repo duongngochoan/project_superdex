@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# pyre-strict
-
 from typing import Any, Callable, Iterator, Optional, Sequence, overload
 import numpy as np
 import numpy.typing as npt
@@ -105,9 +103,8 @@ def make_scene_differentiable(scene: mochi_physics.Scene) -> None:
     Differentiability is only supported for rigid and articulated actors, and
     requires :attr:`~superdex.physics.SolverParams.integration_method` to be
     :class:`BACKWARD_EULER <superdex.physics.IntegrationMethod>`. It adds internal
-    data to support the invocation of the functions
-    :func:`~superdex.physics.diffsim.back_propagate` and
-    :func:`~superdex.physics.diffsim.get_step_jacobian`. It also calls
+    data to support the invocation of the function
+    :func:`~superdex.physics.diffsim.back_propagate`. It also calls
     :func:`~superdex.physics.experimental.apply_improved_convergence_settings`, and
     it logs warnings when overriding non-default scene or actor settings selected by
     the user. Consider changing those settings to retain the same simulation
@@ -229,37 +226,6 @@ def back_propagate(scene: mochi_physics.Scene) -> None:
 
     Note:
         TODO: The function is not tested with variable time-stepping yet.
-    """
-
-def get_step_jacobian(
-    scene: mochi_physics.Scene,
-    state_new: mochi_physics.StateHandle,
-    state_curr: mochi_physics.StateHandle,
-    state_old: mochi_physics.StateHandle,
-    out_jac_curr: mochi_physics.ArrayLikeReal,
-    out_jac_old: mochi_physics.ArrayLikeReal,
-) -> None:
-    """Forward mode differentiation through the step function.
-
-    Provides the full column-major Jacobian matrices with the following sizes:
-    outJacCurr = dq_t/dq_t-1 (|q| x |q|) and outJacOld = dq_t/dq_t-2 (|q| x |q|).
-    The rows and columns of the Jacobian matrices are sorted according to the order
-    given in Scene.GetActors(). The input states are three consecutive states
-    captured during a simulated trajectory: stateNew = state_t, stateCurr =
-    state_t-1, stateOld = state_t-2.
-
-    Args:
-        scene (Scene): The differentiable scene.
-        state_new (StateHandle): State handle at step t.
-        state_curr (StateHandle): State handle at step t-1.
-        state_old (StateHandle): State handle at step t-2.
-        out_jac_curr (ArrayLikeReal): Jacobian dq_t/dq_t-1, column-major, sized |q|
-            x |q|.
-        out_jac_old (ArrayLikeReal): Jacobian dq_t/dq_t-2, column-major, sized |q| x
-            |q|.
-
-    Raises:
-        :class:`~superdex.physics.Error`: If an error occurs.
     """
 
 def convert_rigid_gradient_lie_to_rotation_vector(

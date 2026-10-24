@@ -18,9 +18,11 @@
 
 #include <mochi_core/utils/container_utils.h>
 #include <mochi_core/utils/dynamic_array.h>
+#include <mochi_core/utils/task_scheduler.h>
 
 // This test peaks at the src implementation to verify island behavior which
 // is not directly accessible through the public API
+#include <mochi_physics/src/mochi_articulated_body.h>
 #include <mochi_physics/src/mochi_compound.h>
 #include <mochi_physics/src/mochi_contact.h>
 #include <mochi_physics/src/mochi_island.h>
@@ -63,11 +65,11 @@ class MochiIsland : public test::MochiSceneTestBase {
   // These tests modify CConservativePotentialColliders right before islands are updated.
   // This lets us test the island code independent of collision detection.
   struct FakePotentialCollider {
-    FakePotentialCollider(ActorHandle a, ActorHandle b, ContactType type)
-        : actorA(a), actorB(b), contactType(type) {}
+    FakePotentialCollider(ActorHandle a, ActorHandle b, bool isSyncIn)
+        : actorA(a), actorB(b), isSync(isSyncIn) {}
     ActorHandle actorA;
     ActorHandle actorB;
-    ContactType contactType = {};
+    bool isSync = false;
   };
   std::vector<FakePotentialCollider> _fakePotentialColliders;
 
@@ -107,28 +109,29 @@ class MochiIsland : public test::MochiSceneTestBase {
   void PreIslandUpdate() {
     // Clear all potential colliders reported by actual collision detection.
     auto& reg = GetRegistry();
-    reg.view<CConservativePotentialColliders<mochi::ContactType::Async>>().each(
+    reg.view<CConservativePotentialColliders</*kIsSync*/ false>>().each(
         [&](auto& pc) { pc.clear(); });
-    reg.view<CConservativePotentialColliders<mochi::ContactType::Sync>>().each(
+    reg.view<CConservativePotentialColliders</*kIsSync*/ true>>().each(
         [&](auto& pc) { pc.clear(); });
 
     // Report just the "fake" potential colliders (relationships may not be symmetrical)
-    for (auto [a, b, type] : _fakePotentialColliders) {
-      if (type == ContactType::Async) {
+    for (auto [a, b, isSync] : _fakePotentialColliders) {
+      if (!isSync) {
         auto* potentialColliders =
-            reg.try_get<CConservativePotentialColliders<mochi::ContactType::Async>>(GetEntity(a));
+            reg.try_get<CConservativePotentialColliders</*kIsSync*/ false>>(GetEntity(a));
         EXPECT_NE((decltype(potentialColliders))nullptr, potentialColliders);
         auto colliderEntity = GetEntity(b);
         EXPECT_TRUE(reg.all_of<TagStaticActor>(colliderEntity))
-            << "ContactType::Async should only be used for static colliders";
+            << "Async contact should only be used for static colliders";
         potentialColliders->emplace_back(colliderEntity);
-      } else if (type == ContactType::Sync) {
+      } else {
         auto* potentialColliders =
-            reg.try_get<CConservativePotentialColliders<mochi::ContactType::Sync>>(GetEntity(a));
+            reg.try_get<CConservativePotentialColliders</*kIsSync*/ true>>(GetEntity(a));
         EXPECT_NE((decltype(potentialColliders))nullptr, potentialColliders);
         potentialColliders->emplace_back(GetEntity(b));
       }
     }
+    contact::FlagPotentialSyncColliders(reg);
   }
 
   // Called during simulation just AFTER islands are updated
@@ -212,23 +215,31 @@ class MochiIsland : public test::MochiSceneTestBase {
   void CheckAllPotentialColliders() const {
     auto const& reg = GetRegistry();
 
-    // Make sure that all potential colliders using ContactType::Async are valid
-    reg.view<CConservativePotentialColliders<mochi::ContactType::Async>>().each(
+    // Make sure that all async potential colliders are valid
+    reg.view<CConservativePotentialColliders</*kIsSync*/ false>>().each(
         [&](auto const& potentialColliders) {
-          for (auto const& collider : potentialColliders) {
-            EXPECT_TRUE(reg.valid(collider.entity));
+          for (entt::entity const collider : potentialColliders) {
+            EXPECT_TRUE(reg.valid(collider));
           }
         });
 
-    // Make sure that all potential colliders using ContactType::Sync are in the same islands.
-    reg.view<CConservativePotentialColliders<mochi::ContactType::Sync>>().each(
+    // Make sure that all sync potential colliders are in the same islands.
+    reg.view<CConservativePotentialColliders</*kIsSync*/ true>>().each(
         [&](auto e, auto const& potentialColliders) {
           entt::entity island = GetIsland(e);
-          for (auto const& collider : potentialColliders) {
-            EXPECT_TRUE(reg.valid(collider.entity));
-            EXPECT_EQ(island, GetIsland(collider.entity)); // Should be in same island by now
+          for (entt::entity const collider : potentialColliders) {
+            EXPECT_TRUE(reg.valid(collider));
+            EXPECT_EQ(island, GetIsland(collider)); // Should be in same island by now
           }
         });
+  }
+};
+
+class MochiIslandParallel : public MochiIsland {
+ public:
+  void SetUp() override {
+    _numWorkerThreads = Min(2, TaskScheduler::GetNumSupportedLogicalProcessors());
+    MochiIsland::SetUp();
   }
 };
 
@@ -236,14 +247,92 @@ class MochiIsland : public test::MochiSceneTestBase {
   Test Cases
 */
 
+// Verifies that a static articulated link remains stable while serving as an async collider.
+TEST_F(MochiIslandParallel, StaticArticulatedLinkIsStableAsyncCollider) {
+  TransformRT const prescribedRoot{Real3{0.25_r, -0.5_r, 0.75_r}};
+  auto linkShape = test::CreateUnitCubeTetMeshShape(_mochiContext);
+
+  ArticulatedActorParams params;
+  params.worldFromRoot = prescribedRoot;
+  params.joints = {
+      {.type = ArticulatedJointType::Hard},
+      {.type = ArticulatedJointType::Revolute, .axis = Real3{0_r, 0_r, 1_r}}};
+  params.links = {
+      {.parentLink = -1, .shape = linkShape, .layer = "object", .colliderType = ColliderType::Box},
+      {.parentLink = 0, .shape = linkShape, .layer = "object", .colliderType = ColliderType::None}};
+  auto* articulation = _scene->CreateArticulatedActor(params, test::ExpectOK{});
+  ASSERT_NE(nullptr, articulation);
+  ActorHandle const articulationHandle = articulation->GetHandle();
+  ASSERT_EQ(1, articulation->GetNumDofs());
+  articulation->SetArticulatedJointVelocities(DynamicArray<real>{1_r}, test::ExpectOK{});
+
+  auto const& links = articulation->GetNestedLinkActors(test::ExpectOK{});
+  ASSERT_EQ(2, isize(links));
+  ActorHandle const rootHandle = links[0];
+  ActorHandle const childHandle = links[1];
+  auto* root = _scene->GetActor(rootHandle);
+  auto* child = _scene->GetActor(childHandle);
+  ASSERT_NE(nullptr, root);
+  ASSERT_NE(nullptr, child);
+  TransformRT const rootBefore = root->GetRootTransform();
+  TransformRT const childBefore = child->GetRootTransform();
+
+  ActorHandle const cubeHandle = CreateRigidActor();
+  TransformRT cubeTransform = rootBefore;
+  // Center the 0.1 cube inside the unit root collider so bounds overlap without contact response.
+  cubeTransform.SetTranslation(rootBefore.GetTranslation() + Real3{0.45_r, 0.45_r, 0.45_r});
+  _scene->GetActor(cubeHandle)->SetRootTransform(cubeTransform, test::ExpectOK{});
+
+  auto& reg = GetRegistry();
+  entt::entity const rootEntity = GetEntity(rootHandle);
+  entt::entity const childEntity = GetEntity(childHandle);
+  entt::entity const cubeEntity = GetEntity(cubeHandle);
+  EXPECT_TRUE(reg.all_of<TagStaticActor>(rootEntity));
+  EXPECT_FALSE(reg.all_of<TagStaticActor>(childEntity));
+
+  _fakePotentialColliders.emplace_back(cubeHandle, rootHandle, /*kIsSync*/ false);
+
+  test::SetSceneIntegrationMethod(_scene, IntegrationMethod::DIRK33);
+  Step();
+  EXPECT_NE(GetIsland(cubeHandle), GetIsland(articulationHandle));
+
+  auto const* potentialColliders =
+      reg.try_get<CPotentialColliders</*kIsSync*/ false> const>(cubeEntity);
+  ASSERT_NE(nullptr, potentialColliders);
+  EXPECT_TRUE(Contains(*potentialColliders, rootEntity));
+
+  int constexpr kNumSteps = 16;
+  for (int step = 1; step < kNumSteps; ++step) {
+    Step();
+  }
+
+  EXPECT_FALSE(
+      NearEqual(childBefore.GetRotation(), child->GetRootTransform().GetRotation(), kTolerance));
+  EXPECT_EQ(rootBefore.GetRotation(), root->GetRootTransform().GetRotation());
+  EXPECT_EQ(rootBefore.GetTranslation(), root->GetRootTransform().GetTranslation());
+  auto const& linkTransforms =
+      reg.get<CArticulatedLinkTransforms<TimeStep::Current> const>(GetEntity(articulationHandle));
+  auto const& rootState = reg.get<CRigidState<TimeStep::Current> const>(rootEntity).value;
+  EXPECT_EQ(linkTransforms[0].GetRotation(), rootState.GetRotation());
+  EXPECT_EQ(linkTransforms[0].GetTranslation(), rootState.GetTranslation());
+
+  _scene->DestroyActor(cubeHandle);
+  _scene->DestroyActor(articulationHandle);
+}
+
 TEST_F(MochiIsland, StaticActorNoIsland) {
   auto& reg = GetRegistry();
 
-  // Static actors should not be in any island
+  // Static actors should not be in any island, even when moved or when forcing a single island
   ActorHandle actor = CreateRigidActor(true);
-  Step();
-  EXPECT_FALSE(reg.any_of<CIslandMemberInfo>(GetEntity(actor)));
-  EXPECT_EQ(0, GetNumIslands());
+  for (bool const forceSingleIsland : {false, true, false, true}) {
+    _scene->SetForceSingleIsland(forceSingleIsland);
+    _scene->GetActor(actor)->SetRootTransform(
+        TransformRT{Real3{0_r, forceSingleIsland ? 1_r : 0_r, 0_r}}, test::ExpectOK{});
+    Step();
+    EXPECT_FALSE(reg.any_of<CIslandMemberInfo>(GetEntity(actor)));
+    EXPECT_EQ(0, GetNumIslands());
+  }
 
   // Cleanup
   _scene->DestroyActor(actor);
@@ -335,6 +424,12 @@ TEST_F(MochiIsland, VariousContactType) {
       // just to prove that it remains in the same island as actorB.
       actorC = CreateRigidActor();
 
+      // This threshold shrinks actorC's contact bounds to negative extents. No sync list holds
+      // actorC, so collision detection must not evaluate them.
+      ContactParams contact;
+      contact.penaltyThresholdDefault = -0.1_r;
+      _scene->GetActor(actorC)->SetContactParams(contact, test::ExpectOK{});
+
       compound = reg.create();
       InitCompoundActor(reg, compound, test::ExpectOK{});
       AddActorToCompound(reg, compound, GetEntity(actorB), test::ExpectOK{});
@@ -344,9 +439,6 @@ TEST_F(MochiIsland, VariousContactType) {
     // Try various types of contact interactions (not necessarily symetrical)
     for (int enableAB = 0; enableAB < 2; ++enableAB) {
       for (int enableBA = 0; enableBA < 2; ++enableBA) {
-        auto abContactType = enableAB ? ContactType::Sync : ContactType::None;
-        auto baContactType = enableBA ? ContactType::Sync : ContactType::None;
-
         // Override CConservativePotentialColliders so contact code sees no potential colliders
         _fakePotentialColliders.clear();
 
@@ -358,16 +450,19 @@ TEST_F(MochiIsland, VariousContactType) {
           EXPECT_EQ(GetIsland(actorB), GetIsland(actorC)); // C is in the same compound as B
         }
 
-        // Override CConservativePotentialColliders so contact code sees potential colliders
-        // according to abContactType and baContactType.
+        // Override CConservativePotentialColliders so contact code sees sync potential colliders
+        // according to enableAB and enableBA.
         _fakePotentialColliders.clear();
-        _fakePotentialColliders.emplace_back(actorA, actorB, abContactType);
-        _fakePotentialColliders.emplace_back(actorB, actorA, baContactType);
+        if (enableAB) {
+          _fakePotentialColliders.emplace_back(actorA, actorB, /*isSync*/ true);
+        }
+        if (enableBA) {
+          _fakePotentialColliders.emplace_back(actorB, actorA, /*isSync*/ true);
+        }
 
-        // The actors islands should split or merge according to ContactType
+        // The actors islands should split or merge according to the sync potential colliders
         Step();
-        bool shouldMerge =
-            (abContactType == ContactType::Sync) || (baContactType == ContactType::Sync);
+        bool const shouldMerge = enableAB || enableBA;
         if (shouldMerge) {
           EXPECT_EQ(1, GetNumIslands());
           EXPECT_EQ(GetIsland(actorA), GetIsland(actorB));
@@ -406,8 +501,8 @@ TEST_F(MochiIsland, MergeSplitSameStep) {
 
   // Override CConservativePotentialColliders so that two islands will be formed: {a, b} and {c, d}
   _fakePotentialColliders.clear();
-  _fakePotentialColliders.emplace_back(a, b, ContactType::Sync);
-  _fakePotentialColliders.emplace_back(c, d, ContactType::Sync);
+  _fakePotentialColliders.emplace_back(a, b, /*kIsSync*/ true);
+  _fakePotentialColliders.emplace_back(c, d, /*kIsSync*/ true);
   Step();
   EXPECT_EQ(2, GetNumIslands());
   EXPECT_EQ(GetIsland(a), GetIsland(b));
@@ -416,8 +511,8 @@ TEST_F(MochiIsland, MergeSplitSameStep) {
 
   // Cause islands {b, c} and {a, d} to be formed (requires a merge and a split in the same step)
   _fakePotentialColliders.clear();
-  _fakePotentialColliders.emplace_back(b, c, ContactType::Sync);
-  _fakePotentialColliders.emplace_back(a, d, ContactType::Sync);
+  _fakePotentialColliders.emplace_back(b, c, /*kIsSync*/ true);
+  _fakePotentialColliders.emplace_back(a, d, /*kIsSync*/ true);
   Step();
   EXPECT_EQ(2, GetNumIslands());
   EXPECT_EQ(GetIsland(a), GetIsland(d));
@@ -426,8 +521,8 @@ TEST_F(MochiIsland, MergeSplitSameStep) {
 
   // Cause isands {a, c} and {b, d} to be formed.
   _fakePotentialColliders.clear();
-  _fakePotentialColliders.emplace_back(a, c, ContactType::Sync);
-  _fakePotentialColliders.emplace_back(b, d, ContactType::Sync);
+  _fakePotentialColliders.emplace_back(a, c, /*kIsSync*/ true);
+  _fakePotentialColliders.emplace_back(b, d, /*kIsSync*/ true);
   Step();
   EXPECT_EQ(2, GetNumIslands());
   EXPECT_EQ(GetIsland(a), GetIsland(c));
@@ -436,8 +531,7 @@ TEST_F(MochiIsland, MergeSplitSameStep) {
 
   // Finally, cause islands {B, C} and {A} and {D} to be formed.
   _fakePotentialColliders.clear();
-  _fakePotentialColliders.emplace_back(b, c, ContactType::Sync);
-  _fakePotentialColliders.emplace_back(d, c, ContactType::None); // Does not cause merger
+  _fakePotentialColliders.emplace_back(b, c, /*isSync*/ true);
   Step();
   EXPECT_EQ(3, GetNumIslands());
   EXPECT_EQ(GetIsland(b), GetIsland(c));
@@ -458,7 +552,7 @@ TEST_F(MochiIsland, SplitMultiple) {
     handle = CreateRigidActor();
   }
   for (int i = 0; i < isize(actors); i += 2) {
-    _fakePotentialColliders.emplace_back(actors[i], actors[i + 1], ContactType::Sync);
+    _fakePotentialColliders.emplace_back(actors[i], actors[i + 1], /*kIsSync*/ true);
   }
   Step();
   EXPECT_EQ(10, GetNumIslands());
@@ -486,13 +580,16 @@ TEST_F(MochiIsland, SplitPermutation) {
   for (auto& a : actors) {
     a = CreateRigidActor();
   }
+  // island::PreStep below skips the broadphase, which emplaces the contact bounds that
+  // PreIslandUpdate flags, so step once first.
+  Step();
 
   // Helper: Fakes potential colliders to cause a single island to form
   auto formSingleIsland = [&]() {
     _fakePotentialColliders.clear();
     for (int i = 0; i < kNumActors; ++i) {
       for (int j = i + 1; j < kNumActors; ++j) {
-        _fakePotentialColliders.emplace_back(actors[i], actors[j], ContactType::Sync);
+        _fakePotentialColliders.emplace_back(actors[i], actors[j], /*kIsSync*/ true);
       }
     }
     // Uses island::PreStep not Scene::Step for speed.
@@ -517,7 +614,7 @@ TEST_F(MochiIsland, SplitPermutation) {
             for (int i = 0; i < kNumActors; ++i) {
               for (int j = 0; j < kNumActors; ++j) {
                 if (mask[i] & (1 << j)) {
-                  _fakePotentialColliders.emplace_back(actors[i], actors[j], ContactType::Sync);
+                  _fakePotentialColliders.emplace_back(actors[i], actors[j], /*kIsSync*/ true);
                 }
               }
             }
@@ -638,6 +735,30 @@ TEST_F(MochiIsland, ForceSingleIsland) {
   _scene->SetForceSingleIsland(false);
   Step();
   expectSingleIsland(false);
+
+  // With a single island forced, removing every dynamic actor removes the island, even if another
+  // entity recycles its handle, and new dynamic actors join one island on their first step. Also in
+  // a differentiable scene.
+  _scene->SetForceSingleIsland(true);
+  for (bool const differentiable : {false, true}) {
+    if (differentiable) {
+      test::SetSceneIntegrationMethod(_scene, IntegrationMethod::BackwardEuler);
+      MakeSceneDifferentiableInternal(_scene, test::ExpectOK{});
+    }
+    Step();
+    entt::entity const globalIsland = GetIsland(a);
+    _scene->DestroyActor(a);
+    _scene->DestroyActor(b);
+    ASSERT_EQ(globalIsland, reg.create(globalIsland));
+    Step();
+    EXPECT_EQ(0, GetNumIslands());
+    a = CreateRigidActor();
+    b = CreateRigidActor();
+    Step();
+    expectSingleIsland(true);
+    EXPECT_FALSE(reg.all_of<TagIsland>(globalIsland));
+    reg.destroy(globalIsland);
+  }
 
   // Cleanup
   _scene->DestroyActor(a);

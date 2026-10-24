@@ -16,30 +16,32 @@
 
 #include "mochi_soft_skinned.h"
 
+#include "mochi_blended.h"
 #include "mochi_common_components.h"
 #include "mochi_contact_filter.h"
 #include "mochi_integration.h"
 #include "mochi_island.h"
 #include "mochi_rom_jacobian.h"
+#include "mochi_soft_init.h"
 #include "mochi_soft_rom_components.h"
 
-#include <mochi_core/contact/dmap.h>
+#include <mochi_core/memory/filo_allocator.h>
 #include <mochi_core/rom/rom_hyper_reduction.h>
 #include <mochi_core/utils/basic_utils.h>
 #include <mochi_core/utils/container_utils.h>
+#include <mochi_core/utils/dskinning.h>
 #include <mochi_core/utils/sparsity_utils.h>
 #include <mochi_core/utils/task_scheduler.h>
 
+#include <algorithm>
 #include <optional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
 
 using namespace mochi;
 using namespace mochi::skinned;
-using namespace mochi::dmap;
 
 static constexpr int kSoftIdx = CSkinnedInteractionSnle::kSoftIdx;
 static constexpr int kArticulatedIdx = CSkinnedInteractionSnle::kArticulatedIdx;
@@ -57,15 +59,14 @@ void skinned::EntityAssembleBody(
     CSkinnedEnergy const& skinnedEnergy,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CSoftMaterialParams const& materialParams,
-    CMassMatrix const& massMatrix,
+    CMassMatrix const* massMatrix,
     CDofOffset const& dofOffset,
     CActiveVolumeElements const* activeVolElems,
     CSkinnedComposition const& composition,
     CTimeIntegratorState const& intState,
-    CArticulatedSkinningData const& skinningData,
+    CSoftSkinnedJacobianArticulated const& jacobianArticulated,
     CSoftSkinnedJacobianDynamic const& jacobianSoft,
     CDisplacementSlice<real, TimeStep::Current, DisplacementLayer::Skinned> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart, DisplacementLayer::Skinned> const&
@@ -75,6 +76,7 @@ void skinned::EntityAssembleBody(
     CSoftSkinnedAssemblyScratchMemory& scratchMemory,
     CActorSnle& outSoftSnle,
     CSoftSkinnedUnposedSnle& outSoftSkinnedSnle,
+    CArticulatedSkinnedBodyLinkResidual& outLinkResidual,
     CSkinnedInteractionSnle& outInteractionSnle) {
   MOCHI_PROFILE_SCOPE();
 
@@ -83,16 +85,16 @@ void skinned::EntityAssembleBody(
   bool const hasPosedStress = hasStressTag && skinnedEnergy.stress;
   bool const hasUnposedInertia = hasInertiaTag && !skinnedEnergy.inertia;
   bool const hasUnposedStress = hasStressTag && !skinnedEnergy.stress;
-  if (!hasPosedGravity && !hasPosedInertia && !hasPosedStress) {
-    return;
-  }
+  MOCHI_ASSERT_VERBOSE(
+      hasPosedGravity || hasPosedInertia || hasPosedStress,
+      "Nested soft actor body assembly requires posed energy terms.");
 
   MOCHI_ASSERT(!hasPosedInertia || stageStartVel, "Expected stage-start velocity.");
   MOCHI_ASSERT(!isRom || romProjectionStrategy, "Missing ROM projection strategy.");
   MOCHI_ASSERT(
       !isRom ||
           romProjectionStrategy->value == experimental::RomProjectionStrategy::ActorLevelProjection,
-      "The dedicated assembly logic for soft skinned actors requires actor-level projection for ROMs.");
+      "The dedicated assembly logic for nested soft actors requires actor-level projection for ROMs.");
 
   // Perform the assembly of energy terms on the soft-actor level
   soft::AssembleBodyImpl(
@@ -103,31 +105,32 @@ void skinned::EntityAssembleBody(
       hasPosedStress,
       l2g,
       nbs,
-      femLowVolDisc,
-      femHighVolDisc,
+      femVolDisc,
       TransformRT::Identity(),
       materialParams,
       intState,
       currDispl.value,
       stageStartDispl.value,
-      stageStartVel ? stageStartVel->value : ColumnVector<real>{},
+      stageStartVel ? AsConstView(stageStartVel->value) : ColumnVectorView<real const>{},
       massMatrix,
       outSoftSkinnedSnle,
       activeVolElems);
 
   // Transform the terms to the soft skinned actor
   auto softOffset = dofOffset.dofsOffset;
-  auto articulated = composition.articulated;
-  auto artOffset = reg.get<CDofOffset const>(articulated).dofsOffset;
-  auto const& Jart = skinningData.jacobianDJoints;
 
   if (params.assemObj) {
     outInteractionSnle.objective = outSoftSkinnedSnle.objective;
   }
 
+  static_assert(kSoftIdx == 0 && kArticulatedIdx == 1, "Update residual/dresidual access below");
+
   if (params.assemRes) {
     MOCHI_PROFILE_SCOPE_N("Project soft skinned Residual");
-    MOCHI_ASSERT(outInteractionSnle.residuals.size() == 2, "Expected 2 residuals.");
+    MOCHI_ASSERT(outInteractionSnle.residuals.size() == 1, "Expected 1 residual.");
+    MOCHI_ASSERT_VERBOSE(
+        params.gradTarget == GradTarget::Current || params.gradTarget == GradTarget::Previous,
+        "The posed body energy of nested soft actors requires a state grad target.");
 
     // Transform the soft-actor residual by the skinning Jacobian
     outInteractionSnle.residuals[kSoftIdx].first = softOffset;
@@ -135,9 +138,12 @@ void skinned::EntityAssembleBody(
     jacobianSoft.TransposeMultiply(
         AsConstView(outSoftSkinnedSnle.fullResidual), AsView(outSoftResidual));
 
-    outInteractionSnle.residuals[kArticulatedIdx].first = artOffset;
-    auto& outArtResidual = outInteractionSnle.residuals[kArticulatedIdx].second;
-    outArtResidual = Jart.Transpose() * outSoftSkinnedSnle.fullResidual;
+    // Transform the soft-actor residual to link space by the skinning Jacobian wrt bones.
+    // articulated::compound::ProjectFullResidual projects it to the joint DoFs, which is equivalent
+    // to Jart^T r, since Jart = dBones * J.
+    jacobianArticulated.dBones.TransposeApply(
+        AsConstView(outSoftSkinnedSnle.fullResidual), AsView(outLinkResidual.residual));
+    outLinkResidual.isActive = true;
   }
 
   if (params.assemDRes) {
@@ -160,6 +166,9 @@ void skinned::EntityAssembleBody(
         (std::holds_alternative<BlockSparseMatrix<real, 3>>(outSoftSkinnedSnle.fullDResidual)),
         "Expected block sparse dresidual.");
     auto const& A = std::get<BlockSparseMatrix<real, 3>>(outSoftSkinnedSnle.fullDResidual);
+    auto articulated = composition.articulated;
+    auto artOffset = reg.get<CDofOffset const>(articulated).dofsOffset;
+    auto const& Jart = jacobianArticulated.dJoints;
 
     MOCHI_ASSERT(outInteractionSnle.dresiduals.size() == 2, "Expected 2 dresiduals.");
     MOCHI_ASSERT(
@@ -247,11 +256,11 @@ InitSoftSkinnedMesh(entt::registry& reg, entt::entity e, bool useContact, Error&
 
   MOCHI_ASSERT(
       reg.all_of<CFemBoundaryDiscretization>(e),
-      "Soft skinned actor with contact must have a boundary discretization");
+      "Nested soft actor with contact must have a boundary discretization");
   int const numCollidingSamples = reg.get<CFemBoundaryDiscretization const>(e).GetNumQuadPoints();
 
   // Initialize components for colliding-actor role.
-  auto strategy = ContactPartitionStrategy::SkinningDofGroups;
+  auto strategy = ContactPartitionStrategy::SharedBones;
   auto const& contactParams = reg.get<CContactParams>(e);
   InitCollidingSkinMesh(
       reg,
@@ -282,10 +291,8 @@ InitEnergyTerms(entt::registry& reg, entt::entity e, SoftSkinnedActorParams cons
   auto const* tetMesh = reg.get<CTetrahedralMesh const>(e).mesh.get();
   int numNodes = tetMesh->GetNumNodes();
 
-  // Velocity for inertial term
+  // Velocity history for the inertial term.
   if (params.hasInertia) {
-    reg.emplace<CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>>(
-        e, 3 * numNodes);
     reg.emplace<CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned>>(
         e, 3 * numNodes);
     reg.emplace<CVelocitySlice<real, TimeStep::StageStart, DisplacementLayer::Skinned>>(
@@ -312,19 +319,27 @@ InitEnergyTerms(entt::registry& reg, entt::entity e, SoftSkinnedActorParams cons
     reg.emplace_or_replace<CStressDisplacementRef>(e, dispCurr.value);
   }
 
+  // The posed body keeps a mass matrix if it has inertia but no stress (see CMassMatrix).
+  if (params.hasInertia && !params.hasStress) {
+    reg.emplace<CMassMatrix>(e);
+    ecs::InvokeOnEntity(&soft::UpdateSoftMass, reg, e);
+  }
+
   // SNLE data for the soft actor body assembly.
   AnyMatrix<real> softDres = reg.get<CActorSnle const>(e).fullDResidual; // Owning copy.
   auto& softSnle = reg.emplace<CSoftSkinnedUnposedSnle>(e, std::move(softDres));
   softSnle.useInSolver = false;
 
-  // SNLE data for the soft actor terms transformed to the full dofs.
+  // SNLE data for the soft actor terms transformed to the full DoFs. The residual holds the soft
+  // entry only: the articulated one is in CArticulatedSkinnedBodyLinkResidual, in link space.
   int softDofs = reg.get<CActorDofInfo const>(e).dofsSize;
   auto articulated = reg.get<CSkinnedComposition const>(e).articulated;
   int artDofs = reg.get<CActorDofInfo const>(articulated).dofsSize;
   auto& actorSnle = reg.emplace<CSkinnedInteractionSnle>(e);
-  actorSnle.residuals.resize(2);
+  actorSnle.residuals.resize(1);
   actorSnle.residuals[kSoftIdx].second = ColumnVector<real>::Zero(softDofs);
-  actorSnle.residuals[kArticulatedIdx].second = ColumnVector<real>::Zero(artDofs);
+  reg.emplace<CArticulatedSkinnedBodyLinkResidual>(
+      e, reg.get<CArticulatedProps const>(articulated).fullDofsDim);
 
   // Offsets will be populated in skinned::EntityAssembleBody based on island composition.
   int constexpr kDummyOffset = 0;
@@ -346,6 +361,11 @@ InitEnergyTerms(entt::registry& reg, entt::entity e, SoftSkinnedActorParams cons
       dresSoftArtView);
 
   // Emplace Jacobians for the soft actor mesh.
+  auto& jacobianArticulated = reg.emplace<CSoftSkinnedJacobianArticulated>(e);
+  jacobianArticulated.dBones =
+      reg.get<CArticulatedSkinningData const>(e).skinningTransform.CreateDBones();
+  jacobianArticulated.dJoints = mochi::articulated::CreateJacobianStorage(
+      3 * numNodes, reg.get<CArticulatedProps const>(articulated).reducedDofsDim);
   auto& softJacobianRest = reg.emplace<CSoftSkinnedJacobianRest>(e);
   softJacobianRest.value = CreateSkinningJacobianRest(numNodes);
   auto const* romJacobian = reg.try_get<rom::CRomJacobian const>(e);
@@ -358,8 +378,7 @@ InitEnergyTerms(entt::registry& reg, entt::entity e, SoftSkinnedActorParams cons
   // Emplace scratch memory for the soft actor assembly.
   auto& scratchMemory = reg.emplace<CSoftSkinnedAssemblyScratchMemory>(e);
   auto const& softSnleDResBsp = std::get<BlockSparseMatrix<real, 3>>(softSnle.fullDResidual);
-  auto const& jacobianArt = reg.get<CArticulatedSkinningData const>(e).jacobianDJoints;
-  scratchMemory.A_Jart.Resize(softSnleDResBsp.Rows(), jacobianArt.Cols());
+  scratchMemory.A_Jart.Resize(softSnleDResBsp.Rows(), jacobianArticulated.dJoints.Cols());
   if (!softJacobianDynamic.IsBlockDiagonal()) {
     // A_Jsoft is only needed for ROMs.
     scratchMemory.A_Jsoft.Resize(softSnleDResBsp.Rows(), softJacobianDynamic.Cols());
@@ -383,16 +402,20 @@ static void ResolveSkinning(
       reg.template get<CArticulatedLinkTransforms<kStep> const>(composition.articulated);
 
   if (activeNodes && !kForceUseAllNodes) {
-    auto rest3 = Unflatten<Real3 const>(MakeConstSpan(skinningData.restCoords));
-    auto softDisp3 = Unflatten<Real3 const>(MakeConstSpan(softDisp.value));
+    auto const nodeSpan = activeNodes->ViewIds();
+    if (nodeSpan.empty()) {
+      return;
+    }
+    auto const rest3 = Unflatten<Real3 const>(MakeConstSpan(skinningData.restCoords));
+    auto const softDisp3 = Unflatten<Real3 const>(MakeConstSpan(softDisp.value));
     auto pos3 = Unflatten<Real3>(MakeSpan(outPositions.value));
     auto disp3 = Unflatten<Real3>(MakeSpan(outDisplacements.value));
-    for (int node : activeNodes->ViewIds()) {
+    for (int node : nodeSpan) {
       pos3[node] = rest3[node] + softDisp3[node];
     }
     skinningData.skinningTransform.Transform(
-        linkTransforms, outPositions.value, outDisplacements.value, activeNodes->ViewIds());
-    for (int node : activeNodes->ViewIds()) {
+        linkTransforms, outPositions.value, outDisplacements.value, nodeSpan);
+    for (int node : nodeSpan) {
       disp3[node] -= rest3[node];
     }
   } else {
@@ -403,17 +426,95 @@ static void ResolveSkinning(
   }
 }
 
-/*
- * Pipeline to resolve current skinning displacements for all nodes, including inactive nodes when
- * subsampling is enabled.
- */
-static void ResolveAllNodeSkinningDisplacementsPipeline(
+void skinned::ResolveAllNodeSkinningDisplacementsPipeline(
     entt::registry& reg,
     Span<entt::entity const> entities) {
   MOCHI_PROFILE_SCOPE();
   ecs::InvokeForEach(
       &ResolveSkinning<TimeStep::Current, /* kForceUseAllNodes */ true>, reg, entities);
 }
+
+void skinned::SynchronizeAfterExternalChange(entt::registry& reg, entt::entity e) {
+  skinned::ResolveAllNodeSkinningDisplacementsPipeline(reg, MakeSingletonConstSpan(e));
+
+  auto const parent = reg.get<CSkinnedComposition const>(e).articulated;
+  if (reg.all_of<CBlendingData>(parent)) {
+    articulated::compound::ResolveAllNodeSkinningDisplacementsPipeline(
+        reg, MakeSingletonConstSpan(parent));
+    blended::ResolveAllNodeBlendingDisplacementsPipeline(reg, MakeSingletonConstSpan(parent));
+    RelaxConservativeStepBoundsOnNextStep(reg, parent);
+  }
+
+  ecs::TryInvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
+      UpdateSkinningVelocity</*kIsState*/ true>, reg, e);
+}
+
+template <bool kIsState>
+void skinned::UpdateSkinningVelocity(
+    std::conditional_t<
+        kIsState,
+        ecs::Included<CIntegrationVelocitySlices<DisplacementLayer::Skinned>>,
+        ecs::Excluded<CIntegrationVelocitySlices<DisplacementLayer::Skinned>>>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::PartialRegistry<
+        CArticulatedLinkTransforms<TimeStep::Current> const,
+        CArticulatedLinkVels const> reg,
+    CSkinnedComposition const& composition,
+    CVelocitySlice<real, TimeStep::Current> const& softVelocity,
+    CArticulatedSkinningData const& skinningData,
+    CNodePositions const& positions,
+    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& outVelocity) {
+  MOCHI_FILO_STACK_ALLOCATOR(allocator, 1024 * sizeof(Real3));
+  ColumnVector<real> scratch(outVelocity.value.Rows(), &allocator);
+
+  // State updates preserve tangent velocity semantics. Non-state updates are used only for
+  // conservative speed bounds and use finite-step rotational velocities.
+  entt::entity const articulated = composition.articulated;
+  auto const& linkTransforms =
+      reg.get<CArticulatedLinkTransforms<TimeStep::Current> const>(articulated);
+  auto const& linkVels = reg.get<CArticulatedLinkVels const>(articulated);
+
+  if constexpr (kIsState) {
+    skinningData.skinningTransform.DTransformDBones</*kTangentVel=*/true>(
+        linkTransforms, positions.value, linkVels, outVelocity.value);
+  } else {
+    real const timeStep = static_cast<real>(time->DeltaTime());
+    MOCHI_ASSERT_VERBOSE(IsFinite(timeStep), "Expected a finite positive time step.");
+    // Bone and soft displacements must compose at the same end-of-step unposed positions.
+    scratch = positions.value + softVelocity.value * timeStep;
+    skinningData.skinningTransform.DTransformDBones</*kTangentVel=*/false>(
+        linkTransforms, scratch, linkVels, outVelocity.value);
+  }
+
+  // Add the skin velocity due to soft velocity
+  skinningData.skinningTransform.DTransform(
+      linkTransforms, AsConstView(softVelocity.value), scratch);
+  outVelocity.value += scratch;
+}
+
+template void skinned::UpdateSkinningVelocity<true>(
+    ecs::Included<CIntegrationVelocitySlices<DisplacementLayer::Skinned>>,
+    ecs::CtxGlobal<CSceneTime const>,
+    ecs::PartialRegistry<
+        CArticulatedLinkTransforms<TimeStep::Current> const,
+        CArticulatedLinkVels const>,
+    CSkinnedComposition const&,
+    CVelocitySlice<real, TimeStep::Current> const&,
+    CArticulatedSkinningData const&,
+    CNodePositions const&,
+    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>&);
+
+template void skinned::UpdateSkinningVelocity<false>(
+    ecs::Excluded<CIntegrationVelocitySlices<DisplacementLayer::Skinned>>,
+    ecs::CtxGlobal<CSceneTime const>,
+    ecs::PartialRegistry<
+        CArticulatedLinkTransforms<TimeStep::Current> const,
+        CArticulatedLinkVels const>,
+    CSkinnedComposition const&,
+    CVelocitySlice<real, TimeStep::Current> const&,
+    CArticulatedSkinningData const&,
+    CNodePositions const&,
+    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>&);
 
 void skinned::InitSkinnedActor(
     entt::registry& reg,
@@ -428,20 +529,20 @@ void skinned::InitSkinnedActor(
   MOCHI_ASSERT(reg.all_of<TagSoftActor const>(e), "Not a soft actor.");
   MOCHI_ASSERT(
       (reg.any_of<CDofPositionsBC, TagRomActorFixRigidTransformInSolve>(e)),
-      "Soft skinned actor must have Dirichlet boundary conditions or it must be a ROM with no rigid dofs");
+      "Nested soft actor must have Dirichlet boundary conditions or it must be a ROM with no rigid DoFs.");
   MOCHI_ASSERT(
-      !reg.all_of<CRecenteringParams>(e), "Soft skinned actor must have recentering disabled");
+      !reg.all_of<CRecenteringParams>(e), "Nested soft actor must have recentering disabled");
 
   MOCHI_ERROR_IF(
-      reg.any_of<TagUseGravity>(e), error, "Soft skinned actor cannot use unposed gravity");
+      reg.any_of<TagUseGravity>(e), error, "Nested soft actor cannot use unposed gravity");
   MOCHI_ERROR_IF(
       reg.any_of<TagUseInertia>(e) && params.hasInertia,
       error,
-      "Soft skinned actor cannot use both posed and unposed inertia");
+      "Nested soft actor cannot use both posed and unposed inertia");
   MOCHI_ERROR_IF(
       reg.any_of<TagUseStress>(e) && params.hasStress,
       error,
-      "Soft skinned actor cannot use both posed and unposed stress");
+      "Nested soft actor cannot use both posed and unposed stress");
   MOCHI_ERROR_RETURN(error);
 
   // Add composition component.
@@ -451,8 +552,8 @@ void skinned::InitSkinnedActor(
   composition.articulated = articulated;
   composition.articulatedHandle = articulatedHandle;
 
-  // Add soft skinned actor tag
-  reg.emplace<TagSoftSkinnedActor>(e);
+  // Add nested soft actor tag.
+  reg.emplace<TagNestedSoftActor>(e);
 
   InitSoftSkinnedMesh(reg, e, useContact, error);
   MOCHI_ERROR_RETURN(error);
@@ -462,21 +563,17 @@ void skinned::InitSkinnedActor(
     InitEnergyTerms(reg, e, params);
   }
 
+  // Both bodies' energy terms are now known.
+  WarnIfSoftDampingInactive(reg, e);
+
   // Resolve skinning so the skinned displacements reflect the actual skeleton pose rather than the
   // rest mesh.
   ResolveAllNodeSkinningDisplacementsPipeline(reg, MakeSingletonConstSpan(e));
-}
 
-static void ComputeCurrentVelocity(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
-    CTimeIntegratorState const& intState,
-    CDisplacementSlice<real, TimeStep::StageStart, DisplacementLayer::Skinned> const&
-        stageStartDispl,
-    CDisplacementSlice<real, TimeStep::Current, DisplacementLayer::Skinned> const& currDispl,
-    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currVel) {
-  // Velocity is recovered via finite differences of the displacements at the beginning and at the
-  // end of the stage.
-  currVel.value = (currDispl.value - stageStartDispl.value) * (1_r / intState.dtStage);
+  // The skeleton velocity is initialized before nested soft actors exist. Initialize the
+  // state-backed skinned velocity now that all inputs are available.
+  ecs::TryInvokeOnEntity<ecs::policy::AllowReadWriteSameComponent>(
+      &skinned::UpdateSkinningVelocity</*kIsState*/ true>, reg, e);
 }
 
 template <int kNumDofsPerNode>
@@ -555,26 +652,28 @@ static void ResolveJacobianDJoints(
     CSkinnedComposition const& composition,
     CNodePositions const& positions,
     CActiveUniqueNodes const* activeNodes,
-    CArticulatedSkinningData& outSkinningData) {
+    CArticulatedSkinningData const& skinningData,
+    CSoftSkinnedJacobianArticulated& outJacobian) {
   // Compute Jacobian DBones
   auto const& linkTransforms =
       reg.get<CArticulatedLinkTransforms<TimeStep::Current> const>(composition.articulated);
-  articulated::compound::ResolveSkinningJacobianDBones(
-      linkTransforms, positions.value, outSkinningData, activeNodes);
+  Span<int const> activeNodesSpan = activeNodes ? activeNodes->ViewIds() : Span<int const>{};
+  skinningData.skinningTransform.DTransformDBones(
+      linkTransforms, positions.value, outJacobian.dBones, activeNodesSpan);
 
   // Compute Jacobian DJoints by chain rule with Jacobian DBones/DJoints
   auto const& articulatedJacobian = reg.get<CArticulatedJacobian const>(composition.articulated);
   static_assert(
-      krylov::details::MatTraits<decltype(outSkinningData.jacobianDJoints)>::kMajorDir ==
+      krylov::details::MatTraits<decltype(outJacobian.dJoints)>::kMajorDir ==
       krylov::Direction::RowMajor); // Enforced for performance reasons.
   static_assert(
       krylov::details::MatTraits<decltype(articulatedJacobian.value)>::kMajorDir ==
       krylov::Direction::RowMajor); // Enforced for performance reasons.
-  outSkinningData.jacobianDJoints = outSkinningData.jacobianDBones * articulatedJacobian.value;
+  outJacobian.dJoints = outJacobian.dBones * articulatedJacobian.value;
 }
 
 /*
- * System to update the Jacobian of a soft skinned mesh wrt soft dofs.
+ * System to update the Jacobian of a soft skinned mesh wrt soft DoFs.
  */
 static void ResolveJacobianDSoft(
     ecs::PartialRegistry<CArticulatedLinkTransforms<TimeStep::Current> const> reg,
@@ -620,7 +719,7 @@ static void ResolveJacobianDSoft(
 }
 
 void skinned::EntityPreFirstStage(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CTimeIntegratorState const& intState,
     CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned> const& prevVel,
     CIntegrationVelocitySlices<DisplacementLayer::Skinned>& intVels) {
@@ -631,7 +730,7 @@ void skinned::EntityPreFirstStage(
 }
 
 static void ComputeVelocityAtStageStart(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CTimeIntegratorState const& intState,
     CIntegrationVelocitySlices<DisplacementLayer::Skinned>& intVels,
     CVelocitySlice<real, TimeStep::StageStart, DisplacementLayer::Skinned>& stageStartVel) {
@@ -641,7 +740,7 @@ static void ComputeVelocityAtStageStart(
 }
 
 static void ComputeVelocityAtTimeStepEnd(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CTimeIntegratorState const& intState,
     CIntegrationVelocitySlices<DisplacementLayer::Skinned>& intVels,
     CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currVel) {
@@ -651,7 +750,7 @@ static void ComputeVelocityAtTimeStepEnd(
 }
 
 void skinned::EntityIncrementStep(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currVel,
     CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned>& prevVel) {
   MOCHI_PROFILE_SCOPE();
@@ -659,6 +758,17 @@ void skinned::EntityIncrementStep(
   // neither exist nor need to be updated.
   prevVel.CopyFrom(currVel);
   currVel.value.SetZero(); // Effectively no-op. It will be recomputed before it's needed.
+}
+
+void skinned::EntityReconstructPreviousStep(
+    ecs::RequiredTag<TagNestedSoftActor>,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned> const& currVel,
+    CIntegrationVelocitySlices<DisplacementLayer::Skinned> const& intVels,
+    CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned>& outPrevVel) {
+  // Skin velocity is the only differential variable.
+  auto const method = simParams->integrationMethod;
+  integration::ReconstructPreviousVelocityFromHistoryOrCopy(method, intVels, currVel, outPrevVel);
 }
 
 void skinned::PreStagePipeline(entt::registry& reg, Span<entt::entity const> entities) {
@@ -672,12 +782,17 @@ void skinned::PreStagePipeline(entt::registry& reg, Span<entt::entity const> ent
 }
 
 void skinned::EntityPostStage(
-    ecs::RequiredTag<TagSoftSkinnedActor>,
+    ecs::RequiredTag<TagNestedSoftActor>,
     CConvergenceStatus const& convergence,
     CTimeIntegratorState const& intState,
+    CDisplacementSlice<real, TimeStep::StageStart, DisplacementLayer::Skinned> const&
+        stageStartDispl,
     CDisplacementSlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currDispl,
     CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>& currVel,
     CIntegrationVelocitySlices<DisplacementLayer::Skinned>& intVels) {
+  // Compute velocity
+  currVel.value = (currDispl.value - stageStartDispl.value) * (1_r / intState.dtStage);
+
   // Skinned displacement and velocity are up-to-date. If the solver diverged, reset them to zero.
   if (convergence.stageStatus == ConvergenceStatus::Diverged) {
     currDispl.value.SetZero();
@@ -703,7 +818,6 @@ void skinned::UpdateDerivedStatePipeline(entt::registry& reg, Span<entt::entity 
   }
   MOCHI_PROFILE_SCOPE();
   ecs::InvokeForEach(&ResolveSkinning<TimeStep::Current>, reg, entities);
-  ecs::InvokeForEach(&ComputeCurrentVelocity, reg, entities);
 }
 
 void skinned::UpdateJacobiansPipeline(entt::registry& reg, Span<entt::entity const> entities) {
@@ -717,86 +831,11 @@ void skinned::UpdateJacobiansPipeline(entt::registry& reg, Span<entt::entity con
       "Compute soft skinned Jacobian wrt soft", &ResolveJacobianDSoft, reg, entities);
 }
 
-void skinned::SetupCollidingJacobians(
-    ecs::Included<TagSoftSkinnedActor>,
-    ecs::PartialRegistry<CDofOffset const, CArticulatedLinkTransforms<TimeStep::Current> const> reg,
-    CSkinnedComposition const& composition,
-    CDofOffset const& dofOffset,
-    CContactPartitions const& contactPartitions,
-    CFemBoundaryDiscretization const& discretization,
-    CArticulatedSkinningData const& skinningInfo,
-    rom::CRomJacobian const* romJacobian,
-    CCollJacs<CollRole::Colliding>& outJacobians) {
-  MOCHI_PROFILE_SCOPE();
-
-  // Reserve stack memory for up to 256 elements.
-  MOCHI_FILO_STACK_ALLOCATOR(allocator, sizeof(JacData*) * 256);
-  auto jacobiansActive = outJacobians.GetPtrsNonEmpty(&allocator);
-  if (jacobiansActive.empty()) {
-    return;
-  }
-
-  // Prepare articulated-actor data, shared by all partitions
-  auto articulated = composition.articulated;
-  auto const& articulatedDofOffset = reg.get<CDofOffset const>(articulated).dofsOffset;
-  auto const& linkTransforms =
-      reg.get<CArticulatedLinkTransforms<TimeStep::Current> const>(articulated);
-  // Prepare bone rotations
-  std::vector<VMatrix3x3r> rotations(linkTransforms.size());
-  auto const& transforms = skinningInfo.skinningTransform.GetParameterizations();
-  for (int i = 0; i < rotations.size(); i++) {
-    auto const& preTransform = transforms[i].preTransform.GetRotation();
-    rotations[i] = ToVMatrix3x3(linkTransforms[i].GetRotation() * preTransform);
-  }
-
-  // Prepare dmap that depends on the soft actor, shared by all partitions.
-  std::optional<DMapSoft> dsoft;
-  std::optional<DMapRom> drom;
-  auto const softDofOffset = dofOffset.dofsOffset;
-  if (romJacobian) {
-    drom.emplace(0, romJacobian->value, softDofOffset);
-  } else {
-    dsoft.emplace(0, softDofOffset);
-  }
-
-  // Compute Jacobians
-  ParallelForEach("SetupCollidingJacobianSoftSkinned", jacobiansActive, 1, [&](JacData* jacData) {
-    discretization.Visit([&](auto const& discretizationImpl) {
-      using DiscretizationT = std::decay_t<decltype(discretizationImpl)>;
-      using DQuad = DMapQuad<typename DiscretizationT::ElementT>;
-      using DSoft = DMap<DQuad, DMapSkinInput, DMapSoft>;
-      using DRom = DMap<DQuad, DMapSkinInput, DMapRom>;
-      using DMapThis = std::variant<DSoft, DRom>;
-      auto const& skinningJacobian = skinningInfo.jacobianDJoints;
-      auto const& skinningData = skinningInfo.skinningData;
-
-      // Prepare the skinning dmap, specific to the partition
-      auto const& dofsVariant =
-          contactPartitions[jacData->query->collidingPartitionId].GetDofDescriptors()[0];
-      auto dofs = MakeConstSpan(std::get<DynamicArray<int>>(dofsVariant));
-      DMapSkinInput dskinning(
-          1, skinningJacobian, dofs, articulatedDofOffset, skinningData, rotations);
-
-      // Prepare the quadrature dmap
-      DQuad dquad(discretizationImpl.femElements, jacData->query->jacColliderFromWorld);
-
-      // Create per-partition differentiable map
-      DMapThis dmap = drom ? DMapThis{DRom(&dquad, &dskinning, &drom.value())}
-                           : DMapThis{DSoft(&dquad, &dskinning, &dsoft.value())};
-
-      // Compute Jacobian
-      auto& jacs = *jacData->jacs;
-      std::visit([&](auto const& dmap) { dmap.GetJac(jacData->query->sampleIndices, jacs); }, dmap);
-      jacs[0].CompressIndices();
-      jacs[1].CompressIndices();
-    });
-  });
-}
-
 void skinned::InitializeOnce(entt::registry& reg) {
   ecs::RegisterComponent<CSkinnedComposition>(reg);
   ecs::RegisterComponent<CNodePositions>(reg);
   ecs::RegisterComponent<CSoftSkinnedAssemblyScratchMemory>(reg);
+  ecs::RegisterComponent<CSoftSkinnedJacobianArticulated>(reg);
   ecs::RegisterComponent<CSoftSkinnedJacobianDynamic>(reg);
   ecs::RegisterComponent<CSoftSkinnedJacobianRest>(reg);
   ecs::RegisterComponent<CSoftAttachmentLinks>(reg);

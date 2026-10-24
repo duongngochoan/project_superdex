@@ -17,6 +17,7 @@
 #include "simd_test.h"
 
 #include <array>
+#include <limits>
 #include <type_traits>
 #include <vector>
 
@@ -196,17 +197,7 @@ TEST(Vec8i, Get) {
   EXPECT_EQ(7, Get<6>(a));
   EXPECT_EQ(8, Get<7>(a));
 
-  // Slower runtime version
-  EXPECT_EQ(1, Get(a, 0));
-  EXPECT_EQ(2, Get(a, 1));
-  EXPECT_EQ(3, Get(a, 2));
-  EXPECT_EQ(4, Get(a, 3));
-  EXPECT_EQ(5, Get(a, 4));
-  EXPECT_EQ(6, Get(a, 5));
-  EXPECT_EQ(7, Get(a, 6));
-  EXPECT_EQ(8, Get(a, 7));
-
-  // Same but with operator[] (read only)
+  // Runtime version
   EXPECT_EQ(1, a[0]);
   EXPECT_EQ(2, a[1]);
   EXPECT_EQ(3, a[2]);
@@ -221,14 +212,14 @@ TEST(Vec8i, GetHalf) {
   auto a = Vec8i{1, 2, 3, 4, 5, 6, 7, 8};
   auto low = GetHalf<0>(a);
   auto high = GetHalf<1>(a);
-  EXPECT_EQ(1, Get(low, 0));
-  EXPECT_EQ(2, Get(low, 1));
-  EXPECT_EQ(3, Get(low, 2));
-  EXPECT_EQ(4, Get(low, 3));
-  EXPECT_EQ(5, Get(high, 0));
-  EXPECT_EQ(6, Get(high, 1));
-  EXPECT_EQ(7, Get(high, 2));
-  EXPECT_EQ(8, Get(high, 3));
+  EXPECT_EQ(1, low[0]);
+  EXPECT_EQ(2, low[1]);
+  EXPECT_EQ(3, low[2]);
+  EXPECT_EQ(4, low[3]);
+  EXPECT_EQ(5, high[0]);
+  EXPECT_EQ(6, high[1]);
+  EXPECT_EQ(7, high[2]);
+  EXPECT_EQ(8, high[3]);
 }
 
 TEST(Vec8i, Set) {
@@ -422,6 +413,7 @@ TEST(Vec8i, GreaterEqual) {
 
 TEST(Vec8i, HMax) {
   auto a = Vec8i{1, 2, 3, 4, 5, 6, 7, 8};
+  EXPECT_EQ(1, HMax<1>(a));
   EXPECT_EQ(2, HMax<2>(a));
   EXPECT_EQ(3, HMax<3>(a));
   EXPECT_EQ(4, HMax<4>(a));
@@ -433,6 +425,7 @@ TEST(Vec8i, HMax) {
 
 TEST(Vec8i, HMin) {
   auto a = Vec8i{8, 7, 6, 5, 4, 3, 2, 1};
+  EXPECT_EQ(8, HMin<1>(a));
   EXPECT_EQ(7, HMin<2>(a));
   EXPECT_EQ(6, HMin<3>(a));
   EXPECT_EQ(5, HMin<4>(a));
@@ -444,6 +437,7 @@ TEST(Vec8i, HMin) {
 
 TEST(Vec8i, HSum) {
   auto a = Vec8i{1, 2, 3, 4, 5, 6, 7, 8};
+  EXPECT_EQ(1, HSum<1>(a));
   EXPECT_EQ(3, HSum<2>(a));
   EXPECT_EQ(6, HSum<3>(a));
   EXPECT_EQ(10, HSum<4>(a));
@@ -451,6 +445,11 @@ TEST(Vec8i, HSum) {
   EXPECT_EQ(21, HSum<6>(a));
   EXPECT_EQ(28, HSum<7>(a));
   EXPECT_EQ(36, HSum(a));
+}
+
+TEST(Vec8i, HSumEach) {
+  auto const a = Vec8i{1, 2, 3, 4, 5, 6, 7, 8};
+  EXPECT_EQ((Vec4i{36, 360, 3600, 36000}), HSumEach(a, 10 * a, 100 * a, 1000 * a));
 }
 
 TEST(Vec8i, Less) {
@@ -580,6 +579,7 @@ TEST(Vec8i, Load) {
   EXPECT_VEC8I(1, 2, 3, 4, 5, 6, 7, 8, (Load<8, Vec8i>(values + 1)));
   EXPECT_VEC8I(1, 2, 3, 4, 5, 6, 7, 8, (Load<Vec8i>(values + 1)));
 
+  EXPECT_VEC8I(0, 0, 0, 0, 0, 0, 0, 0, (Load<Vec8i>(values + 1, 0)));
   EXPECT_VEC8I(1, 0, 0, 0, 0, 0, 0, 0, (Load<Vec8i>(values + 1, 1)));
   EXPECT_VEC8I(1, 2, 0, 0, 0, 0, 0, 0, (Load<Vec8i>(values + 1, 2)));
   EXPECT_VEC8I(1, 2, 3, 0, 0, 0, 0, 0, (Load<Vec8i>(values + 1, 3)));
@@ -654,14 +654,14 @@ TEST(Vec8i, Select) {
               for (int b6 = 0; b6 < 2; ++b6) {
                 for (int b7 = 0; b7 < 2; ++b7) {
                   auto expected = Vec8i{
-                      b0 ? Get(a, 0) : Get(b, 0),
-                      b1 ? Get(a, 1) : Get(b, 1),
-                      b2 ? Get(a, 2) : Get(b, 2),
-                      b3 ? Get(a, 3) : Get(b, 3),
-                      b4 ? Get(a, 4) : Get(b, 4),
-                      b5 ? Get(a, 5) : Get(b, 5),
-                      b6 ? Get(a, 6) : Get(b, 6),
-                      b7 ? Get(a, 7) : Get(b, 7)};
+                      b0 ? Get<0>(a) : Get<0>(b),
+                      b1 ? Get<1>(a) : Get<1>(b),
+                      b2 ? Get<2>(a) : Get<2>(b),
+                      b3 ? Get<3>(a) : Get<3>(b),
+                      b4 ? Get<4>(a) : Get<4>(b),
+                      b5 ? Get<5>(a) : Get<5>(b),
+                      b6 ? Get<6>(a) : Get<6>(b),
+                      b7 ? Get<7>(a) : Get<7>(b)};
                   auto actual =
                       Select(SimdMask<Vec8i>(!!b0, !!b1, !!b2, !!b3, !!b4, !!b5, !!b6, !!b7), a, b);
                   EXPECT_EQ(expected, actual);
@@ -707,53 +707,7 @@ TEST(Vec8i, SimdZero) {
 MOCHI_SIMD_TEST_UNARY_FN_EXACT(Vec8i, Sqr, ([](auto a) { return a * a; }));
 
 TEST(Vec8i, Store) {
-  std::vector<int> result(9); // NOTE: Changed from an array on the stack to work around an MSVC
-                              // optimizer bug.
-  auto const v = Vec8i{1, 2, 3, 4, 5, 6, 7, 8};
-  Store<0>((int*)nullptr, v);
-  Store<0>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{0, 0, 0, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store<1>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 0, 0, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store<2>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 0, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store<3>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store<4>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store<5>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 0, 0, 0}), Span(&result[1], 8));
-  Store<6>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 6, 0, 0}), Span(&result[1], 8));
-  Store<7>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 6, 7, 0}), Span(&result[1], 8));
-  Store<8>(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 6, 7, 8}), Span(&result[1], 8));
-  result.clear();
-  result.resize(9);
-  Store(&result[1], v);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 6, 7, 8}), Span(&result[1], 8));
-
-  result.clear();
-  result.resize(9);
-  Store(&result[1], v, 0);
-  EXPECT_SPAN_EQ((std::array<int, 8>{0, 0, 0, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 1);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 0, 0, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 2);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 0, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 3);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 0, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 4);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 0, 0, 0, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 5);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 0, 0, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 6);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 6, 0, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 7);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 6, 7, 0}), Span(&result[1], 8));
-  Store(&result[1], v, 8);
-  EXPECT_SPAN_EQ((std::array<int, 8>{1, 2, 3, 4, 5, 6, 7, 8}), Span(&result[1], 8));
+  TestStore(Vec8i{1, 2, 3, 4, 5, 6, 7, 8});
 }
 
 TEST(Vec8i, StoreSelected) {
@@ -877,7 +831,19 @@ TEST(Vec8i, ShiftLeft) {
 }
 
 TEST(Vec8i, ShiftRight) {
+  static constexpr int kSingleBitShift = 1;
+  static constexpr int kHalfWidthShift = 8 * sizeof(Vec8i::Scalar) / 2;
+  static constexpr int kHalfWidthScale = 1 << kHalfWidthShift;
+  static constexpr int kIntMin = std::numeric_limits<int>::min();
+  static constexpr int kNegativeSample = -100;
+  static constexpr int kPositiveSample = 100;
+
   Vec8i v(8, 40, 56, 88, 136, 184, 232, 248);
   EXPECT_VEC8I(1, 5, 7, 11, 17, 23, 29, 31, ShiftRight<3>(v));
   EXPECT_EQ(v, ShiftRight<0>(v));
+  // Shift by one catches logical shifts; half-width catches multi-bit sign fill.
+  // clang-format off
+  EXPECT_VEC8I(-1, -2, -4, -8, 0, 1, 2, 4, ShiftRight<kSingleBitShift>(Vec8i{-1, -3, -7, -15, 1, 2, 4, 8}));
+  EXPECT_VEC8I(-1, kIntMin / kHalfWidthScale, -1, 0, -1, kIntMin / kHalfWidthScale, -1, 0, ShiftRight<kHalfWidthShift>(Vec8i{-1, kIntMin, kNegativeSample, kPositiveSample, -1, kIntMin, kNegativeSample, kPositiveSample}));
+  // clang-format on
 }

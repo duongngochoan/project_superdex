@@ -144,7 +144,7 @@ MOCHI_FORCE_INLINE int constexpr GetNumConstrainedTargets(ConstraintType type) {
 }
 
 // Get the parent articulated actor for a link actor, or entt::null if not a link
-MOCHI_API entt::entity TryGetParentArticulatedActor(
+entt::entity TryGetParentArticulatedActor(
     ecs::PartialRegistry<CArticulatedEntity const> reg,
     entt::entity actor);
 
@@ -183,6 +183,19 @@ struct CConstraintInfo : NoCopy {
       numDofs += isize(perActorDofs);
     }
     MOCHI_ASSERT_VERBOSE(numDofs == GetNumConstrainedDofs(type), "Inconsistent constraint info");
+    // AssembleReducedDResidual reads the dresidual of constraints on links in 3x3 blocks.
+    for (int o = 0; o < isize(actors); ++o) {
+      if (TryGetParentArticulatedActor(reg, actors[o]) == entt::null) {
+        continue;
+      }
+      auto const& dofs = actorDofs[o];
+      for (int d = 0; d < isize(dofs); d += 3) {
+        MOCHI_ASSERT_VERBOSE(
+            d + 2 < isize(dofs) && dofs[d] % 3 == 0 && dofs[d + 1] == dofs[d] + 1 &&
+                dofs[d + 2] == dofs[d] + 2,
+            "Constraints on links must act on aligned triples of DoFs.");
+      }
+    }
     // Warning: if numTargets != GetNumConstrainedTargets(type), this constraint cannot be used for
     // differentiability of targets.
     int numTargets = GetNumTargets();
@@ -209,6 +222,11 @@ struct CConstraintInfo : NoCopy {
   real stiffness = 1_r;
   real damping = 0_r;
   real saturation = -1_r; // Negative means no saturation
+  // Set to true when a constraint is created automatically while creating or configuring an actor.
+  // The flag remains false for all other constraints. While the flag is true,
+  // Scene::DestroyConstraint leaves the constraint intact. Destroying the actor or removing the
+  // corresponding actor feature sets the flag to false before destroying the constraint.
+  bool isActorOwned = false;
   // True if the constraint involves link actors from different articulations or a mix of link
   // actors and non-link actors.
   bool hasMixedLinks = false;

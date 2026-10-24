@@ -743,4 +743,20 @@ MOCHI_FORCE_INLINE void StoreTransposed(typename V::Scalar* ptr, NdArray<V, 3> c
       ptr, src[0], src[1], src[2]); // TODO: Support arbitrary size when C++20 makes that easier
 }
 
+// Load (count * 3) values in transposed order for a runtime count in [0, V::kSize]. Lanes
+// [count, V::kSize) are zero. Prefer LoadTransposed<kTupleCount> if the count is a constexpr.
+template <class V, MOCHI_CONCEPT(IsSimd<V>)>
+MOCHI_FORCE_INLINE void
+LoadTransposed(typename V::Scalar const* ptr, NdArray<V, 3>& out, int count) {
+  LoadTransposed(ptr, out[0], out[1], out[2], count);
+}
+
+// Store (count * 3) values in transposed order for a runtime count in [0, V::kSize].
+// Prefer StoreTransposed<kTupleCount> if the count is a constexpr.
+template <class V, MOCHI_CONCEPT(IsSimd<V>)>
+MOCHI_FORCE_INLINE void
+StoreTransposed(typename V::Scalar* ptr, NdArray<V, 3> const& src, int count) {
+  StoreTransposed(ptr, src[0], src[1], src[2], count);
+}
+
 } // namespace mochi

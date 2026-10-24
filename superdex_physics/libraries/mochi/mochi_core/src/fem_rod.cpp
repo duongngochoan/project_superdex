@@ -116,10 +116,9 @@ bool RodAxialStress(
     staging[b] = (node0Idx[b] != node1Idx[b]) ? 1_r : 0_r;
   }
   V const isActive = (Load<V>(staging) > V{0});
-  if (!AnyTrue(isActive))
-    MOCHI_UNLIKELY {
-      return false;
-    }
+  if (!AnyTrue(isActive)) MOCHI_UNLIKELY {
+    return false;
+  }
 
   // Gather reference positions for nodes 0 and 1.
   V3 X0 MOCHI_NO_INIT;
@@ -268,10 +267,9 @@ bool RodBendTwistStress(
     staging[b] = distinct ? 1_r : 0_r;
   }
   V const isActive = (Load<V>(staging) > V{0});
-  if (!AnyTrue(isActive))
-    MOCHI_UNLIKELY {
-      return false;
-    }
+  if (!AnyTrue(isActive)) MOCHI_UNLIKELY {
+    return false;
+  }
 
   // --- Gather reference node positions and current/reference frame axes ---
   NdArray<V3, kNumRodStencilNodes> X MOCHI_NO_INIT;

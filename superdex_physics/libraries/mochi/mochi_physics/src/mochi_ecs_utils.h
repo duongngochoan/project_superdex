@@ -132,6 +132,13 @@ GetEntity(entt::registry const& reg, ConstraintHandle handle, Error& error);
     return ReturnT(nullptr);                                                      \
   }()
 
+// Like entt::registry::try_get, but on a storage returned by entt::registry::storage. Loops over
+// many entities fetch the storage once, which skips the registry's storage lookup per entity.
+template <class StorageT>
+[[nodiscard]] inline auto* TryGet(StorageT& storage, entt::entity e) {
+  return storage.contains(e) ? &storage.get(e) : nullptr;
+}
+
 // If the entity has a component of type ComponentT, then INCREMENT ComponentT::referenceCount.
 // Else, add a component of type ComponentT and set ComponentT::referenceCount to 1. Works with
 // any default-constructible component type that has an integer member named "referenceCount".

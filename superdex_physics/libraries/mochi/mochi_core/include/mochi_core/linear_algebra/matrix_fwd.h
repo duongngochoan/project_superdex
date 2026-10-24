@@ -1073,7 +1073,7 @@ class MOCHI_EMPTY_BASE Matrix : public krylov::BaseMatrix<
     requires(kIsVector && std::is_floating_point_v<Scalar>)
   {
     this->Normalize();
-    return *this;
+    return std::move(*this);
   }
 
   // Return a matrix that owns a copy of the values.
@@ -1230,26 +1230,24 @@ class MOCHI_EMPTY_BASE Matrix : public krylov::BaseMatrix<
     if constexpr (krylov::IsCuda(kOwnership)) {
       mochi::details::CudaMemSetZero(this->Data(), sizeof(Scalar) * this->StorageSize());
     } else {
-      if (this->Data())
-        MOCHI_LIKELY {
-          if constexpr (kLeadingDim == krylov::kAutomaticLeadDim) {
-            std::memset(this->Data(), 0, sizeof(Scalar) * this->Rows() * this->Cols());
-          } else if constexpr (kMajorDirection == krylov::Direction::RowMajor) {
-            int const numRows = this->Rows();
-            int const numCols = this->Cols();
-            for (int ir = 0; ir < numRows; ++ir) {
-              std::memset(this->Data() + this->GetOffset(ir, 0), 0, sizeof(Scalar) * numCols);
-            }
-          } else {
-            static_assert(kMajorDirection == krylov::Direction::ColMajor);
-            int const numRows = this->Rows();
-            int const numCols = this->Cols();
-            for (int ic = 0; ic < numCols; ++ic) {
-              std::memset(this->Data() + this->GetOffset(0, ic), 0, sizeof(Scalar) * numRows);
-            }
+      if (this->Data()) MOCHI_LIKELY {
+        if constexpr (kLeadingDim == krylov::kAutomaticLeadDim) {
+          std::memset(this->Data(), 0, sizeof(Scalar) * this->Rows() * this->Cols());
+        } else if constexpr (kMajorDirection == krylov::Direction::RowMajor) {
+          int const numRows = this->Rows();
+          int const numCols = this->Cols();
+          for (int ir = 0; ir < numRows; ++ir) {
+            std::memset(this->Data() + this->GetOffset(ir, 0), 0, sizeof(Scalar) * numCols);
+          }
+        } else {
+          static_assert(kMajorDirection == krylov::Direction::ColMajor);
+          int const numRows = this->Rows();
+          int const numCols = this->Cols();
+          for (int ic = 0; ic < numCols; ++ic) {
+            std::memset(this->Data() + this->GetOffset(0, ic), 0, sizeof(Scalar) * numRows);
           }
         }
-      else {
+      } else {
         MOCHI_ASSERT_VERBOSE(this->empty(), "Null pointer in non-empty matrix.");
       }
     }

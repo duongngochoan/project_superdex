@@ -137,9 +137,12 @@ inline std::filesystem::path CreateTempPrefabFile(
   return prefabPath;
 }
 
-inline std::filesystem::path
-ExportScene(Scene* scene, std::string const& sceneName, std::filesystem::path const& outputDir) {
-  prefab::ExportScene(scene, sceneName, outputDir.string(), ExpectOK{});
+inline std::filesystem::path ExportScene(
+    Scene* scene,
+    std::string const& sceneName,
+    std::filesystem::path const& outputDir,
+    prefab::ExportParams const& params = {}) {
+  prefab::ExportScene(scene, sceneName, outputDir.string(), params, ExpectOK{});
   return outputDir / sceneName / (sceneName + ".mochi_scene");
 }
 

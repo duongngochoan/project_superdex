@@ -17,7 +17,6 @@
 #pragma once
 
 #include <mochi_core/element_operations/batched_element_utils.h>
-#include <mochi_core/elements/tetrahedral/simplex_quadrature.h>
 #include <mochi_core/geometry/tetrahedral_mesh.h>
 #include <mochi_core/geometry/triangular_mesh.h>
 #include <mochi_core/mochi_config.h>
@@ -100,20 +99,7 @@ struct TestTetMeshData {
   void PopulateElements() {
     int const numElements = isize(mesh.GetElementConnectivity());
     for (int i = 0; i < numElements; ++i) {
-      if constexpr (ElementT::kNumQuadPoints == 1) {
-        elements.emplace_back(
-            i,
-            mesh.GetNodeCoordinates(),
-            mesh.GetElementConnectivity(),
-            tetrahedral::kTetrahedralQuadrature1);
-      } else {
-        static_assert(ElementT::kNumQuadPoints == 4);
-        elements.emplace_back(
-            i,
-            mesh.GetNodeCoordinates(),
-            mesh.GetElementConnectivity(),
-            tetrahedral::kTetrahedralQuadrature4);
-      }
+      elements.emplace_back(i, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity());
     }
   }
 };

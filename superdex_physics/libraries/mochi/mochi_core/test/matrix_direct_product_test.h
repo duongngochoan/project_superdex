@@ -121,6 +121,9 @@ void TestDirectProductLevel1() {
   TestDirectProductLevel2<Scalar, 3, 3, 8, kDir, kOwner>(3, 3, 8);
   TestDirectProductLevel2<Scalar, 3, 3, 9, kDir, kOwner>(3, 3, 9);
 
+  // Compile-time k only: SIMD along k with compile-time leftover entries
+  TestDirectProductLevel2<Scalar, krylov::kDynamic, krylov::kDynamic, 67, kDir, kOwner>(9, 3, 67);
+
   // Dynamic dimensions
   constexpr int kSizes[] = {
       1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 31, 32, 33,

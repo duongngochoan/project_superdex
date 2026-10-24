@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include <superdex_robotics/controllers/controller_recording.h>
 #include <superdex_robotics/core/component_base.h>
 
 #include <string>
@@ -57,6 +58,12 @@ class MOCHI_API ControllerBase : public ComponentBase {
       std::string_view paramArgs,
       std::string_view initArgs,
       superdex::Error& error) = 0;
+
+  /* @brief Write constant fields supported by this controller. */
+  virtual void ConfigureRecording(ControllerRecordingSink& sink, superdex::Error& error) const;
+
+  /* @brief Write the most recently computed target and output, if available. */
+  virtual void Record(ControllerRecordingSink& sink, superdex::Error& error) const;
 
  protected:
   /* @brief Common controller constructor archetype: stores the (optionally null) @p actor via

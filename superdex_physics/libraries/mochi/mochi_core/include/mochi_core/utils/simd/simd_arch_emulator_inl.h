@@ -172,22 +172,14 @@ class Simd<T, N> {
   }
 
   [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE Scalar constexpr operator[](int i) const {
-    return raw[i];
-  }
-
-  [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE Scalar constexpr Get(int i) const {
+    MOCHI_ASSERT_VERBOSE(i >= 0 && i < kSize, "Index out of range.");
     return raw[i];
   }
 
   template <int i>
   [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE static constexpr Scalar Get(Simd v) {
     static_assert(i >= 0 && i < kSize, "Index out of range");
-    return v.raw[i];
-  }
-
-  [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE static constexpr Scalar Get(Simd v, int i) {
-    MOCHI_ASSERT_VERBOSE(i >= 0 && i < kSize, "Index out of range.");
-    return v.raw[i];
+    return v[i];
   }
 
   template <int i>
@@ -338,6 +330,19 @@ class Simd<T, N> {
     eval(std::make_index_sequence<kSize>{});
   }
 
+  MOCHI_ANY MOCHI_FORCE_INLINE static void
+  LoadTransposed(Scalar const* ptr, Simd& out0, Simd& out1, Simd& out2, int count) {
+    MOCHI_ASSERT_VERBOSE(count >= 0 && count <= kSize, "Invalid tuple count");
+    for (int i = 0; i < count; ++i) {
+      out0.raw[i] = ptr[i * 3 + 0];
+      out1.raw[i] = ptr[i * 3 + 1];
+      out2.raw[i] = ptr[i * 3 + 2];
+    }
+    for (int i = count; i < kSize; ++i) {
+      out0.raw[i] = out1.raw[i] = out2.raw[i] = Scalar{0};
+    }
+  }
+
   template <int M = kSize>
   MOCHI_ANY MOCHI_FORCE_INLINE static void Store(
       [[maybe_unused]] Scalar* ptr,
@@ -382,6 +387,16 @@ class Simd<T, N> {
     eval(std::make_index_sequence<kSize>{});
   }
 
+  MOCHI_ANY MOCHI_FORCE_INLINE static void
+  StoreTransposed(Scalar* ptr, Simd out0, Simd out1, Simd out2, int count) {
+    MOCHI_ASSERT_VERBOSE(count >= 0 && count <= kSize, "Invalid tuple count");
+    for (int i = 0; i < count; ++i) {
+      ptr[i * 3 + 0] = out0.raw[i];
+      ptr[i * 3 + 1] = out1.raw[i];
+      ptr[i * 3 + 2] = out2.raw[i];
+    }
+  }
+
   template <int M = kSize>
   [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE static constexpr Scalar HMin(Simd a) {
     static_assert(M >= 1 && M <= kSize, "Unsupported M");
@@ -398,6 +413,19 @@ class Simd<T, N> {
   [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE static constexpr Scalar HSum(Simd a) {
     static_assert(M >= 1 && M <= kSize, "Unsupported M");
     return FoldApply<M, [](auto... v) { return (v + ...); }>(a);
+  }
+
+  [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE static constexpr Simd HSumEach(Simd a, Simd b)
+    requires(N == 2)
+  {
+    return {HSum(a), HSum(b)};
+  }
+
+  [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE static constexpr Simd
+  HSumEach(Simd a, Simd b, Simd c, Simd d)
+    requires(N == 4)
+  {
+    return {HSum(a), HSum(b), HSum(c), HSum(d)};
   }
 
   template <int M = kSize>
@@ -458,10 +486,10 @@ class Simd<T, N> {
   }
 
   // Ternary functions.
-  static constexpr auto MulAdd = XYZapply<T, mochi::MulAdd<T, T, T>>;
-  static constexpr auto MulSub = XYZapply<T, mochi::MulSub<T, T, T>>;
-  static constexpr auto NegMulAdd = XYZapply<T, mochi::NegMulAdd<T, T, T>>;
-  static constexpr auto NegMulSub = XYZapply<T, mochi::NegMulSub<T, T, T>>;
+  static constexpr auto MulAdd = XYZapply<T, mochi::MulAdd<T>>;
+  static constexpr auto MulSub = XYZapply<T, mochi::MulSub<T>>;
+  static constexpr auto NegMulAdd = XYZapply<T, mochi::NegMulAdd<T>>;
+  static constexpr auto NegMulSub = XYZapply<T, mochi::NegMulSub<T>>;
 
   // Unary operators.
   [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE constexpr Simd operator-() const {
@@ -501,7 +529,16 @@ class Simd<T, N> {
 
   template <int kShift>
   [[nodiscard]] MOCHI_ANY MOCHI_FORCE_INLINE static constexpr Simd ShiftRight(Simd a) {
-    return a >> kShift;
+    static_assert(kShift >= 0 && kShift < (8 * sizeof(Scalar)), "Shift amount out-of-range");
+    if constexpr (std::is_integral_v<Scalar>) {
+      static_assert(std::is_signed_v<Scalar>, "Unsigned integer ShiftRight is not supported.");
+      auto eval = []<size_t... I>(Simd const& v, std::index_sequence<I...>) {
+        return Simd{static_cast<Scalar>(v.raw[I] >> kShift)...};
+      };
+      return eval(a, std::make_index_sequence<N>{});
+    } else {
+      return a >> kShift;
+    }
   }
 
 #undef MOCHI_SIMD_EMULATOR_OP_1

@@ -223,10 +223,10 @@ TEST(SegmentElement, ThreePointBasisIntegrals_ClosedLoop) {
   TestBasisFunctionIntegrals<3>(/*isClosedLoop=*/true);
 }
 
-// Test that the isoparametric map and its tangent/Jacobian-determinant fields agree with the
-// analytical values for a linear element: position is a linear interpolation of the endpoints,
-// the tangent equals the endpoint difference, and its norm equals the segment length.
-TEST(SegmentElement, MappedQuadraturePointsAndTangentMatchLinearInterpolation) {
+// Test that the isoparametric map and the quadrature weights agree with the analytical values for
+// a linear element: position is a linear interpolation of the endpoints, and each weight is the
+// reference weight times the segment length.
+TEST(SegmentElement, MappedQuadraturePointsAndWeightsMatchLinearInterpolation) {
   // A polyline whose middle element (index 1) is the one we will inspect.
   DynamicArray<Real3> const coordinates = {
       Real3{0.1_r, 0.2_r, 0.3_r},
@@ -251,8 +251,7 @@ TEST(SegmentElement, MappedQuadraturePointsAndTangentMatchLinearInterpolation) {
     Real3 const expectedPosition = (1_r - xi) * x0 + xi * x1;
     for (int i = 0; i < Element::kSpaceDim; ++i) {
       EXPECT_NEAR(expectedPosition[i], element.mapEvaluated[q][i], kTol);
-      EXPECT_NEAR(tangent[i], element.dMapEvaluated[q][i][0], kTol);
     }
-    EXPECT_NEAR(expectedLength, element.dMapEvaluatedDet[q], kTol);
+    EXPECT_NEAR(Quad::weights[q] * expectedLength, element.quadWeights[q], kTol);
   }
 }

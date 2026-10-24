@@ -168,6 +168,14 @@ template <typename T>
     NdArray<T, 3> const& a,
     NdArray<T, 3> const& b);
 
+// Outer product of two 3x1 vectors, returning a symmetric 3x3 matrix stored as
+// [a00, a11, a22, a01, a02, a12]. Only the upper triangle is computed, so the result is exactly
+// symmetric.
+template <typename T>
+[[nodiscard]] MOCHI_FORCE_INLINE constexpr NdArray<T, 6> OuterSym(
+    NdArray<T, 3> const& a,
+    NdArray<T, 3> const& b);
+
 // Outer product of two 3x1 vectors returning a 3x3 matrix
 template <typename T>
 [[nodiscard]] MOCHI_FORCE_INLINE NdArray<Simd<T, 4>, 3> Outer3(Simd<T, 4> a, Simd<T, 4> b);
@@ -233,6 +241,13 @@ template <typename T, size_t N, size_t M>
     NdArray<T, N, M> const& A,
     NdArray<T, N, M> const& B);
 
+// Colon product (Frobenius inner product) of two symmetric 2x2 matrices stored as raw
+// [a00, a01, a11] components.
+template <typename T>
+[[nodiscard]] MOCHI_FORCE_INLINE constexpr T ColonSym2x2(
+    NdArray<T, 3> const& A,
+    NdArray<T, 3> const& B);
+
 /**************************************************************************************************
   Invert
 */
@@ -256,10 +271,6 @@ template <typename T>
 [[nodiscard]] MOCHI_FORCE_INLINE constexpr NdArray<T, 3, 3> Invert(
     NdArray<T, 3, 3> const& a,
     T det);
-
-// The left pseudoinverse of a 3x2 matrix
-template <typename T>
-void PseudoInvert(NdArray<T, 3, 2> const& a, NdArray<T, 2, 3>* outInv, T* outDet);
 
 // Invert a 4x4 matrix
 template <typename T>
@@ -323,11 +334,28 @@ template <size_t N, typename T>
 [[nodiscard]] MOCHI_FORCE_INLINE constexpr NdArray<T, N, N> DiagonalMatrix(
     NdArray<T, N> const& diagonalVector);
 
+// Return raw [a00, a01, a11] components of a symmetric 2x2 matrix.
+template <typename T>
+[[nodiscard]] MOCHI_FORCE_INLINE constexpr NdArray<T, 3> Sym2x2Components(T a00, T a01, T a11);
+
+// Return raw [a00, a01, a11] components of the symmetric part of a 2x2 matrix.
+template <typename T>
+[[nodiscard]] MOCHI_FORCE_INLINE constexpr NdArray<T, 3> Sym2x2Components(
+    NdArray<T, 2, 2> const& m);
+
 // Construct a 2x2 symmetric matrix from upper-triangle components.
 //   [a00 a01]
 //   [a01 a11]
 template <typename T>
 [[nodiscard]] MOCHI_FORCE_INLINE constexpr NdArray<T, 2, 2> SymMatrix2x2(T a00, T a01, T a11);
+
+// Return the full matrix of a symmetric 3x3 matrix stored as [a00, a11, a22, a01, a02, a12].
+template <typename T>
+[[nodiscard]] MOCHI_FORCE_INLINE constexpr NdArray<T, 3, 3> SymToFull3x3(NdArray<T, 6> const& m);
+
+// Add s to the diagonal of a symmetric 3x3 matrix stored as [a00, a11, a22, a01, a02, a12].
+template <typename T>
+MOCHI_FORCE_INLINE constexpr void AddToDiagonalSym3x3(NdArray<T, 6>& m, T const& s);
 
 // Return an NxN array with 1s down the diagonal (an identity matrix).
 template <size_t N, typename T = real>
@@ -409,13 +437,6 @@ template <typename T>
 [[nodiscard]] NdArray<Simd<T, 4>, 3> Cofactor3x3(
     NdArray<Simd<T, 4>, 3> const& mat); // Ignores the last SIMD column
 
-template <typename T>
-[[nodiscard]] MOCHI_FORCE_INLINE Simd<T, 4> CofactorSym2x2(Simd<T, 4> const& mat);
-
-template <typename T>
-[[nodiscard]] MOCHI_FORCE_INLINE NdArray<Simd<T, 4>, 2> CofactorSym3x3(
-    NdArray<Simd<T, 4>, 2> const& mat);
-
 /**************************************************************************************************
   Matrix Trace (sum of diagonal elements)
 */
@@ -478,14 +499,6 @@ template <typename T, size_t N>
 // its squared norm.
 template <typename T, size_t D0, size_t D1>
 [[nodiscard]] constexpr auto LargestRow(NdArray<T, D0, D1> const& A, T* sqrNorm = nullptr);
-
-// Retrieves the largest row/col (in the L-2 sense) of the given symmetric matrix.
-// Optionally outputs its squared norm.
-[[nodiscard]] auto LargestRowColSym2x2(VSymMatrix2x2r A, Vec4r& outNormSqr);
-
-// Retrieves the largest row/col (in the L-2 sense) of the given symmetric matrix.
-// Optionally outputs its squared norm.
-[[nodiscard]] auto LargestRowColSym3x3(VSymMatrix3x3r A, Vec4r& outNormSqr);
 
 } // namespace mochi
 

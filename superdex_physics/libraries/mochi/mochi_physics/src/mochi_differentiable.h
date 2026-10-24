@@ -102,11 +102,6 @@ struct CDiffInputOffset : NoCopy {
   int dofsOffset = 0;
 };
 
-// Store the DoF offset of the actor in the scene
-struct CSceneStateOffset : NoCopy {
-  int dofsOffset = 0;
-};
-
 // Components to store adjoints. CDiffDerivedStepGrad is only used internally across calls to
 // BackPropagate. CDiffStateGrad OTOH receives external gradients in GetFooBackward() functions, and
 // exposes gradients for SetFooBackward() functions.
@@ -170,20 +165,6 @@ struct CDiffForceGrad : public ColumnVector<real> {
   using ColumnVector<real>::ColumnVector;
 };
 
-struct CForwardPropContainerDerivedStateJac {
-  Matrix<real> data;
-  // The following two fields are used to store the island this actor belongs to,
-  // including other actors in the island as well as the total number of degrees of freedom.
-  //
-  // We store these information so that it is kept when we restore a new state, which overrides the
-  // island information. Note that GetStepJacobian correlates three states: q_k,q_k-1,q_k-2.
-  // In order to compute dq_k/dq_k-1, we need to restore to state q_k, where we record the island
-  // information. Next, in order to compute dq_k/dq_k-2, we need to restore to state q_k-1, but we
-  // need to use island information at q_k, which is stored here.
-  DynamicArray<entt::entity> actors;
-  int numIslandDofs = 0;
-};
-
 /**************************************************************************
   Utility functions
 */
@@ -213,36 +194,12 @@ Real3 const& GetCollidingPosition(ContactDetectionResult const& data, int contac
 }
 
 /**************************************************************************
-  Fore/Back propagation operations
+  Back-propagation operations
 */
 
 void PrepareBackPropagation(entt::registry& reg);
 
 void BackPropagationSolve(entt::registry& reg);
-
-void ComputeHqx(
-    int numIslandDofs,
-    Span<entt::entity const> actors,
-    CActorSnle const& actorSnle,
-    CDofOffset const& dofOffset,
-    CActorDerivedStateInfo const& derivedStateInfo,
-    CForwardPropContainerDerivedStateJac& outDerivedState);
-
-void ComputeDqDDerivedState(
-    int numIslandDofs,
-    LU<real> const& invDRes,
-    Span<entt::entity const> actors,
-    CActorSnle const& actorSnle,
-    CDofOffset const& dofOffset,
-    CActorDerivedStateInfo const& derivedStateInfo,
-    CForwardPropContainerDerivedStateJac& outDerivedState);
-
-void StepJacobianSolve(entt::registry& reg, MatrixView<real> jacCurr);
-
-void StepJacobianShiftAndProject(
-    entt::registry& reg,
-    MatrixView<real> jacCurr,
-    MatrixView<real> jacOld);
 
 /**************************************************************************
   Per-actor systems
@@ -274,8 +231,8 @@ void ResetBackPropagationContainers(
 void PrepareContactForceAdjoints(
     CQueryActorContactForces const& queryActorContactForces,
     CRequiresFarSdfEvaluation const* farSdfEval,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& outActiveCollisionsAsync,
-    CActiveCollisions<ContactType::Sync, TimeStep::Current>& outActiveCollisionsSync,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& outActiveCollisionsAsync,
+    CActiveCollisions</*kIsSync*/ true, TimeStep::Current>& outActiveCollisionsSync,
     CCollJacs<CollRole::Collider>* outColliderJacs);
 
 // System to accumulate contact force adjoints to actor level.

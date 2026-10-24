@@ -246,6 +246,40 @@ static void ForEachPathInPrefab(mochi::prefab::ScenePrefab const& prefab, Fn con
   }
 }
 
+static void ClearCachedShapes(mochi::prefab::ArticulatedActorPrefab& actor) {
+  for (auto& link : actor.links) {
+    link.shape = {};
+  }
+  if (actor.skin.has_value()) {
+    actor.skin->shape = {};
+  }
+}
+
+void ClearCachedShapes(mochi::prefab::ScenePrefab& prefab) {
+  for (auto& actor : prefab.actors.rigid) {
+    actor.shape = {};
+  }
+  for (auto& actor : prefab.actors.soft) {
+    actor.shape = {};
+    actor.flow = {};
+  }
+  for (auto& actor : prefab.actors.articulated) {
+    ClearCachedShapes(actor);
+  }
+  for (auto& actor : prefab.actors.softSkinned) {
+    ClearCachedShapes(actor.skeletonParams);
+    for (auto& soft : actor.softParams) {
+      soft.shape = {};
+      soft.flow = {};
+    }
+  }
+  for (auto& nested : prefab.prefabs) {
+    if (nested.prefab) {
+      ClearCachedShapes(*nested.prefab);
+    }
+  }
+}
+
 std::unique_ptr<MochiPrefabAsset>
 MochiPrefabAsset::Create(std::string const& name, mochi::Path const& path, AssetManager* manager) {
   mochi::ErrorLog error;
@@ -301,7 +335,7 @@ bool MochiPrefabAsset::IsSavable() const {
   return !IsReadOnly();
 }
 
-bool MochiPrefabAsset::Save() const {
+bool MochiPrefabAsset::Save() {
   if (IsReadOnly()) {
     MOCHI_LOG_ERROR("Attempting to save read-only MochiPrefabAsset");
     return false;

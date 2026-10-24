@@ -62,7 +62,7 @@
 ///
 /// @details Extends @ref mochi::RigidActorParams "RigidActorParams". The inherited @ref mochi::RigidActorParams::worldFromLocal "RigidActorParams::worldFromLocal" is replaced by the prefab-relative @ref mochi::prefab::RigidActorPrefab::rotation "rotation" and @ref mochi::prefab::RigidActorPrefab::translation "translation" fields, and the inherited @ref mochi::RigidActorParams::shape "RigidActorParams::shape" (a runtime @ref mochi::ShapeHandle "ShapeHandle") is replaced by @ref mochi::prefab::RigidActorPrefab::shapeFile "shapeFile" (a path serialized to JSON. The shape is loaded at instantiation time).
 ///
-/// @note The inherited @ref mochi::RigidActorParams::name "RigidActorParams::name" field need not be unique, but a name shared by more than one actor cannot be referenced by a constraint, pose controller, or contact filter.
+/// @note The inherited @ref mochi::RigidActorParams::name "RigidActorParams::name" field need not be unique, but a name shared by more than one actor cannot be used by name-based prefab references.
 ///
 
 /// @var mochi::prefab::RigidActorPrefab::comment
@@ -142,7 +142,7 @@
 ///
 /// @details Extends @ref mochi::SoftActorParams "SoftActorParams". The inherited @ref mochi::SoftActorParams::worldFromLocal "SoftActorParams::worldFromLocal" is replaced by the prefab-relative @ref mochi::prefab::SoftActorPrefab::rotation "rotation" and @ref mochi::prefab::SoftActorPrefab::translation "translation" fields, and the inherited @ref mochi::SoftActorParams::shape "SoftActorParams::shape" (a runtime @ref mochi::ShapeHandle "ShapeHandle") is replaced by @ref mochi::prefab::SoftActorPrefab::shapeFile "shapeFile" (a path serialized to JSON. The shape is loaded at instantiation time).
 ///
-/// @note When used as a standalone soft actor prefab, the inherited @ref mochi::SoftActorParams::name "SoftActorParams::name" field need not be unique, but a name shared by more than one actor cannot be referenced by a constraint, pose controller, or contact filter.
+/// @note When used as a standalone soft actor prefab, the inherited @ref mochi::SoftActorParams::name "SoftActorParams::name" field need not be unique, but a name shared by more than one actor cannot be used by name-based prefab references.
 ///
 
 /// @var mochi::prefab::SoftActorPrefab::comment
@@ -166,10 +166,10 @@
 
 /// @var mochi::prefab::SoftActorPrefab::sdf
 ///
-/// @brief [Experimental] Parameters used to construct a grid-based Signed Distance Field (SDF) if the shape doesn't already have one.
+/// @brief [Experimental] Parameters used to construct a grid-based Signed Distance Field (SDF) from the shape's surface mesh.
 ///
-/// @note Ignored if @ref mochi::prefab::SoftActorPrefab::colliderType "colliderType" is not @ref mochi::ColliderType::Sdf "ColliderType::Sdf".
-/// @note Ignored if the shape already has a grid-based SDF.
+/// @note Ignored unless @ref mochi::prefab::SoftActorPrefab::colliderType "colliderType" is @ref mochi::ColliderType::Sdf "ColliderType::Sdf" or @ref mochi::ColliderType::Auto "ColliderType::Auto".
+/// @note The SDF is computed when the actor is created, even if the shape already has one.
 ///
 /// @warning This is an experimental feature. It may be changed or removed in the future. Use at your own risk.
 ///
@@ -193,7 +193,7 @@
 /// @brief [Experimental] Enable automatic recentering of the local coordinate system.
 ///
 /// @note Recentering updates the root transform as the actor moves, keeping local-space displacements small. This improves numerical stability for actors that move far from their initial position.
-/// @note Ignored by soft skinned actors, which do not support recentering.
+/// @note Ignored for nested soft actors in soft-skinned actors, which do not support recentering.
 ///
 /// @warning This is an experimental feature. It may be changed or removed in the future. Use at your own risk.
 ///
@@ -202,7 +202,8 @@
 ///
 /// @brief Scale [x, y, z] to bake into the shape file.
 ///
-/// @note All components must be strictly positive and finite. Negative scale (mirroring) is not supported and rejected at @ref mochi::prefab::AddToScene "AddToScene".
+/// @note All components must be non-zero and finite. Negative components mirror the corresponding model-space axes, including @ref mochi::prefab::SoftActorPrefab::nodeDisplacements "nodeDisplacements".
+/// @note When used in @ref mochi::prefab::SoftSkinnedActorPrefab::softParams "SoftSkinnedActorPrefab::softParams", all components must be equal and strictly positive.
 /// @note If @ref mochi::prefab::SoftActorPrefab::flowFile "flowFile" is set, @ref mochi::prefab::SoftActorPrefab::scale "scale" must be (1, 1, 1).
 /// @note Non-uniform scale is supported only for shape data that supports arbitrary per-axis bake scale. Unsupported scale values are rejected when the shape is loaded.
 ///
@@ -259,6 +260,16 @@
 /// @brief Translation [x, y, z] to apply to the render model.
 ///
 /// @note Ignored if @ref mochi::prefab::SoftActorPrefab::renderModelFile "renderModelFile" is empty.
+///
+
+/// @var mochi::prefab::SoftActorPrefab::nodeDisplacements
+///
+/// @brief Optional initial nodal displacements in model space, flattened as [x0, y0, z0, x1, y1, z1, ...].
+///
+/// @details Values are expressed in the model frame of @ref mochi::prefab::SoftActorPrefab::shapeFile "shapeFile", the same frame as its node positions. The model transform baked into the shape (@ref mochi::prefab::SoftActorPrefab::scale "scale", @ref mochi::prefab::SoftActorPrefab::shapeRotation "shapeRotation", and the effective prefab scale) is applied to the displacements too. @ref mochi::prefab::SoftActorPrefab::shapeTranslation "shapeTranslation" does not affect them. Displacements for a preset @ref mochi::SoftActorParams::shape "SoftActorParams::shape" are applied unchanged, like its geometry. Applied right after the actor is created, see @ref mochi::Actor::SetDisplacements "Actor::SetDisplacements".
+///
+/// @note Ignored if unset or empty. Otherwise, must contain 3 finite values per simulation node.
+/// @note For nested soft actors in @ref mochi::prefab::SoftSkinnedActorPrefab::softParams "SoftSkinnedActorPrefab::softParams", values are the soft displacements in the unposed (bind-pose) frame, before skinning is applied.
 ///
 
 /// @struct mochi::prefab::ArticulatedJointPrefab
@@ -387,7 +398,7 @@
 /// @brief Optional actor name. Uniqueness is not enforced.
 ///
 /// @note Nested actor runtime paths use the effective actor name as the parent path, where the effective actor name is this actor name combined with any enclosing @ref mochi::prefab::PrefabParams::name "PrefabParams::name" or @ref mochi::prefab::PrefabReference::name "PrefabReference::name" path. If the effective actor name is empty, runtime nested actor paths use "unnamed_articulation" as the parent path. Prefab actor-reference fields such as contact filters and constraints are authored relative to their containing prefab, and enclosing prefab-reference names are prepended during instantiation. They do not resolve through the "unnamed_articulation" fallback. Use a non-empty actor name or enclosing prefab name when prefab references need to target nested actors.
-/// @note A name shared by more than one actor cannot be referenced by a constraint, pose controller, or contact filter (see @ref mochi::prefab::PoseControllerPrefab "PoseControllerPrefab").
+/// @note A name shared by more than one actor cannot be used by name-based prefab references.
 ///
 
 /// @var mochi::prefab::ArticulatedActorPrefab::scale
@@ -439,11 +450,20 @@
 /// @note Units depend on joint type: [rad/s] for revolute and spherical, [m/s] for prismatic.
 ///
 
+/// @var mochi::prefab::ArticulatedActorPrefab::jointPose
+///
+/// @brief Optional initial joint pose, one value per DoF in joint order.
+///
+/// @details Units depend on joint type: [rad] for revolute, [m] for prismatic, and a rotation vector [rad] for spherical joints and the rotational part of free joints. The translational part of free joints is in [m]. Translational DoFs scale with the articulated effective scale (@ref mochi::prefab::ArticulatedActorPrefab::scale "scale" times the effective prefab scale). Rotational DoFs are not scaled. Applied right after the actor is created, see @ref mochi::Actor::SetArticulatedPoseFromJoints "Actor::SetArticulatedPoseFromJoints".
+///
+/// @note Ignored if unset or empty. Otherwise, must contain @ref mochi::Actor::GetNumDofs "Actor::GetNumDofs" finite values.
+///
+
 /// @struct mochi::prefab::SoftSkinnedActorPrefab
 ///
-/// @brief Prefab parameters for a soft skinned actor.
+/// @brief Prefab parameters for a soft-skinned actor.
 ///
-/// @details A soft skinned actor consists of an articulated skeleton with one or more attached soft bodies.
+/// @details A soft-skinned actor consists of an articulated skeleton with one or more attached soft bodies.
 ///
 
 /// @var mochi::prefab::SoftSkinnedActorPrefab::comment
@@ -458,18 +478,18 @@
 
 /// @var mochi::prefab::SoftSkinnedActorPrefab::softParams
 ///
-/// @brief Soft body parameters, one per soft actor.
+/// @brief Parameters for each nested soft actor.
 ///
-/// @note The per-soft-actor @ref mochi::prefab::SoftActorPrefab::rotation "SoftActorPrefab::rotation" and @ref mochi::prefab::SoftActorPrefab::translation "SoftActorPrefab::translation" fields are ignored. Soft actor transforms are determined by the skeleton's link attachments (see @ref mochi::prefab::SoftSkinnedActorPrefab::softAttachLinks "softAttachLinks").
-/// @note Each per-soft-actor @ref mochi::prefab::SoftActorPrefab::scale "SoftActorPrefab::scale" must be uniform (three equal, strictly positive, finite values). Non-uniform soft shape scale is not supported for soft-skinned prefabs.
-/// @note If a per-soft-actor @ref mochi::prefab::SoftActorPrefab::flowFile "SoftActorPrefab::flowFile" is set, that entry's @ref mochi::prefab::SoftActorPrefab::scale "SoftActorPrefab::scale" must be (1, 1, 1).
+/// @note The @ref mochi::prefab::SoftActorPrefab::rotation "SoftActorPrefab::rotation" and @ref mochi::prefab::SoftActorPrefab::translation "SoftActorPrefab::translation" fields for each nested soft actor are ignored. Nested soft actor transforms are determined by the skeleton's link attachments (see @ref mochi::prefab::SoftSkinnedActorPrefab::softAttachLinks "softAttachLinks").
+/// @note Each nested soft actor's @ref mochi::prefab::SoftActorPrefab::scale "SoftActorPrefab::scale" must be uniform (three equal, strictly positive, finite values). Non-uniform soft shape scale is not supported for soft-skinned prefabs.
+/// @note If a nested soft actor's @ref mochi::prefab::SoftActorPrefab::flowFile "SoftActorPrefab::flowFile" is set, that entry's @ref mochi::prefab::SoftActorPrefab::scale "SoftActorPrefab::scale" must be (1, 1, 1).
 /// @note Each entry's inherited name field is a nested soft local name. Explicit non-empty names must be unique across skeleton link local names and other nested soft local names, and must not contain forward slash, backslash, or embedded NUL characters.
 /// @note Empty names are assigned deterministically after reserving all skeleton link names and all explicit nested soft names: an empty entry at index `i` uses `soft_i` if available; otherwise it uses the first available `soft_N` found by scanning upward from `N = 0`.
 ///
 
 /// @var mochi::prefab::SoftSkinnedActorPrefab::softAttachLinks
 ///
-/// @brief Local link names to attach each soft actor to. Empty or one entry per @ref mochi::prefab::SoftSkinnedActorPrefab::softParams "softParams" element.
+/// @brief Local link names to attach each nested soft actor to. Empty or one entry per @ref mochi::prefab::SoftSkinnedActorPrefab::softParams "softParams" element.
 ///
 /// @note If provided, each entry must be non-empty and must match a skeleton link local name.
 ///
@@ -521,7 +541,7 @@
 
 /// @var mochi::prefab::ActorLists::softSkinned
 ///
-/// @brief Soft skinned actors.
+/// @brief Soft-skinned actors.
 ///
 
 /// @struct mochi::prefab::RigidSphericalJointConstraintPrefab
@@ -851,7 +871,7 @@
 
 /// @struct mochi::prefab::PrefabReference
 ///
-/// @brief Reference to another prefab file (scene or actor) for prefab nesting.
+/// @brief Reference to another prefab (scene or actor) for prefab nesting.
 ///
 
 /// @var mochi::prefab::PrefabReference::comment
@@ -863,12 +883,18 @@
 ///
 /// @brief Name of the nested prefab instance. Used to format the names of nested actors in the form "prefabName/actorName".
 ///
-/// @note Name-reference ambiguity is evaluated per nested subtree. A nested prefab's own references (from its constraints, pose controllers, and contact filters) resolve within its own instance first, so a name reused across independent sibling instances is not ambiguous for each instance's internal references. It becomes ambiguous only for a reference written at the enclosing (parent) scope or above.
+/// @note Name-reference ambiguity is evaluated per nested subtree. A nested prefab's own name-based references resolve within its own instance first, so a name reused across independent sibling instances is not ambiguous for each instance's internal references. It becomes ambiguous only for a reference written at the enclosing (parent) scope or above.
 ///
 
 /// @var mochi::prefab::PrefabReference::path
 ///
-/// @brief File path of the nested prefab.
+/// @brief Path to the nested prefab file.
+///
+/// @details If non-empty, @ref mochi::prefab::LoadNestedPrefabs "LoadNestedPrefabs" reloads the prefab from this path on every call. @ref mochi::prefab::EnsureFullyLoaded "EnsureFullyLoaded" loads it from this path only if the reference does not already contain a loaded prefab. If empty, both functions require the reference to already contain a loaded prefab; they keep that prefab and load all prefabs nested within it.
+///
+/// @note A reference created with the Python constructor needs a non-empty path before loading because the constructor cannot accept a loaded prefab. C++ callers may instead assign a loaded prefab directly and leave this path empty.
+///
+/// @warning The loaded prefab is not serialized. After deserialization, an empty-path reference has no loaded prefab and is rejected by @ref mochi::prefab::LoadNestedPrefabs "LoadNestedPrefabs" and @ref mochi::prefab::EnsureFullyLoaded "EnsureFullyLoaded". Set a non-empty path before saving if the reference must remain loadable after deserialization.
 ///
 
 /// @var mochi::prefab::PrefabReference::scale
@@ -900,6 +926,8 @@
 /// @var mochi::prefab::PrefabReference::prefab
 ///
 /// @brief Handle to the loaded nested prefab. Runtime state, populated at load time and never serialized.
+///
+/// @note C++ callers may set this handle and leave @ref mochi::prefab::PrefabReference::path "PrefabReference::path" empty. @ref mochi::prefab::LoadNestedPrefabs "LoadNestedPrefabs" and @ref mochi::prefab::EnsureFullyLoaded "EnsureFullyLoaded" then keep this prefab and load all prefabs nested within it instead of loading this reference from a file.
 ///
 
 /// @struct mochi::prefab::ActorContactEntry
@@ -942,6 +970,34 @@
 /// @note Default contact filtering disables contact between adjacent links in articulated and soft-skinned actors. Actor-contact entries override those defaults for pairs included in the resolved actor sets. If @ref mochi::prefab::ActorContactEntry::includeNestedActors "includeNestedActors" is true and both actor names resolve to the same parent actor, the entry also covers pairs between that parent's nested actors, including adjacent links.
 ///
 
+/// @struct mochi::prefab::ContactPairParamsOverrideEntry
+///
+/// @brief Overrides selected contact parameters for an unordered actor pair.
+///
+/// @see @ref mochi::Scene::SetContactPairParamsOverride "Scene::SetContactPairParamsOverride", @ref mochi::ContactPairParamsOverride "ContactPairParamsOverride"
+///
+
+/// @var mochi::prefab::ContactPairParamsOverrideEntry::actors
+///
+/// @brief Identifies two actors by name or hierarchy path.
+///
+/// @details If the actor is in this prefab, reference it by name, e.g., "myActor". If the actor is in a nested prefab, reference it by hierarchy path, e.g., "myPrefab/myActor".
+///
+/// @note Each referenced name must identify exactly one existing actor. Actor names need not be unique, but referencing a name shared by more than one actor, or a name that matches no actor, is invalid and rejected at @ref mochi::prefab::AddToScene "AddToScene".
+/// @note Both referenced actors must have contact parameters.
+/// @note Parent actor names identify only the parent. Name nested actors explicitly to override their contact pairs.
+/// @note If both names identify the same actor, the entry applies to that actor's self-pair.
+///
+/// @warning Must contain exactly 2 elements.
+///
+
+/// @var mochi::prefab::ContactPairParamsOverrideEntry::paramsOverride
+///
+/// @brief Partial contact parameter override for the actor pair.
+///
+/// @note At least one field must be present.
+///
+
 /// @struct mochi::prefab::LayerContactEntry
 ///
 /// @brief Used by @ref mochi::prefab::ContactFilter "ContactFilter" to enable or disable contact for a pair of layers.
@@ -978,7 +1034,7 @@
 /// @note Contact filters are applied after all actors in the prefab have been created. Nested child prefab contact filters are applied before parent prefab contact filters, so parent settings can override child settings in the same actor-vs-actor or layer-vs-layer filter table.
 /// @note Settings are applied in this fixed order: @ref mochi::prefab::ContactFilter::layerContactAsymmetric "layerContactAsymmetric", @ref mochi::prefab::ContactFilter::layerContactSymmetric "layerContactSymmetric", @ref mochi::prefab::ContactFilter::actorContactAsymmetric "actorContactAsymmetric", then @ref mochi::prefab::ContactFilter::actorContactSymmetric "actorContactSymmetric". Within each list, entries are applied in array order, so later entries can override earlier entries in the same actor-vs-actor or layer-vs-layer filter table.
 /// @note Contact filter settings are not necessarily symmetric.
-/// @note Exporting a scene stores disabled pairs from the effective contact-filter state, not the exact JSON representation originally used to author it. Exporting may emit a canonical representation whose contact-filter category differs from the original JSON. For example, self-contact may be emitted as @ref mochi::prefab::ContactFilter::actorContactSymmetric "actorContactSymmetric" because the forward and reverse resolved actor pair are the same.
+/// @note Exporting a scene stores disabled pairs from the effective contact-filter state, not the exact JSON representation originally used to author it. Exporting may emit a canonical representation whose contact-filter category differs from the original JSON. For example, self-contact may be emitted as @ref mochi::prefab::ContactFilter::actorContactSymmetric "actorContactSymmetric" because the forward and reverse resolved actor pair are the same. Entry order and duplicate, redundant, or overridden entries from the source prefab are not preserved.
 ///
 /// @warning Scene export does not record explicit settings that enable contact between actor pairs. If such a setting enables contact between adjacent links of an articulated or soft-skinned actor, adding the exported prefab to a scene applies automatic adjacent-link filtering and disables contact for that pair again. To preserve this behavior, add an equivalent enabling entry to the exported prefab or re-enable the pair after adding the prefab to a scene.
 ///
@@ -1066,6 +1122,13 @@
 /// @brief Contact filter settings for selective contact filtering.
 ///
 
+/// @var mochi::prefab::ScenePrefab::contactPairParamsOverrides
+///
+/// @brief Optional actor-pair contact parameter overrides.
+///
+/// @details Entries are applied in array order after all actors in their prefab have been created. A later entry for the same unordered actor pair replaces the earlier override rather than merging with it. Nested child prefab entries are applied before parent entries.
+///
+
 /// @struct mochi::prefab::PrefabParams
 ///
 /// @brief Parameters for instantiating a @ref mochi::prefab::ScenePrefab "ScenePrefab" into a @ref mochi::Scene "Scene".
@@ -1089,6 +1152,7 @@
 /// - Mesh geometry (link / actor shapes are loaded at the cumulative scale)
 /// - Joint and link translations, cycle joint anchors
 /// - Prismatic joint position limits (Real3, in meters)
+/// - Soft actor @ref mochi::prefab::SoftActorPrefab::nodeDisplacements "SoftActorPrefab::nodeDisplacements" and translational DoFs of @ref mochi::prefab::ArticulatedActorPrefab::jointPose "ArticulatedActorPrefab::jointPose"
 /// - Constraint geometric target and limit distances [m], including rigid prismatic joint limits, world-space position targets, rigid actor-local pivot/joint positions in @ref mochi::prefab::RigidPivotPositionConstraintPrefab "RigidPivotPositionConstraintPrefab", @ref mochi::prefab::RigidPivotToRigidTargetConstraintPrefab "RigidPivotToRigidTargetConstraintPrefab", and @ref mochi::prefab::RigidSphericalJointConstraintPrefab "RigidSphericalJointConstraintPrefab"; the rigid-local attachment/search point in @ref mochi::prefab::DeformableNodeToRigidConstraintPrefab "DeformableNodeToRigidConstraintPrefab"; and translational single-DoF target/range values in @ref mochi::prefab::ArticulatedSingleDofTargetConstraintPrefab "ArticulatedSingleDofTargetConstraintPrefab" and @ref mochi::prefab::ArticulatedSingleDofRangeConstraintPrefab "ArticulatedSingleDofRangeConstraintPrefab". Actor-local constraint distances use the referenced actor's prefab metric scale, so standalone rigid/soft shape-bake scale fields are not applied again.
 /// - User-supplied inertia overrides on rigid and articulated link actors: center of mass scales componentwise by the signed effective scale, mass scales by the absolute effective volume scale, moment of inertia uses the corresponding diagonal inertia transform. For a purely uniform effective scale s, this reduces to:
 /// @code
@@ -1103,6 +1167,7 @@
 ///
 /// - density (intrinsic material property; mass/density are mutually exclusive in the prefab API, so no double-application)
 /// - linearVelocity / angularVelocity / jointVelocities
+/// - Contact-pair parameter overrides, whose authored values are preserved
 /// - Constraint stiffness/damping coefficients and saturation thresholds inherited from @ref mochi::ConstraintParams "ConstraintParams". These parameters define the constraint's response, not just geometry: different goals (preserving material behavior, damping ratio, actuator limits, or closed-loop response) imply different scale laws, so prefab scaling preserves authored values.
 /// - Joint inertia, friction, limit stiffness/damping, cycle joint stiffness (characterized actuator / tuned-penalty parameters; bring your own actuator model when scaling a robot)
 /// - Revolute and spherical joint angular limits, rotation-valued targets and ranges in @ref mochi::prefab::Articulated3dRotationTargetConstraintPrefab "Articulated3dRotationTargetConstraintPrefab" and @ref mochi::prefab::Articulated3dRotationRangeConstraintPrefab "Articulated3dRotationRangeConstraintPrefab", and rotational single-DoF target/range values in @ref mochi::prefab::ArticulatedSingleDofTargetConstraintPrefab "ArticulatedSingleDofTargetConstraintPrefab" and @ref mochi::prefab::ArticulatedSingleDofRangeConstraintPrefab "ArticulatedSingleDofRangeConstraintPrefab" (scale invariant)
@@ -1144,7 +1209,7 @@
 /// @brief All newly created actors.
 ///
 /// @note Order is not guaranteed except that actors from nested prefabs will be listed before actors from the top-level prefab.
-/// @note Contains only top-level actors. Articulated actors' nested link actors and soft-skinned actors' nested link and soft sub-actors are created but not listed here. Reach them via @ref mochi::Actor::GetNestedLinkActors "Actor::GetNestedLinkActors" and @ref mochi::Actor::GetNestedSoftActors "Actor::GetNestedSoftActors".
+/// @note Contains only top-level actors. Articulated actors' nested link actors and soft-skinned actors' nested link actors and nested soft actors are created but not listed here. Reach them via @ref mochi::Actor::GetNestedLinkActors "Actor::GetNestedLinkActors" and @ref mochi::Actor::GetNestedSoftActors "Actor::GetNestedSoftActors".
 ///
 /// @see @ref mochi::prefab::AddToSceneResult::Filter "Filter"
 ///
@@ -1166,7 +1231,7 @@
 /// @return List of actors of the specified type.
 ///
 /// @note If there were nested prefabs, then actors will be listed in depth-first order.
-/// @note For a single prefab (no nested prefabs) whose actors have no nested link or soft sub-actors, the result is 1-to-1 with the prefab's actors of that type (same size, same order). Nested link/soft sub-actors are not listed, and soft-skinned actors are reported under @ref mochi::ActorType::Articulated "ActorType::Articulated".
+/// @note For a single prefab (no nested prefabs) whose actors have no nested link actors or nested soft actors, the result is 1-to-1 with the prefab's actors of that type (same size, same order). Nested link actors and nested soft actors are not listed, and soft-skinned actors are reported under @ref mochi::ActorType::Articulated "ActorType::Articulated".
 ///
 
 /// @fn DynamicArray<Constraint*> mochi::prefab::AddToSceneResult::Filter(ConstraintType type) const
@@ -1178,6 +1243,33 @@
 ///
 /// @note If there were nested prefabs, then constraints will be listed in depth-first order.
 /// @note For a single prefab (no nested prefabs), the result will be 1-to-1 with the constraint list in the prefab (same size, same order).
+///
+
+/// @struct mochi::prefab::ExportParams
+///
+/// @brief Options for @ref mochi::prefab::ExportScene "ExportScene" and @ref mochi::prefab::ExportActor "ExportActor".
+///
+
+/// @var mochi::prefab::ExportParams::excludeActors
+///
+/// @brief Handles of actors that @ref mochi::prefab::ExportScene "ExportScene" should not export.
+///
+/// @details Excluding an articulated actor also excludes all of its nested link actors. Excluding a soft-skinned actor also excludes all of its nested link actors and nested soft actors. Any contact filter or contact-pair parameter override entries that reference excluded actors are dropped.
+///
+/// @note Nested link and nested soft actor handles are rejected. Pass the top-level articulated or soft-skinned actor handle instead.
+/// @note Ignored by @ref mochi::prefab::ExportActor "ExportActor".
+///
+
+/// @var mochi::prefab::ExportParams::exportCurrentPose
+///
+/// @brief Whether to export the current pose of soft and articulated actors.
+///
+/// @details When true, the current elastic displacements of soft actors (including nested soft actors of soft-skinned actors) are written to @ref mochi::prefab::SoftActorPrefab::nodeDisplacements "SoftActorPrefab::nodeDisplacements", and the current joint pose of articulated actors (including soft-skinned skeletons) is written to @ref mochi::prefab::ArticulatedActorPrefab::jointPose "ArticulatedActorPrefab::jointPose". Adding the exported prefab to a scene then restores that pose. Actors exactly at rest omit these fields.
+///
+/// @note When false (the default), soft displacement and articulated joint pose fields are omitted. Actor transforms are exported regardless of this option.
+/// @note Displacements of ROM soft actors are never exported.
+/// @note Velocities (soft nodal and articulated joint) are never exported.
+/// @note A prefab with exported soft displacements cannot be added to a scene with `experimental::RomParams`. Set this to false to export a prefab for that use.
 ///
 
 /// @fn ScenePrefab mochi::prefab::LoadFromFile(std::string_view prefabPath, std::string_view rootPath, Context* context, Error& error)
@@ -1243,7 +1335,7 @@
 ///
 /// @brief Instantiate a @ref mochi::prefab::ScenePrefab "ScenePrefab" and add it to a @ref mochi::Scene "Scene".
 ///
-/// @details Creates the prefab's actors, constraints, and controllers, applies any scene settings enabled by @ref mochi::prefab::PrefabParams::applySceneSettings "PrefabParams::applySceneSettings", and applies contact filter entries.
+/// @details Creates the prefab's actors, constraints, and controllers, applies any scene settings enabled by @ref mochi::prefab::PrefabParams::applySceneSettings "PrefabParams::applySceneSettings", contact filter entries, and contact-pair parameter overrides.
 ///
 /// @param[in] prefab The fully loaded @ref mochi::prefab::ScenePrefab "ScenePrefab" to instantiate.
 /// @param[in,out] scene The @ref mochi::Scene "Scene" to add things to.
@@ -1359,8 +1451,10 @@
 ///
 /// @note Use this if the file was loaded via @ref mochi::prefab::ShallowLoadFromFile "ShallowLoadFromFile" or @ref mochi::prefab::ShallowLoadFromJsonString "ShallowLoadFromJsonString" or if the @ref mochi::prefab::ScenePrefab "ScenePrefab" was created procedurally.
 /// @note You do not need to call this after @ref mochi::prefab::LoadFromFile "LoadFromFile" or @ref mochi::prefab::LoadFromJsonString "LoadFromJsonString" because they load all nested content for you.
-/// @note If called a second time, the nested prefabs will be reloaded. If your intention is to avoid redundant loads, then use @ref mochi::prefab::EnsureFullyLoaded "EnsureFullyLoaded" instead.
+/// @note A reference with a non-empty path is reloaded from its file on every call. A reference with an empty path must already contain a loaded prefab; this function keeps that prefab and loads all prefabs nested within it. See @ref mochi::prefab::PrefabReference::path "PrefabReference::path" for when a path is required. Use @ref mochi::prefab::EnsureFullyLoaded "EnsureFullyLoaded" to avoid reloading prefabs that are already loaded.
 /// @note A prefab must not reference itself, directly or indirectly.
+///
+/// @warning If this function returns an error, the input prefab may remain partially loaded. A reference with a non-empty path keeps its previously loaded prefab if its file or any prefab nested within it fails to load; if it had no loaded prefab, it remains unloaded.
 ///
 /// @see @ref mochi::prefab::EnsureFullyLoaded "EnsureFullyLoaded", @ref mochi::prefab::LoadShapes "LoadShapes"
 ///
@@ -1396,68 +1490,78 @@
 /// @note Use this if the file was loaded via @ref mochi::prefab::ShallowLoadFromFile "ShallowLoadFromFile" or @ref mochi::prefab::ShallowLoadFromJsonString "ShallowLoadFromJsonString" or if the @ref mochi::prefab::ScenePrefab "ScenePrefab" was created procedurally.
 /// @note You do not need to call this after @ref mochi::prefab::LoadFromFile "LoadFromFile" or @ref mochi::prefab::LoadFromJsonString "LoadFromJsonString" because they load all nested content for you.
 /// @note A prefab must not reference itself, directly or indirectly.
+/// @note If a reference already contains a loaded prefab, this function does not reload its file, even when its path is non-empty; it still loads any missing nested prefabs. A reference with neither a path nor a loaded prefab is invalid. See @ref mochi::prefab::PrefabReference::path "PrefabReference::path" for when a path is required.
+///
+/// @warning If this function returns an error, the input prefab may remain partially loaded. A reference that was unloaded when the call began remains unloaded if its file or any prefab nested within it fails to load.
 ///
 /// @see @ref mochi::prefab::LoadNestedPrefabs "LoadNestedPrefabs", @ref mochi::prefab::LoadShapes "LoadShapes", @ref mochi::prefab::AddToScene "AddToScene"
 ///
 
-/// @fn void mochi::prefab::ExportScene(Scene const* scene, std::string_view exportName, std::string_view outputDir, Error& error)
+/// @fn void mochi::prefab::ExportScene(Scene const* scene, std::string_view exportName, std::string_view outputDir, ExportParams const& params, Error& error)
 ///
 /// @brief Export a @ref mochi::Scene "Scene" to a folder containing a prefab file and all generated mesh files.
 ///
 /// @param[in] scene The @ref mochi::Scene "Scene" to export.
 /// @param[in] exportName Name for the exported prefab. Used both for the export subdirectory and for the prefab filename (`<exportName>.mochi_scene`).
 /// @param[in] outputDir Directory where the export folder will be created. The subdirectories `<outputDir>/<exportName>` and `<outputDir>/<exportName>/generated_assets` are created automatically.
+/// @param[in] params Export options, see @ref mochi::prefab::ExportParams "ExportParams". Can optionally be omitted in Python.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
 /// @note Generated mesh files (.mochi.h5) are written under generated_assets/ and referenced from the prefab using "./generated_assets/" paths.
 /// @note Exported actor names are made unique: when two actors share a name, later ones receive a numeric suffix (e.g. "box", "box1"), so an exported name may differ from the runtime name.
+/// @note Scene export reconstructs supported creation and configuration data from effective runtime state. It is not a lossless or structure-preserving round trip of any prefab used to create the scene.
 ///
 /// @warning Currently exports only rigid, soft, articulated, and soft-skinned actors. Constraints, pose controllers, shell, rod actors, and implicit (non-mesh) shapes are NOT exported.
-/// @warning For articulated actors, current joint pose and joint velocities are NOT exported.
+/// @warning Velocities are NOT exported. Soft actor displacements and articulated joint poses are exported only when @ref mochi::prefab::ExportParams::exportCurrentPose "ExportParams::exportCurrentPose" is true.
 /// @warning Scene export does not record explicit settings that enable contact between actor pairs. If such a setting enables contact between adjacent links of an articulated or soft-skinned actor, adding the exported prefab to a scene applies automatic adjacent-link filtering and disables contact for that pair again. To preserve this behavior, add an equivalent enabling entry to the exported prefab or re-enable the pair after adding the prefab to a scene.
 ///
-/// @see @ref mochi::prefab::ExportSceneExcluding "ExportSceneExcluding", @ref mochi::prefab::ExportActor "ExportActor"
+/// @see @ref mochi::prefab::ExportParams "ExportParams", @ref mochi::prefab::ExportActor "ExportActor"
 ///
 
-/// @fn void mochi::prefab::ExportSceneExcluding(Scene const* scene, std::string_view exportName, std::string_view outputDir, Span<ActorHandle const> excludeActors, Error& error)
+/// @fn void mochi::prefab::ExportScene(Scene const* scene, std::string_view exportName, std::string_view outputDir, Error& error)
 ///
-/// @brief Export a @ref mochi::Scene "Scene" to a folder containing a prefab file and all generated mesh files, omitting a caller-provided set of actors.
+/// @brief Overload of @ref mochi::prefab::ExportScene "ExportScene" that uses default @ref mochi::prefab::ExportParams "ExportParams".
 ///
 /// @param[in] scene The @ref mochi::Scene "Scene" to export.
-/// @param[in] exportName Name for the exported prefab. Used both for the export subdirectory and for the prefab filename (`<exportName>.mochi_scene`).
-/// @param[in] outputDir Directory where the export folder will be created. The subdirectories `<outputDir>/<exportName>` and `<outputDir>/<exportName>/generated_assets` are created automatically.
-/// @param[in] excludeActors Handles of actors that should not be exported. Excluding an articulated actor also excludes all of its nested link actors. Excluding a soft-skinned actor also excludes all of its nested link and soft sub-actors. Any contact filter entries that reference excluded actors are dropped.
+/// @param[in] exportName Name for the exported prefab.
+/// @param[in] outputDir Directory where the export folder will be created.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Generated mesh files (.mochi.h5) are written under generated_assets/ and referenced from the prefab using "./generated_assets/" paths.
-/// @note Exported actor names are made unique: when two actors share a name, later ones receive a numeric suffix (e.g. "box", "box1"), so an exported name may differ from the runtime name.
-///
-/// @warning Currently exports only rigid, soft, articulated, and soft-skinned actors. Constraints, pose controllers, shell, rod actors, and implicit (non-mesh) shapes are NOT exported.
-/// @warning For articulated actors, current joint pose and joint velocities are NOT exported.
-/// @warning Scene export does not record explicit settings that enable contact between actor pairs. If such a setting enables contact between adjacent links of an articulated or soft-skinned actor, adding the exported prefab to a scene applies automatic adjacent-link filtering and disables contact for that pair again. To preserve this behavior, add an equivalent enabling entry to the exported prefab or re-enable the pair after adding the prefab to a scene.
-///
-/// @see @ref mochi::prefab::ExportScene "ExportScene", @ref mochi::prefab::ExportActor "ExportActor"
+/// @see @ref mochi::prefab::ExportScene "ExportScene"
 ///
 
-/// @fn void mochi::prefab::ExportActor(Actor const* actor, std::string_view exportName, std::string_view outputDir, Error& error)
+/// @fn void mochi::prefab::ExportActor(Actor const* actor, std::string_view exportName, std::string_view outputDir, ExportParams const& params, Error& error)
 ///
 /// @brief Export a single actor to a prefab file under `outputDir/exportName/<exportName>.mochi_scene`.
 ///
-/// Extracts creation parameters from the actor and writes the prefab plus any generated mesh assets to disk. Only supported for standalone rigid actors, soft actors and articulated actors.
+/// Extracts creation parameters from the actor and writes the prefab plus any generated mesh assets to disk.
 ///
 /// @param[in] actor The actor to export. Must not be null.
 /// @param[in] exportName Label used for the actor's name, the export subdirectory, and the prefab filename (`<exportName>.mochi_scene`).
 /// @param[in] outputDir Parent directory for the export. The subdirectories `<outputDir>/<exportName>` and `<outputDir>/<exportName>/generated_assets` are created automatically.
+/// @param[in] params Export options, see @ref mochi::prefab::ExportParams "ExportParams". Can optionally be omitted in Python.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Uses the same prefab export path as @ref mochi::prefab::ExportScene "ExportScene". In addition to the soft-skinned restriction above, any limitations documented in @ref mochi::prefab::ExportScene "ExportScene" also apply here.
-/// @note When exporting an articulated actor, pass the top-level articulated actor (the one returned by @ref mochi::Scene::CreateArticulatedActor "Scene::CreateArticulatedActor" or by @ref mochi::Actor::GetArticulatedActor "Actor::GetArticulatedActor" on a nested link), not a nested actor.
+/// @note Any limitations documented in @ref mochi::prefab::ExportScene "ExportScene" also apply here.
+/// @note When exporting an articulated actor, pass the articulated actor itself (the one returned by @ref mochi::Scene::CreateArticulatedActor "Scene::CreateArticulatedActor" or by @ref mochi::Actor::GetArticulatedActor "Actor::GetArticulatedActor" on a nested link), not a nested actor.
 /// @note Generated mesh files (.mochi.h5) are written under generated_assets/ and referenced from the prefab using "./generated_assets/" paths.
 ///
-/// @warning Only supported for standalone rigid, soft, and articulated actors. Soft-skinned actors are not supported here.
-/// @warning Contact-filter settings are not exported. Adding an exported articulated actor to a scene applies automatic adjacent-link filtering, even if contact between adjacent links was explicitly enabled before export. To preserve this behavior, add an equivalent enabling entry to the exported prefab or re-enable the pair after adding the prefab to a scene.
+/// @warning Only supported for standalone rigid actors, standalone soft actors, and articulated actors. Soft-skinned actors are not supported.
+/// @warning Scene-level contact-filter settings and contact-pair parameter overrides are not exported. Adding an exported articulated actor to a scene applies automatic adjacent-link filtering, even if contact between adjacent links was explicitly enabled before export. To preserve this behavior, add an equivalent enabling entry to the exported prefab or re-enable the pair after adding the prefab to a scene.
 ///
-/// @see @ref mochi::prefab::ExportScene "ExportScene", @ref mochi::prefab::ExportSceneExcluding "ExportSceneExcluding"
+/// @see @ref mochi::prefab::ExportParams "ExportParams", @ref mochi::prefab::ExportScene "ExportScene"
+///
+
+/// @fn void mochi::prefab::ExportActor(Actor const* actor, std::string_view exportName, std::string_view outputDir, Error& error)
+///
+/// @brief Overload of @ref mochi::prefab::ExportActor "ExportActor" that uses default @ref mochi::prefab::ExportParams "ExportParams".
+///
+/// @param[in] actor The actor to export. Must not be null.
+/// @param[in] exportName Label used for the actor's name, the export subdirectory, and the prefab filename.
+/// @param[in] outputDir Parent directory for the export.
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+///
+/// @see @ref mochi::prefab::ExportActor "ExportActor"
 ///
 
 /// @struct mochi::Handle
@@ -1895,14 +1999,14 @@
 ///
 /// @brief Positions of all mesh nodes. Available via @ref mochi::Actor::GetNodePositionsLocal "Actor::GetNodePositionsLocal".
 ///
-/// @note Only supported for soft, soft-skinned and shell actors.
+/// @note Only supported for standalone soft actors, nested soft actors, and shell actors.
 ///
 
 /// @var mochi::QueryType::ElementsDeformationGradient
 ///
 /// @brief Deformation gradients for elements in deformable actors. Available via @ref mochi::Actor::GetElementsDeformationGradient "Actor::GetElementsDeformationGradient".
 ///
-/// @note Only supported for soft and soft-skinned actors (except ROMs).
+/// @note Only supported for standalone and nested soft actors (except ROMs).
 ///
 
 /// @var mochi::QueryType::SurfaceNodePositions
@@ -1933,6 +2037,20 @@
 /// @note Only supported for actors with a visual mesh. Deformable actors also require a visual mesh embedding.
 ///
 
+/// @var mochi::QueryType::ContactSkinNodePositions
+///
+/// @brief Positions of contact skin mesh nodes. Available via @ref mochi::Actor::GetContactSkinMeshNodePositionsLocal "Actor::GetContactSkinMeshNodePositionsLocal".
+///
+/// @note Only supported for deformable actors whose shape has a contact skin, regardless of @ref mochi::SoftActorParams::useContactSkin "SoftActorParams::useContactSkin" / `experimental::RodActorParams::useContactSkin` / `experimental::ShellActorParams::useContactSkin`.
+///
+
+/// @var mochi::QueryType::ContactSkinNodeNormals
+///
+/// @brief Normals of contact skin mesh nodes. Available via @ref mochi::Actor::GetContactSkinMeshNodeNormalsLocal "Actor::GetContactSkinMeshNodeNormalsLocal".
+///
+/// @note Only supported for deformable actors whose shape has a contact skin, regardless of @ref mochi::SoftActorParams::useContactSkin "SoftActorParams::useContactSkin" / `experimental::RodActorParams::useContactSkin` / `experimental::ShellActorParams::useContactSkin`.
+///
+
 /// @var mochi::QueryType::ContactPoints
 ///
 /// @brief Contact points between actors. Available via @ref mochi::Actor::GetContactPointsWorld "Actor::GetContactPointsWorld".
@@ -1945,7 +2063,7 @@
 ///
 /// @brief Elastic energy of a deformable actor. Available via @ref mochi::Actor::GetElasticEnergy "Actor::GetElasticEnergy".
 ///
-/// @note Only supported for soft and soft-skinned actors.
+/// @note Only supported for standalone and nested soft actors.
 ///
 
 /// @var mochi::QueryType::NodeContactForces
@@ -2045,7 +2163,7 @@
 
 /// @struct mochi::RecenteringParams
 ///
-/// @brief Parameters controlling recentering behavior for soft actors (not soft-skinned).
+/// @brief Parameters controlling recentering behavior for standalone soft actors.
 ///
 /// @details Recentering automatically updates the root transform as the actor's "rigid pivot" (typically near the center of mass) moves, with corresponding adjustments to local-space coordinates.
 ///
@@ -2091,6 +2209,50 @@
 /// @var mochi::BoundarySubsamplingParams::strategy
 ///
 /// @brief Strategy for determining which sample points to use.
+///
+
+/// @struct mochi::ContactPairParamsOverride
+///
+/// @brief Optional contact-response parameter replacements for an unordered actor pair.
+///
+/// @details Each present field replaces the value normally combined from the two actors. An absent field retains the existing combination rule.
+///
+/// @note Present fields have the same validity requirements as the corresponding @ref mochi::ContactParams "ContactParams" fields. A present zero is a value subject to those requirements, not an absent field.
+///
+
+/// @var mochi::ContactPairParamsOverride::penaltyCoefficient
+///
+/// @brief Pair penalty coefficient [Pa/m] before role-dependent dimensional corrections.
+///
+/// @see @ref mochi::ContactParams::penaltyCoefficient "ContactParams::penaltyCoefficient"
+///
+
+/// @var mochi::ContactPairParamsOverride::frictionFalloffVel
+///
+/// @brief Friction falloff velocity [m/s].
+///
+/// @see @ref mochi::ContactParams::frictionFalloffVel "ContactParams::frictionFalloffVel"
+///
+
+/// @var mochi::ContactPairParamsOverride::viscousFrictionCoefficient
+///
+/// @brief Pair viscous friction coefficient [s/m].
+///
+/// @see @ref mochi::ContactParams::viscousFrictionCoefficient "ContactParams::viscousFrictionCoefficient"
+///
+
+/// @var mochi::ContactPairParamsOverride::coulombFrictionCoefficient
+///
+/// @brief Pair Coulomb friction coefficient.
+///
+/// @see @ref mochi::ContactParams::coulombFrictionCoefficient "ContactParams::coulombFrictionCoefficient"
+///
+
+/// @var mochi::ContactPairParamsOverride::normalViscousDampingCoefficient
+///
+/// @brief Pair normal viscous damping coefficient [s/m].
+///
+/// @see @ref mochi::ContactParams::normalViscousDampingCoefficient "ContactParams::normalViscousDampingCoefficient"
 ///
 
 /// @struct mochi::ArticulatedShapeInfo
@@ -2211,7 +2373,7 @@
 ///
 /// @details Rigid actors behave as rigid bodies with 6 degrees of freedom (3 translational, 3 rotational). They can be static (fixed in space) or dynamic (affected by forces and collisions).
 ///
-/// @note Also used to create links in articulated bodies.
+/// @note Articulated links are created from @ref mochi::ArticulatedLinkParams "ArticulatedLinkParams" instead.
 ///
 /// @see @ref mochi::Scene::CreateRigidActor "Scene::CreateRigidActor", @ref mochi::ArticulatedActorParams "ArticulatedActorParams"
 ///
@@ -2234,6 +2396,7 @@
 ///
 /// @note A shape can be shared by multiple actors, even actors in different scenes.
 /// @note Dynamic rigid actors require a shape with a surface mesh.
+/// @note A tetrahedral or triangular mesh shape may have nodes that no element references. @ref mochi::Actor::GetMesh "Actor::GetMesh" omits them.
 ///
 /// @see @ref mochi::ShapeHandle "ShapeHandle", @ref mochi::Context::LoadShapeFromFile "Context::LoadShapeFromFile"
 ///
@@ -2272,8 +2435,9 @@
 ///
 /// @brief Parameters used to construct a grid-based Signed Distance Field (SDF) if the shape doesn't already have one.
 ///
-/// @note Ignored if @ref mochi::RigidActorParams::colliderType "colliderType" is not @ref mochi::ColliderType::Sdf "ColliderType::Sdf".
-/// @note Ignored if the shape already has a grid-based SDF.
+/// @note Ignored unless @ref mochi::RigidActorParams::shape "shape" is a tetrahedral or triangular mesh shape and @ref mochi::RigidActorParams::colliderType "colliderType" is @ref mochi::ColliderType::Sdf "ColliderType::Sdf" or @ref mochi::ColliderType::Auto "ColliderType::Auto".
+/// @note Ignored if the shape already has a grid-based SDF, or one is already being computed.
+/// @note Actor creation fails if these parameters are used but cannot produce an SDF for the shape.
 ///
 
 /// @var mochi::RigidActorParams::hasGravity
@@ -2358,7 +2522,7 @@
 ///
 /// @brief Optional initial linear velocity of the center of mass in world frame [m/s], zero otherwise.
 ///
-/// @note Not valid for static rigid actors or articulated links.
+/// @note Not valid for static rigid actors.
 ///
 /// @see @ref mochi::Actor::GetLinearVelocity "Actor::GetLinearVelocity", @ref mochi::Actor::SetVelocity "Actor::SetVelocity"
 ///
@@ -2367,7 +2531,7 @@
 ///
 /// @brief Optional initial angular velocity in world frame [rad/s], zero otherwise.
 ///
-/// @note Not valid for static rigid actors or articulated links.
+/// @note Not valid for static rigid actors.
 ///
 /// @see @ref mochi::Actor::GetAngularVelocity "Actor::GetAngularVelocity", @ref mochi::Actor::SetVelocity "Actor::SetVelocity"
 ///
@@ -2408,7 +2572,7 @@
 ///
 /// @brief Shape handle defining the actor's geometry and other metadata.
 ///
-/// @note Must be a TetrahedralMeshShape for soft actors.
+/// @note Actor creation fails if the shape is not a tetrahedral mesh shape or has a node that no element references.
 /// @note A shape can be shared by multiple actors, even actors in different scenes.
 ///
 /// @see @ref mochi::ShapeHandle "ShapeHandle", @ref mochi::Context::LoadShapeFromFile "Context::LoadShapeFromFile"
@@ -2456,11 +2620,22 @@
 /// @note Unless the soft actor is part of a soft-skinned actor (@ref mochi::SoftSkinnedActorParams::softParams "SoftSkinnedActorParams::softParams"), at least one of @ref mochi::SoftActorParams::hasGravity "hasGravity", @ref mochi::SoftActorParams::hasInertia "hasInertia" or @ref mochi::SoftActorParams::hasStress "hasStress" must be enabled.
 ///
 
+/// @var mochi::SoftActorParams::useContactSkin
+///
+/// @brief [Experimental] Use the shape's authored contact skin for colliding contact samples.
+///
+/// @details Actor creation fails unless the shape has a contact skin. The tetrahedral boundary remains the collider geometry when an SDF or Deep Flow collider is enabled. This option is not supported for ROM or nested soft actors.
+///
+/// @note The contact skin is exposed through @ref mochi::Actor::GetContactSkinMesh "Actor::GetContactSkinMesh" and @ref mochi::QueryType::ContactSkinNodePositions "QueryType::ContactSkinNodePositions" / @ref mochi::QueryType::ContactSkinNodeNormals "QueryType::ContactSkinNodeNormals" independently of this flag.
+///
+/// @warning This is an experimental feature. It may be changed or removed in the future. Use at your own risk.
+///
+
 /// @var mochi::SoftActorParams::boundaryElementType
 ///
-/// @brief Finite element type for boundary discretization.
+/// @brief Finite element type for contact discretization.
 ///
-/// @note Affects accuracy and performance of contact and boundary integrals.
+/// @note Selects quadrature on the tetrahedral boundary, or on the authored contact skin when @ref mochi::SoftActorParams::useContactSkin "useContactSkin" is true.
 ///
 /// @see @ref mochi::ActorBoundaryElementType "ActorBoundaryElementType"
 ///
@@ -2590,6 +2765,8 @@
 ///
 /// @note A shape can be shared by multiple actors, even actors in different scenes.
 /// @note Dynamic links require a shape with a surface mesh when link contact is enabled. An articulated actor enables link contact when no skin shape is provided. A soft-skinned actor enables link contact when @ref mochi::SoftSkinnedActorParams::enableCollidingLinks "SoftSkinnedActorParams::enableCollidingLinks" is true.
+/// @note A tetrahedral or triangular mesh shape may have nodes that no element references. The link actor's @ref mochi::Actor::GetMesh "Actor::GetMesh" omits them.
+/// @note May be left empty. A link without a shape has no contact and is massless unless it specifies an explicit @ref mochi::ArticulatedLinkParams::mass "mass", @ref mochi::ArticulatedLinkParams::centerOfMass "centerOfMass", and @ref mochi::ArticulatedLinkParams::momentOfInertia "momentOfInertia".
 ///
 /// @see @ref mochi::ShapeHandle "ShapeHandle", @ref mochi::Context::LoadShapeFromFile "Context::LoadShapeFromFile"
 ///
@@ -2627,6 +2804,7 @@
 /// @note Specify either density or mass, but not both.
 /// @note If density is set, mass is computed automatically from volume (and vice versa).
 /// @note If neither is set, @ref mochi::kDefaultDensity "kDefaultDensity" is used.
+/// @note Ignored for links without a @ref mochi::ArticulatedLinkParams::shape "shape", which have no volume. Use @ref mochi::ArticulatedLinkParams::mass "mass" instead.
 ///
 /// @see @ref mochi::ArticulatedLinkParams::mass "mass"
 ///
@@ -2637,6 +2815,7 @@
 ///
 /// @note Specify either mass or density, but not both.
 /// @note If mass is set, density is computed automatically from volume (and vice versa).
+/// @note A link without a @ref mochi::ArticulatedLinkParams::shape "shape" is massless unless it sets a positive mass together with @ref mochi::ArticulatedLinkParams::centerOfMass "centerOfMass" and @ref mochi::ArticulatedLinkParams::momentOfInertia "momentOfInertia". Otherwise its mass properties are ignored.
 ///
 /// @see @ref mochi::ArticulatedLinkParams::density "density"
 ///
@@ -2691,16 +2870,18 @@
 ///
 /// @brief Optional skinned mesh attached to an articulated actor for collision and rendering.
 ///
-/// @details The skin is a triangle mesh deformed by the underlying articulated links. It acts as a colliding actor (its contact sample points are tested against other actors' collider geometry) but not as a collider actor (other actors' contact sample points are not tested against it).
+/// @details The skin is a triangular or tetrahedral mesh deformed by the articulated links and, for a blended skin, the nested soft actors. The articulated actor acts as a colliding actor through the skin's surface: contact sample points on that surface are tested against other actors' collider geometry. The skin does not provide collider geometry, so other actors' contact sample points are not tested against it.
 ///
 /// @see @ref mochi::ArticulatedActorParams::skin "ArticulatedActorParams::skin"
 ///
 
 /// @var mochi::ArticulatedSkinParams::shape
 ///
-/// @brief Shape handle defining the skinned triangle mesh.
+/// @brief Shape handle defining the skinned triangular or tetrahedral mesh.
 ///
+/// @note Actor creation fails if the shape is not a triangular or tetrahedral mesh shape with skinning data, or has a node that no element references.
 /// @note A shape can be shared by multiple actors, even actors in different scenes.
+/// @note The number of skinning links per vertex impacts performance. Keep it as low as possible to maximize performance, e.g., by clamping tiny skinning weights to zero.
 ///
 /// @see @ref mochi::ShapeHandle "ShapeHandle", @ref mochi::Context::LoadShapeFromFile "Context::LoadShapeFromFile"
 ///
@@ -2730,6 +2911,17 @@
 ///
 /// @note Reduces computational cost by using fewer sample points.
 /// @note For best performance, combine subsampling with @ref mochi::ArticulatedSkinParams::boundaryElementType "boundaryElementType" = @ref mochi::ActorBoundaryElementType::P1Q1 "ActorBoundaryElementType::P1Q1".
+///
+
+/// @var mochi::ArticulatedSkinParams::nonCollidingLinks
+///
+/// @brief Local names of links that do not act as colliding actors.
+///
+/// @note A listed link contributes no rigid contact; the skin collides in its place. A link that is not listed keeps its own rigid contact, and the skin still collides over it, so both can generate contact in the same region.
+/// @note On an articulated actor, unset means no link collides and the skin is the sole colliding actor, while an empty list means every link collides.
+/// @note Each entry must be non-empty and must match a skeleton link local name.
+/// @note On a soft-skinned actor, @ref mochi::SoftSkinnedActorParams::enableCollidingLinks "SoftSkinnedActorParams::enableCollidingLinks" governs every link this list does not name: a link collides only when that flag is true and the link is not listed here. Unset therefore leaves that flag in sole control.
+/// @note This setting does not affect whether the links act as colliders; see @ref mochi::ArticulatedLinkParams::colliderType "ArticulatedLinkParams::colliderType".
 ///
 
 /// @struct mochi::ArticulatedCycleJointParams
@@ -2832,48 +3024,50 @@
 ///
 /// @brief Parameters for the articulated skeleton.
 ///
-/// @note If a skin shape is provided, the skin mesh acts as the colliding surface, not the individual soft actor surfaces. The skin shape must include blending data to define how the skinned surfaces of the soft actors are blended with the overarching skin. Each soft actor must be linked to its corresponding blending data via its effective nested soft local name after default-name assignment.
+/// @note If a skin shape is provided, the skin mesh acts as the colliding surface, not the surfaces of individual nested soft actors. The skin shape must include blending data to define how the skinned surfaces of the nested soft actors are blended with the overarching skin. Each nested soft actor must be linked to its corresponding blending data via its effective nested soft local name after default-name assignment.
 ///
 /// @see @ref mochi::ArticulatedActorParams "ArticulatedActorParams", @ref mochi::ArticulatedSkinParams "ArticulatedSkinParams"
 ///
 
 /// @var mochi::SoftSkinnedActorParams::softParams
 ///
-/// @brief Parameters for the soft deformable actors.
+/// @brief Parameters for the nested soft actors.
 ///
-/// @note If a skin shape is provided, the skin mesh acts as the colliding surface, not the individual soft actor surfaces.
-/// @note If a skin shape is provided, dynamic hyper-reduction is not allowed on the soft actors.
+/// @note If a skin shape is provided, the skin mesh acts as the colliding surface, not the surfaces of individual nested soft actors.
+/// @note If a skin shape is provided, dynamic hyper-reduction is not allowed on the nested soft actors.
 /// @note If a @ref mochi::SoftActorParams "SoftActorParams" entry has its hasInertia set to true, inertia is applied in the unposed configuration of that actor (prior to skinning) and this struct's hasInertia must be false.
 /// @note If a @ref mochi::SoftActorParams "SoftActorParams" entry has its hasStress set to true, elasticity is applied in the unposed configuration of that actor (prior to skinning) and this struct's hasStress must be false.
 /// @note Each @ref mochi::SoftActorParams "SoftActorParams" entry must have its hasGravity set to false (use this struct's hasGravity instead).
-/// @note Each soft actor must have some DoFs constrained. This can be implemented (a) by constraining nodes in the @ref mochi::SoftActorParams "SoftActorParams" shape for FOM actors, or (b) by constraining the ROM subspace for ROM actors.
-/// @note Each soft actor must have at least one energy term enabled: either this struct's @ref mochi::SoftSkinnedActorParams::hasGravity "hasGravity", @ref mochi::SoftSkinnedActorParams::hasInertia "hasInertia" or @ref mochi::SoftSkinnedActorParams::hasStress "hasStress" (applied to every entry), or that entry's own @ref mochi::SoftActorParams::hasInertia "SoftActorParams::hasInertia" or @ref mochi::SoftActorParams::hasStress "SoftActorParams::hasStress".
+/// @note Each nested soft actor must have some DoFs constrained. This can be implemented (a) by constraining nodes in the @ref mochi::SoftActorParams "SoftActorParams" shape for FOM actors, or (b) by constraining the ROM subspace for ROM actors.
+/// @note Each nested soft actor must have at least one energy term enabled: either this struct's @ref mochi::SoftSkinnedActorParams::hasGravity "hasGravity", @ref mochi::SoftSkinnedActorParams::hasInertia "hasInertia" or @ref mochi::SoftSkinnedActorParams::hasStress "hasStress" (applied to every entry), or that entry's own @ref mochi::SoftActorParams::hasInertia "SoftActorParams::hasInertia" or @ref mochi::SoftActorParams::hasStress "SoftActorParams::hasStress".
 /// @note Each entry's @ref mochi::SoftActorParams::name "SoftActorParams::name" is a nested soft local name. Explicit non-empty names must be unique across skeleton link local names and other nested soft local names, and must not contain forward slash, backslash, or embedded NUL characters.
 /// @note Empty names are assigned deterministically after reserving all skeleton link names and all explicit nested soft names: an empty entry at index `i` uses `soft_i` if available; otherwise it uses the first available `soft_N` found by scanning upward from `N = 0`.
-/// @note Each entry's @ref mochi::SoftActorParams::worldFromLocal "SoftActorParams::worldFromLocal" must be identity. Each soft actor's shape must be defined directly in the reference frame of the articulated actor. The soft-skinned actor's placement in scene world is provided by @ref mochi::ArticulatedActorParams::worldFromRoot "ArticulatedActorParams::worldFromRoot" from @ref mochi::SoftSkinnedActorParams::skeletonParams "skeletonParams".
+/// @note Each entry's @ref mochi::SoftActorParams::worldFromLocal "SoftActorParams::worldFromLocal" must be identity. Each nested soft actor's shape must be defined directly in the reference frame of the articulated actor. The soft-skinned actor's placement in scene world is provided by @ref mochi::ArticulatedActorParams::worldFromRoot "ArticulatedActorParams::worldFromRoot" from @ref mochi::SoftSkinnedActorParams::skeletonParams "skeletonParams".
+/// @note For a blended skin, author the skin and nested-soft shapes in the same rest frame and use the articulation skin as the canonical source for each positively blended vertex's rest position and ordered skinning data.
 ///
 /// @see @ref mochi::SoftSkinnedActorParams::hasGravity "hasGravity", @ref mochi::SoftSkinnedActorParams::hasInertia "hasInertia", @ref mochi::SoftSkinnedActorParams::hasStress "hasStress"
 ///
 
 /// @var mochi::SoftSkinnedActorParams::softAttachLinks
 ///
-/// @brief Optional local names of the rigid links where soft actors are attached.
+/// @brief Optional local names of the rigid links where nested soft actors are attached.
 ///
-/// @note If empty, soft actor shapes must include skinning data.
+/// @note If empty, nested soft actor shapes must include skinning data.
 /// @note If provided, must be 1-to-1 with @ref mochi::SoftSkinnedActorParams::softParams "softParams". Each entry must be non-empty and must match a skeleton link local name.
-/// @note Contact is automatically disabled between soft actors and their attachment links.
+/// @note Contact is automatically disabled between nested soft actors and their attachment links.
 ///
 
 /// @var mochi::SoftSkinnedActorParams::enableCollidingLinks
 ///
 /// @brief Enable internal skeleton links as colliding actors.
 ///
-/// @note If false, only the soft actors or the skin mesh act as colliding actors.
+/// @note If false, only nested soft actors act as colliding actors when no skin is present; otherwise, only the articulated actor acts as a colliding actor through its skin.
+/// @note This setting does not affect whether the links act as colliders.
 ///
 
 /// @var mochi::SoftSkinnedActorParams::hasGravity
 ///
-/// @brief Enable gravity evaluation of soft actors on posed/skinned positions.
+/// @brief Enable gravity evaluation of nested soft actors on posed/skinned positions.
 ///
 /// @note Each @ref mochi::SoftActorParams "SoftActorParams" entry must have its hasGravity set to false.
 ///
@@ -2882,7 +3076,7 @@
 
 /// @var mochi::SoftSkinnedActorParams::hasInertia
 ///
-/// @brief Enable inertia evaluation of soft actors on posed/skinned positions.
+/// @brief Enable inertia evaluation of nested soft actors on posed/skinned positions.
 ///
 /// @note If true, each @ref mochi::SoftActorParams "SoftActorParams" entry must have its hasInertia set to false.
 /// @note If true, inertia is applied in the posed (post-skinning) configuration. This is the physically correct behavior.
@@ -2891,7 +3085,7 @@
 
 /// @var mochi::SoftSkinnedActorParams::hasStress
 ///
-/// @brief Enable elasticity evaluation of soft actors on posed/skinned positions.
+/// @brief Enable elasticity evaluation of nested soft actors on posed/skinned positions.
 ///
 /// @note If true, each @ref mochi::SoftActorParams "SoftActorParams" entry must have its hasStress set to false.
 /// @note If true, stress forces are applied in the posed (post-skinning) configuration. This is the physically correct behavior.
@@ -3466,7 +3660,7 @@
 ///
 /// @brief Quadrature integration weight of the sample point on the colliding manifold of @ref mochi::ContactPoint::actorA "actorA".
 ///
-/// @note Units depend on the dimensionality of the colliding manifold of @ref mochi::ContactPoint::actorA "actorA": [m²] for surface contact (e.g., rigid, articulated, soft, shell, and rod actors with visual-mesh contact enabled), or [m] for rod actors using centerline contact.
+/// @note Units depend on the dimensionality of the colliding manifold of @ref mochi::ContactPoint::actorA "actorA": [m²] for surface contact (e.g., rigid, articulated, soft, shell, and rod actors using contact-skin contact), or [m] for rod actors using centerline contact.
 /// @note For surface contact, represents the surface area corresponding to the sample point. For rod centerline contact, represents the arc length.
 /// @note Useful for contact area/length estimation and other post-processing.
 /// @note @ref mochi::ContactPoint::force "force" is already weighted by this value.
@@ -3474,7 +3668,7 @@
 
 /// @var mochi::ContactPoint::elementIndex
 ///
-/// @brief Element index on the surface mesh of @ref mochi::ContactPoint::actorA "actorA".
+/// @brief Index of the triangle of @ref mochi::ContactPoint::actorA "actorA" in @ref mochi::Actor::GetSurfaceMesh "Actor::GetSurfaceMesh", or in @ref mochi::Actor::GetContactSkinMesh "Actor::GetContactSkinMesh" when contact uses the contact skin.
 ///
 /// @note For rod actors, this field is not populated and is reported as 0. Use @ref mochi::ContactPoint::sampleIndex "sampleIndex" to identify the contact location.
 ///
@@ -3500,7 +3694,7 @@
 
 /// @var mochi::NodeContactForce::index
 ///
-/// @brief Node index in the volumetric mesh (for actors with a volumetric mesh) or surface mesh (for actors without a volumetric mesh).
+/// @brief Index of the node in the node list returned by @ref mochi::Actor::GetMesh "Actor::GetMesh", or by @ref mochi::Actor::GetContactSkinMesh "Actor::GetContactSkinMesh" when contact uses the contact skin.
 ///
 
 /// @var mochi::NodeContactForce::force
@@ -3618,7 +3812,7 @@
 
 /// @var mochi::PerformanceStats::totalStepDurationSec
 ///
-/// @brief Total wall-clock time [s] spent in the last call to @ref mochi::Scene::Step "Scene::Step".
+/// @brief Total wall-clock time [s] spent in the last call to @ref mochi::Scene::Step "Scene::Step", excluding time spent in the remote physics debugger.
 ///
 /// @note Includes time spent in user-defined pre-step and post-step callbacks.
 ///
@@ -3644,6 +3838,10 @@
 ///
 /// @brief Wall-clock time [s] spent on recording in the last call to @ref mochi::Scene::Step "Scene::Step".
 ///
+/// @warning Recording is an experimental feature. It may be changed or removed without notice.
+///
+/// @see `experimental::StartRecording`, `experimental::RecordingParams`
+///
 
 /// @struct mochi::SolverStats
 ///
@@ -3654,90 +3852,28 @@
 
 /// @var mochi::SolverStats::maxNonLinearIters
 ///
-/// @brief Maximum number of non-linear solver iterations across all islands and integration stages in the last call to @ref mochi::Scene::Step "Scene::Step".
+/// @brief Maximum number of non-linear solver iterations across all awake islands and integration stages in the last call to @ref mochi::Scene::Step "Scene::Step".
 ///
 
 /// @var mochi::SolverStats::residualNorm
 ///
-/// @brief Aggregate residual norm across all islands and integration stages in the last call to @ref mochi::Scene::Step "Scene::Step". Computed as the root mean square across integration stages of the L2 norm of per-island residual norms.
+/// @brief Aggregate residual norm across all awake islands and integration stages in the last call to @ref mochi::Scene::Step "Scene::Step". Computed as the root mean square across integration stages of the L2 norm of per-island residual norms.
 ///
 
 /// @var mochi::SolverStats::maxLineSearchIters
 ///
-/// @brief Maximum number of line-search iterations per Newton solve across all islands and integration stages in the last call to @ref mochi::Scene::Step "Scene::Step".
+/// @brief Maximum number of line-search iterations per Newton solve across all awake islands and integration stages in the last call to @ref mochi::Scene::Step "Scene::Step".
 ///
 
 /// @var mochi::SolverStats::convergenceStatus
 ///
 /// @brief Aggregate convergence status of the scene in the last call to @ref mochi::Scene::Step "Scene::Step".
 ///
-/// @details Returns the worst convergence status across all dynamic actors: @ref mochi::ConvergenceStatus::Diverged "ConvergenceStatus::Diverged" if any actor diverged, @ref mochi::ConvergenceStatus::Stopped "ConvergenceStatus::Stopped" if any actor's solver was stopped, @ref mochi::ConvergenceStatus::Converged "ConvergenceStatus::Converged" if all dynamic actors converged, @ref mochi::ConvergenceStatus::None "ConvergenceStatus::None" if no dynamic actors exist, @ref mochi::Scene::Step "Scene::Step" has not been called yet or the last call to @ref mochi::Scene::Step "Scene::Step" was with zero time step.
+/// @details Returns the worst convergence status across all dynamic actors in awake islands: @ref mochi::ConvergenceStatus::Diverged "ConvergenceStatus::Diverged" if any actor diverged, @ref mochi::ConvergenceStatus::Stopped "ConvergenceStatus::Stopped" if any actor's solver was stopped, @ref mochi::ConvergenceStatus::Converged "ConvergenceStatus::Converged" if all dynamic actors in awake islands converged, @ref mochi::ConvergenceStatus::None "ConvergenceStatus::None" if no dynamic actors exist, all islands are asleep, @ref mochi::Scene::Step "Scene::Step" has not been called yet or the last call to @ref mochi::Scene::Step "Scene::Step" was with zero time step.
+///
+/// @note Unlike @ref mochi::ConvergenceStatus::Diverged "ConvergenceStatus::Diverged", @ref mochi::ConvergenceStatus::Stopped "ConvergenceStatus::Stopped" does not indicate that the step failed. It means that the nonlinear solve reached a stopping criterion, such as the maximum number of iterations, before meeting its residual tolerances, which may be stricter than the scene requires.
 ///
 /// @see @ref mochi::ConvergenceStatus "ConvergenceStatus", @ref mochi::Actor::GetConvergenceStatus "Actor::GetConvergenceStatus"
-///
-
-/// @struct mochi::RecordingParams
-///
-/// @brief Parameters controlling what data gets included in a scene recording.
-///
-/// @warning The recording system may undergo a substantial refactor to expand its capabilities. Its API and recorded file format may change in future releases.
-///
-/// @see @ref mochi::Scene::StartRecording "Scene::StartRecording", @ref mochi::Scene::StopRecording "Scene::StopRecording"
-///
-
-/// @var mochi::RecordingParams::recordActorMeshes
-///
-/// @brief Include the meshes (if any) when recording actor creation events.
-///
-
-/// @var mochi::RecordingParams::recordActorLocalToGlobalMap
-///
-/// @brief Include the local-to-global map (if any) when recording actor creation events.
-///
-
-/// @var mochi::RecordingParams::recordActorMassMatrix
-///
-/// @brief Include the mass matrix (if any) when recording actor creation events.
-///
-
-/// @var mochi::RecordingParams::recordTargetState
-///
-/// @brief Record articulated pose controller targets and tracking parameters every step.
-///
-
-/// @var mochi::RecordingParams::recordDynamicActorState
-///
-/// @brief Record the state of dynamic actors every step.
-///
-/// @details This includes position, rotation, and velocity. For soft actors, it includes the node displacements and velocities.
-///
-
-/// @var mochi::RecordingParams::recordStaticActorState
-///
-/// @brief Record the state of static actors every step. This includes position and rotation.
-///
-
-/// @var mochi::RecordingParams::recordContactPoints
-///
-/// @brief Record results from @ref mochi::QueryType::ContactPoints "QueryType::ContactPoints" for each dynamic actor every step.
-///
-
-/// @var mochi::RecordingParams::recordNodeContactForces
-///
-/// @brief Record results for @ref mochi::QueryType::NodeContactForces "QueryType::NodeContactForces" for each soft actor every step.
-///
-
-/// @var mochi::RecordingParams::recordSdfDistances
-///
-/// @brief Record SDF distances for @ref mochi::QueryType::SdfDistances "QueryType::SdfDistances" for each dynamic actor every step.
-///
-
-/// @fn RecordingParams mochi::RecordingParams::All(bool enabled)
-///
-/// @brief Return @ref mochi::RecordingParams "RecordingParams" with all boolean options set to the given value.
-///
-/// @param[in] enabled True to enable all options (maximum data), false to disable (minimum data).
-/// @return The initialized @ref mochi::RecordingParams "RecordingParams".
 ///
 
 /// @struct mochi::PoseTrackingParams
@@ -3885,6 +4021,11 @@
 /// @var mochi::DebugDrawData::spheres
 ///
 /// @brief Sphere primitives.
+///
+
+/// @typedef mochi::LogFn
+///
+/// @brief Signature of a logging callback function.
 ///
 
 /// @class mochi::Context
@@ -4379,7 +4520,7 @@
 ///
 /// @brief Get a view of the shape's main mesh data.
 ///
-/// @details For tetrahedral mesh shapes, returns the volume mesh (4 nodes per element). For triangular mesh shapes, returns the surface mesh (3 nodes per element). For polyline shapes, returns the polyline mesh (2 nodes per element). For shapes without a main mesh, including implicit shapes such as spheres and planes, returns an empty view.
+/// @details For tetrahedral mesh shapes, returns the tetrahedral mesh (4 nodes per element). For triangular mesh shapes, returns the triangle mesh (3 nodes per element). For polyline shapes, returns the polyline mesh (2 nodes per element). For shapes without a main mesh, including implicit shapes such as spheres and planes, returns an empty view. The view includes any nodes that no element references.
 ///
 /// @param[in] shape Handle to a valid shape.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
@@ -4395,24 +4536,41 @@
 ///
 /// @brief Get a view of the shape's surface mesh data.
 ///
-/// @details Returns a triangle mesh (3 nodes per element) representing the shape's surface. The coordinate array contains exactly the surface nodes referenced by the returned connectivity; nodes present in the underlying main mesh but not referenced by any surface triangle are omitted. Connectivity values are indices into this returned coordinate array. For shapes without a surface mesh, returns an empty view.
+/// @details Returns a triangle mesh (3 nodes per element) representing the shape's surface. The coordinate array contains exactly the surface nodes referenced by the returned connectivity; nodes present in the underlying main mesh but not referenced by any surface triangle are omitted. Connectivity values are indices into this returned coordinate array. For shapes without a surface mesh, such as polyline shapes, returns an empty view.
 ///
 /// @param[in] shape Handle to a valid shape.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 /// @return A non-owning view of the shape's surface mesh data, or an empty view if the shape has no surface mesh.
 ///
-/// @note For triangular mesh shapes, this may differ from @ref mochi::Context::GetShapeMesh "GetShapeMesh" if the main mesh contains unreferenced nodes. For tetrahedral mesh shapes, this is the boundary surface of the volume mesh, with non-boundary volume nodes omitted.
+/// @note For triangular mesh shapes, this differs from @ref mochi::Context::GetShapeMesh "GetShapeMesh" only if the main mesh has nodes that no element references. For tetrahedral mesh shapes, this is the boundary surface of the volume mesh, with non-boundary volume nodes omitted.
 /// @note Can be called on any thread.
 /// @note The returned view will be invalid after the shape handle has been released.
 ///
-/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Context::GetShapeMesh "GetShapeMesh", @ref mochi::Context::GetShapeVisualMesh "GetShapeVisualMesh", @ref mochi::Actor::GetSurfaceMesh "Actor::GetSurfaceMesh"
+/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Context::GetShapeMesh "GetShapeMesh", @ref mochi::Context::GetShapeContactSkinMesh "GetShapeContactSkinMesh", @ref mochi::Context::GetShapeVisualMesh "GetShapeVisualMesh", @ref mochi::Actor::GetSurfaceMesh "Actor::GetSurfaceMesh"
+///
+
+/// @fn MeshDataView mochi::Context::GetShapeContactSkinMesh(ShapeHandle shape, Error& error) const
+///
+/// @brief Get a view of the shape's contact-skin mesh data, including its skinning data.
+///
+/// @details Returns a triangle mesh (3 nodes per element). Every contact-skin node is referenced by the contact-skin connectivity, so @ref mochi::Actor::GetContactSkinMesh "Actor::GetContactSkinMesh" has the same node ordering. The mesh includes the authored skinning data, in the format of @ref mochi::ModelData::contactSkinMesh "ModelData::contactSkinMesh". For shapes without a contact skin, returns an empty view.
+///
+/// @param[in] shape Handle to a valid shape.
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+/// @return A non-owning view of the shape's contact-skin mesh data, or an empty view if the shape has no contact skin.
+///
+/// @note Can be called on any thread.
+/// @note The returned view will be invalid after the shape handle has been released.
+/// @note For tetrahedral and triangular mesh shapes, skinning indices refer to the node ordering returned by @ref mochi::Context::GetShapeMesh "GetShapeMesh", not to the compact surface-node ordering returned by @ref mochi::Context::GetShapeSurfaceMesh "GetShapeSurfaceMesh". For polyline shapes, skinning indices refer to polyline elements.
+///
+/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Context::GetShapeMesh "GetShapeMesh", @ref mochi::Context::GetShapeSurfaceMesh "GetShapeSurfaceMesh", @ref mochi::Context::GetShapeVisualMesh "GetShapeVisualMesh", @ref mochi::Actor::GetContactSkinMesh "Actor::GetContactSkinMesh"
 ///
 
 /// @fn MeshDataView mochi::Context::GetShapeVisualMesh(ShapeHandle shape, Error& error) const
 ///
 /// @brief Get a view of the shape's visual mesh data, including skinning data if available.
 ///
-/// @details Returns a triangle mesh (3 nodes per element) intended for visual rendering. Coordinates and connectivity are returned in visual-mesh node-index space, including any visual mesh nodes not referenced by the visual connectivity. The mesh may include linear skinning data for deformation. For shapes without a visual mesh, returns an empty view.
+/// @details Returns a triangle mesh (3 nodes per element) intended for visual rendering. Coordinates and connectivity are returned in visual-mesh node-index space, including any nodes that no visual triangle references. The mesh includes the authored skinning data when available. For shapes without a visual mesh, returns an empty view.
 ///
 /// @param[in] shape Handle to a valid shape.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
@@ -4420,7 +4578,7 @@
 ///
 /// @note Can be called on any thread.
 /// @note The returned view will be invalid after the shape handle has been released.
-/// @note When linear visual-mesh skinning data is present, skinning indices refer to the node ordering returned by @ref mochi::Context::GetShapeMesh "GetShapeMesh", not to the compact surface-node ordering returned by @ref mochi::Context::GetShapeSurfaceMesh "GetShapeSurfaceMesh". Rod visual mesh embeddings are nonlinear and are not exposed through this linear skinning field.
+/// @note For tetrahedral and triangular mesh shapes, skinning indices refer to the node ordering returned by @ref mochi::Context::GetShapeMesh "GetShapeMesh", not to the compact surface-node ordering returned by @ref mochi::Context::GetShapeSurfaceMesh "GetShapeSurfaceMesh". For polyline shapes, skinning indices refer to polyline elements.
 ///
 /// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Context::GetShapeMesh "GetShapeMesh", @ref mochi::Context::GetShapeSurfaceMesh "GetShapeSurfaceMesh", @ref mochi::Actor::GetVisualMesh "Actor::GetVisualMesh"
 ///
@@ -4518,7 +4676,7 @@
 ///
 /// @details Use this to free up memory, or to force the next file request to be loaded from disk, in case the file had been modified. All entries for @p filePath are removed, including every variant produced by different bake scale/transform combinations.
 ///
-/// @param[in] filePath Path to a file that may have been loaded. The match is case-sensitive and must equal the path used at load time exactly.
+/// @param[in] filePath Path to a file that may have been loaded. It is matched against the path used at load time after lexical normalization, so separator style and "." / ".." segments may differ. The match is case-sensitive.
 ///
 /// @note Call on any thread.
 ///
@@ -4776,6 +4934,8 @@
 /// @return Convergence status of the actor in the most recent simulation step.
 ///
 /// @note Static actors do not participate in the solver and may return @ref mochi::ConvergenceStatus::None "ConvergenceStatus::None".
+/// @note Actors in sleeping islands are not solved and return @ref mochi::ConvergenceStatus::None "ConvergenceStatus::None". See `experimental::SleepParams`.
+/// @note Unlike @ref mochi::ConvergenceStatus::Diverged "ConvergenceStatus::Diverged", @ref mochi::ConvergenceStatus::Stopped "ConvergenceStatus::Stopped" does not indicate a failure. It means that the nonlinear solve reached a stopping criterion, such as the maximum number of iterations, before meeting its residual tolerances, which may be stricter than the actor requires.
 ///
 /// @see @ref mochi::ConvergenceStatus "ConvergenceStatus", @ref mochi::SolverStats::convergenceStatus "SolverStats::convergenceStatus"
 ///
@@ -4793,6 +4953,8 @@
 ///
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 /// @return Contact parameters of the actor.
+///
+/// @note Reports an error if the actor has no contact parameters.
 ///
 
 /// @fn void mochi::Actor::SetContactParams(ContactParams const& params, Error& error)
@@ -4838,7 +5000,7 @@
 /// @param[in] worldFromLocal World-space transform to set.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Not allowed on articulated links.
+/// @note Not allowed on nested link actors (@ref mochi::Actor::GetNestedLinkActors "GetNestedLinkActors") or nested soft actors (@ref mochi::Actor::GetNestedSoftActors "GetNestedSoftActors").
 /// @note For a top-level articulated actor, the local frame is the articulation root frame, not the root link's frame.
 /// @note For dynamic actors, it does not change velocity. For static actors, however, it changes velocity, because it is implicitly defined by the root transform in consecutive time steps. To cancel the velocity of a static actor, use @ref mochi::Actor::SetVelocity "SetVelocity".
 /// @note Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler in the first time step after this method is called.
@@ -4877,9 +5039,10 @@
 /// @param[in] worldFromCom World-space transform at the center of mass to set.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for dynamic rigid actors.
+/// @note Only supported for standalone dynamic rigid actors.
 /// @note Does not change velocity.
 /// @note Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler in the first time step after this method is called.
+/// @note Moves the actor without changing where the center of mass is within the actor (@ref mochi::Actor::GetRigidCenterOfMassLocal "GetRigidCenterOfMassLocal"). To change that, use @ref mochi::Actor::SetInertiaProperties "SetInertiaProperties".
 ///
 /// @see @ref mochi::Actor::GetCenterOfMassTransform "GetCenterOfMassTransform", @ref mochi::Actor::SetRootTransform "SetRootTransform"
 ///
@@ -4908,9 +5071,9 @@
 /// @param[in] angularVel Angular velocity [rad/s] at the center of mass in world frame.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for rigid actors (except articulated links) and soft actors (except ROMs and soft-skinned actors).
+/// @note Only supported for standalone rigid actors and standalone soft actors (except ROMs).
 /// @note For static actors, it only supports setting zero velocity.
-/// @note For soft actors, the angular velocity must be zero.
+/// @note For standalone soft actors, the angular velocity must be zero.
 /// @note Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler in the first time step after this method is called.
 ///
 
@@ -4947,7 +5110,7 @@
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 /// @return Mass [kg] of the actor.
 ///
-/// @note Not supported for static actors.
+/// @note Not supported for standalone static actors.
 ///
 
 /// @fn real mochi::Actor::GetDensity(Error& error) const
@@ -4970,6 +5133,7 @@
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
 /// @note Only supported for rigid actors (except static rigid actors), articulated links and soft actors.
+/// @note Has no effect on links of articulated actors without a shape.
 /// @note The moment of inertia is updated based on the new density. The center of mass is left unchanged.
 ///
 /// @see @ref mochi::Actor::GetDensity "GetDensity", @ref mochi::Actor::SetInertiaProperties "SetInertiaProperties", @ref mochi::Actor::SetSoftMaterialParams "SetSoftMaterialParams"
@@ -4986,10 +5150,12 @@
 /// @param[in] momentOfInertia Moment of inertia tensor at center of mass [kg·m²], upper-right triangle [ixx, ixy, ixz, iyy, iyz, izz] using negative tensor notation consistent with @ref mochi::Actor::GetRigidMomentOfInertiaLocal "GetRigidMomentOfInertiaLocal". Must be finite.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for dynamic rigid actors. Not supported for static actors, soft actors, shell actors, or articulated links.
+/// @note Only supported for standalone dynamic rigid actors.
 /// @note A finite but physically invalid moment of inertia tensor (negative principal moments or one violating the triangle inequality) is accepted with a warning, not rejected.
 /// @note Re-anchors the density reference state. Subsequent @ref mochi::Actor::SetDensity "SetDensity" calls rescale mass and moment of inertia proportionally about the new values; center of mass is unchanged by @ref mochi::Actor::SetDensity "SetDensity".
 /// @note After this call, @ref mochi::Actor::GetDensity "GetDensity" returns bulk density mass / volume.
+/// @note The root transform (@ref mochi::Actor::GetRootTransform "GetRootTransform") and the velocity of every material point are preserved, so changing the center of mass does not move the actor. @ref mochi::Actor::GetLinearVelocity "GetLinearVelocity", the center-of-mass velocity, changes accordingly when the actor is rotating. To place the new center of mass at the previous center-of-mass pose instead, call @ref mochi::Actor::GetCenterOfMassTransform "GetCenterOfMassTransform" before this call and pass the result to @ref mochi::Actor::SetCenterOfMassTransform "SetCenterOfMassTransform" afterwards.
+/// @note The center of mass cannot be changed while the actor has constraints or translation boundary conditions. Set the center of mass before adding them. Changing only mass or moment of inertia remains supported.
 ///
 /// @see @ref mochi::Actor::GetMass "GetMass", @ref mochi::Actor::GetDensity "GetDensity", @ref mochi::Actor::SetDensity "SetDensity", @ref mochi::Actor::GetRigidCenterOfMassLocal "GetRigidCenterOfMassLocal", @ref mochi::Actor::GetRigidMomentOfInertiaLocal "GetRigidMomentOfInertiaLocal"
 ///
@@ -5013,7 +5179,7 @@
 ///
 /// @return Recentering parameters of the actor.
 ///
-/// @note Recentering is only supported for soft actors (not soft-skinned). For other actor types, returns default recentering parameters with @ref mochi::RecenteringParams::useRecentering "RecenteringParams::useRecentering" set to false.
+/// @note Recentering is only supported for standalone soft actors. For other actor types, returns default recentering parameters with @ref mochi::RecenteringParams::useRecentering "RecenteringParams::useRecentering" set to false.
 ///
 /// @see @ref mochi::RecenteringParams "RecenteringParams", @ref mochi::Actor::SetRecenteringParams "SetRecenteringParams"
 ///
@@ -5022,12 +5188,12 @@
 ///
 /// @brief Set the recentering parameters of the actor.
 ///
-/// @details When enabled for a soft actor, the root transform automatically moves as the actor's "rigid pivot" (typically near the center of mass) moves.
+/// @details When enabled, the root transform automatically moves as the actor's "rigid pivot" (typically near the center of mass) moves.
 ///
 /// @param[in] params Recentering parameters to set.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft actors (not soft-skinned).
+/// @note Only supported for standalone soft actors.
 ///
 /// @see @ref mochi::RecenteringParams "RecenteringParams", @ref mochi::Actor::GetRecenteringParams "GetRecenteringParams"
 ///
@@ -5037,10 +5203,11 @@
 /// @brief Get the node displacements of the actor in the actor's local frame, relative to reference (rest) positions.
 ///
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
-/// @return Node displacements in the actor's local frame. Length is 3 × the number of nodes for soft, shell, and soft-skinned actors, or 4 × the number of nodes for rod actors (3 displacement [m] + 1 twist [rad] per node). The number of nodes is available from @ref mochi::Actor::GetMesh "GetMesh".
+/// @return Node displacements in the actor's local frame. Length is 3 × the number of nodes, except for rod actors, where it is 4 × the number of nodes (3 displacement [m] + 1 twist [rad] per node). The number of nodes is available from @ref mochi::Actor::GetMesh "GetMesh".
 ///
-/// @note Only supported for soft, soft-skinned, shell and rod actors.
-/// @note For soft-skinned actors, it returns post-skinning displacements, which may differ from the pre-skinning elastic deformation component written by @ref mochi::Actor::SetDisplacements "SetDisplacements".
+/// @note Only supported for standalone soft actors, nested soft actors, shell actors, rod actors, and articulated actors with a skin mesh.
+/// @note For articulated actors, returns displacements of the skin mesh.
+/// @note For nested soft actors, returns post-skinning displacements, which may differ from the pre-skinning elastic deformation component written by @ref mochi::Actor::SetDisplacements "SetDisplacements".
 ///
 /// @see @ref mochi::Actor::SetDisplacements "SetDisplacements", @ref mochi::Actor::GetNodePositionsLocal "GetNodePositionsLocal"
 ///
@@ -5052,9 +5219,9 @@
 /// @param[in] displacements Node displacements [m] to set in the actor's local frame. Length must be 3 × the number of nodes. The number of nodes is available from @ref mochi::Actor::GetMesh "GetMesh".
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft, soft-skinned and shell actors.
-/// @note For soft-skinned actors, displacements are the elastic deformation component only (before skinning is applied).
-/// @note Does not change node velocities.
+/// @note Only supported for standalone soft actors, nested soft actors, and shell actors.
+/// @note For nested soft actors, displacements are the elastic deformation component only (before skinning is applied).
+/// @note Does not change the elastic velocity DoFs, but changes the skinned node velocities of nested soft actors.
 /// @note Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler in the first time step after this method is called.
 ///
 /// @see @ref mochi::Actor::GetDisplacements "GetDisplacements", @ref mochi::Actor::SetNodePositionsLocal "SetNodePositionsLocal"
@@ -5094,7 +5261,8 @@
 /// @return A non-owning view of the actor's reference simulation mesh, or an empty view if the actor has no simulation mesh.
 ///
 /// @note The returned coordinates are reference positions in the actor's local frame. They do not include deformation for deformable actors.
-/// @note For rigid actors with tetrahedral or triangular mesh shapes, returns the same compact surface view as @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh". For tetrahedral meshes this is the boundary surface. For triangular meshes, nodes not referenced by any surface triangle are omitted and remaining nodes may be reindexed. Use @ref mochi::Actor::GetReferenceShape "GetReferenceShape" and @ref mochi::Context::GetShapeMesh "Context::GetShapeMesh" to retrieve the original authored shape mesh.
+/// @note For rigid actors with tetrahedral or triangular mesh shapes, returns the same compact surface view as @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", which is the boundary surface for tetrahedral meshes. It omits interior nodes and nodes that no element references, and keeps the remaining nodes in their original relative order. Use @ref mochi::Actor::GetReferenceShape "GetReferenceShape" and @ref mochi::Context::GetShapeMesh "Context::GetShapeMesh" to retrieve the original authored shape mesh.
+/// @note The returned mesh has only the nodes that its elements reference.
 /// @note The returned view remains valid until the actor is destroyed.
 ///
 /// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetVisualMesh "GetVisualMesh", @ref mochi::Context::GetShapeMesh "Context::GetShapeMesh"
@@ -5104,15 +5272,15 @@
 ///
 /// @brief Get a view of the actor's reference surface mesh.
 ///
-/// @details Returns a compact triangle mesh for the actor's surface. For volumetric simulation meshes, the surface is the boundary triangles. For triangular simulation meshes, the surface has the same triangle elements as the simulation mesh, but nodes not referenced by any surface triangle are omitted and remaining nodes may be reindexed. Returns an empty view if the actor does not have a surface mesh.
+/// @details Returns a compact triangle mesh for the actor's surface. For volumetric simulation meshes, the surface is the boundary triangles. For triangular simulation meshes, the surface is the simulation mesh. For articulated actors with a skinned simulation surface, returns that surface. Returns an empty view if the actor does not have a surface mesh, e.g. for rod actors. Contact skins are exposed by @ref mochi::Actor::GetContactSkinMesh "GetContactSkinMesh" instead.
 ///
 /// @return A non-owning view of the actor's reference surface mesh, or an empty view if the actor has no surface mesh.
 ///
 /// @note The returned coordinates are reference surface-mesh positions in the actor's local frame. They do not include deformation for deformable actors.
-/// @note The returned mesh uses compact surface-node ordering. Connectivity indices refer to this ordering, which may differ from the node ordering returned by @ref mochi::Actor::GetMesh "GetMesh". Interior nodes and nodes not referenced by any surface triangle are excluded. Results from @ref mochi::Actor::GetSurfaceMeshNodePositionsLocal "GetSurfaceMeshNodePositionsLocal" and @ref mochi::Actor::GetSurfaceMeshNodeNormalsLocal "GetSurfaceMeshNodeNormalsLocal" use this same surface ordering.
+/// @note The returned mesh has only the nodes that its triangles reference, in the same relative order as in @ref mochi::Actor::GetMesh "GetMesh". Results from @ref mochi::Actor::GetSurfaceMeshNodePositionsLocal "GetSurfaceMeshNodePositionsLocal" and @ref mochi::Actor::GetSurfaceMeshNodeNormalsLocal "GetSurfaceMeshNodeNormalsLocal" use this node order.
 /// @note The returned view remains valid until the actor is destroyed.
 ///
-/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Actor::GetMesh "GetMesh", @ref mochi::Actor::GetVisualMesh "GetVisualMesh", @ref mochi::Actor::GetSurfaceMeshNodePositionsLocal "GetSurfaceMeshNodePositionsLocal", @ref mochi::Actor::GetSurfaceMeshNodeNormalsLocal "GetSurfaceMeshNodeNormalsLocal", @ref mochi::Context::GetShapeSurfaceMesh "Context::GetShapeSurfaceMesh"
+/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Actor::GetMesh "GetMesh", @ref mochi::Actor::GetVisualMesh "GetVisualMesh", @ref mochi::Actor::GetContactSkinMesh "GetContactSkinMesh", @ref mochi::Actor::GetSurfaceMeshNodePositionsLocal "GetSurfaceMeshNodePositionsLocal", @ref mochi::Actor::GetSurfaceMeshNodeNormalsLocal "GetSurfaceMeshNodeNormalsLocal", @ref mochi::Context::GetShapeSurfaceMesh "Context::GetShapeSurfaceMesh"
 ///
 
 /// @fn MeshDataView mochi::Actor::GetVisualMesh() const
@@ -5124,11 +5292,27 @@
 /// @return A non-owning view of the actor's reference visual mesh, or an empty view if the actor has no visual mesh.
 ///
 /// @note The returned coordinates are reference visual-mesh positions in the actor's local frame. They do not include deformation for deformable actors.
-/// @note Includes visual mesh nodes not referenced by any visual triangle. Unlike surface mesh getters, visual mesh getters do not omit unreferenced nodes.
+/// @note Unlike surface mesh getters, visual mesh getters include any nodes that no visual triangle references.
 /// @note When linear visual-mesh skinning data is present, skinning indices refer to the node ordering returned by @ref mochi::Actor::GetMesh "GetMesh", not to the compact surface-node ordering returned by @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh". Rod visual mesh embeddings are nonlinear and are not exposed through this linear skinning field.
 /// @note The returned view remains valid until the actor is destroyed.
 ///
-/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Actor::GetMesh "GetMesh", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetVisualMeshNodePositionsLocal "GetVisualMeshNodePositionsLocal", @ref mochi::Actor::GetVisualMeshNodeNormalsLocal "GetVisualMeshNodeNormalsLocal", @ref mochi::Context::GetShapeVisualMesh "Context::GetShapeVisualMesh"
+/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Actor::GetMesh "GetMesh", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetContactSkinMesh "GetContactSkinMesh", @ref mochi::Actor::GetVisualMeshNodePositionsLocal "GetVisualMeshNodePositionsLocal", @ref mochi::Actor::GetVisualMeshNodeNormalsLocal "GetVisualMeshNodeNormalsLocal", @ref mochi::Context::GetShapeVisualMesh "Context::GetShapeVisualMesh"
+///
+
+/// @fn MeshDataView mochi::Actor::GetContactSkinMesh() const
+///
+/// @brief Get a view of the actor's reference contact skin mesh.
+///
+/// @details Returns the @ref mochi::ModelData::contactSkinMesh "ModelData::contactSkinMesh" of the actor's shape, regardless of whether the actor selected it as its collision representation. Only deformable actors expose it. Other actors return an empty view. For soft and shell actors, the mesh includes the linear contact-skin skinning data.
+///
+/// @return A non-owning view of the actor's reference contact skin mesh, or an empty view if the actor has no contact skin.
+///
+/// @note The returned coordinates are reference contact-skin positions in the actor's local frame. Deformed contact-skin positions are only available through @ref mochi::Actor::GetContactSkinMeshNodePositionsLocal "GetContactSkinMeshNodePositionsLocal".
+/// @note The node ordering matches @ref mochi::Context::GetShapeContactSkinMesh "Context::GetShapeContactSkinMesh".
+/// @note When linear contact-skin skinning data is present, skinning indices refer to the node ordering returned by @ref mochi::Actor::GetMesh "GetMesh". Rod contact skin embeddings are nonlinear and are not exposed through this linear skinning field.
+/// @note The returned view remains valid until the actor is destroyed.
+///
+/// @see @ref mochi::MeshDataView "MeshDataView", @ref mochi::Actor::GetMesh "GetMesh", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetVisualMesh "GetVisualMesh", @ref mochi::Actor::GetContactSkinMeshNodePositionsLocal "GetContactSkinMeshNodePositionsLocal", @ref mochi::Actor::GetContactSkinMeshNodeNormalsLocal "GetContactSkinMeshNodeNormalsLocal", @ref mochi::Context::GetShapeContactSkinMesh "Context::GetShapeContactSkinMesh"
 ///
 
 /// @fn Span<real const> mochi::Actor::GetSurfaceMeshNodePositionsLocal(Error& error) const
@@ -5142,7 +5326,7 @@
 /// @note Requires the actor to support @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions".
 /// @note The node ordering corresponds to the mesh connectivity from @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh".
 ///
-/// @see @ref mochi::Actor::RegisterQuery "RegisterQuery", @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetSurfaceMeshNodeNormalsLocal "GetSurfaceMeshNodeNormalsLocal"
+/// @see @ref mochi::Actor::RegisterQuery "RegisterQuery", @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetSurfaceMeshNodeNormalsLocal "GetSurfaceMeshNodeNormalsLocal", @ref mochi::Actor::GetContactSkinMeshNodePositionsLocal "GetContactSkinMeshNodePositionsLocal"
 ///
 
 /// @fn Span<real const> mochi::Actor::GetSurfaceMeshNodeNormalsLocal(Error& error) const
@@ -5156,7 +5340,7 @@
 /// @note Requires the actor to support @ref mochi::QueryType::SurfaceNodeNormals "QueryType::SurfaceNodeNormals".
 /// @note The node ordering corresponds to the mesh connectivity from @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh".
 ///
-/// @see @ref mochi::Actor::RegisterQuery "RegisterQuery", @ref mochi::QueryType::SurfaceNodeNormals "QueryType::SurfaceNodeNormals", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetSurfaceMeshNodePositionsLocal "GetSurfaceMeshNodePositionsLocal"
+/// @see @ref mochi::Actor::RegisterQuery "RegisterQuery", @ref mochi::QueryType::SurfaceNodeNormals "QueryType::SurfaceNodeNormals", @ref mochi::Actor::GetSurfaceMesh "GetSurfaceMesh", @ref mochi::Actor::GetSurfaceMeshNodePositionsLocal "GetSurfaceMeshNodePositionsLocal", @ref mochi::Actor::GetContactSkinMeshNodeNormalsLocal "GetContactSkinMeshNodeNormalsLocal"
 ///
 
 /// @fn ShapeHandle mochi::Actor::GetReferenceShape(Error& error) const
@@ -5223,7 +5407,7 @@
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
 /// @note When @p boundaryOnly is false, this function supports only soft and shell actors. When true, it also supports articulated actors with a skin mesh, soft-skinned actors with a blended skin mesh, and rigid actors (dynamic or static) with tetrahedral or triangular mesh shapes. Rod actors and actors without a simulation mesh are not supported.
-/// @note Requires query registration before the simulation step. Register @ref mochi::QueryType::NodePositions "QueryType::NodePositions" when @p boundaryOnly is false, or @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions" when @p boundaryOnly is true. Results are available after the simulation step completes.
+/// @note When @p boundaryOnly is false, requires registering @ref mochi::QueryType::NodePositions "QueryType::NodePositions" before the simulation step. When true, requires registering @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions". Results are available after the simulation step completes.
 ///
 /// @warning This is a synchronous call and may be expensive.
 ///
@@ -5238,7 +5422,7 @@
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
 /// @note When @p boundaryOnly is false, this function supports only soft and shell actors. When true, it also supports articulated actors with a skin mesh, soft-skinned actors with a blended skin mesh, and rigid actors (dynamic or static) with tetrahedral or triangular mesh shapes. Rod actors and actors without a simulation mesh are not supported.
-/// @note Requires query registration before the simulation step. Register @ref mochi::QueryType::NodePositions "QueryType::NodePositions" when @p boundaryOnly is false, or @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions" when @p boundaryOnly is true. Results are available after the simulation step completes.
+/// @note When @p boundaryOnly is false, requires registering @ref mochi::QueryType::NodePositions "QueryType::NodePositions" before the simulation step. When true, requires registering @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions". Results are available after the simulation step completes.
 ///
 /// @warning This is a synchronous call and may be expensive.
 ///
@@ -5253,7 +5437,7 @@
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
 /// @note When @p boundaryOnly is false, this function supports only soft and shell actors. When true, it also supports articulated actors with a skin mesh, soft-skinned actors with a blended skin mesh, and rigid actors (dynamic or static) with tetrahedral or triangular mesh shapes. Rod actors and actors without a simulation mesh are not supported.
-/// @note Requires query registration before the simulation step. Register @ref mochi::QueryType::NodePositions "QueryType::NodePositions" when @p boundaryOnly is false, or @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions" when @p boundaryOnly is true. Results are available after the simulation step completes.
+/// @note When @p boundaryOnly is false, requires registering @ref mochi::QueryType::NodePositions "QueryType::NodePositions" before the simulation step. When true, requires registering @ref mochi::QueryType::SurfaceNodePositions "QueryType::SurfaceNodePositions". Results are available after the simulation step completes.
 ///
 /// @warning This is a synchronous call and may be expensive.
 ///
@@ -5306,9 +5490,9 @@
 ///
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft, soft-skinned, shell and rod actors.
-/// @note For soft-skinned actors, it zeroes the elastic deformation and velocity only. The skeleton-driven pose is unaffected.
-/// @note For rod actors, it zeroes both the translational displacement DoFs and the twist-angle DoFs.
+/// @note Only supported for standalone soft actors, nested soft actors, shell actors, and rod actors.
+/// @note For nested soft actors, it zeroes only elastic displacement and velocity. Skeleton-driven displacement and velocity are preserved.
+/// @note For rod actors, it zeroes both the translational displacement DoFs and the twist-angle DoFs, and returns each element's cross-section to its rest orientation.
 /// @note Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler in the first time step after this method is called.
 ///
 
@@ -5332,7 +5516,7 @@
 /// @param[in] positionsLocal Node positions [m] to set (3 values per node: x, y, z) in the actor's local frame.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft (not soft-skinned) and shell actors.
+/// @note Only supported for standalone soft actors and shell actors.
 /// @note Does not change node velocities.
 /// @note Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler in the first time step after this method is called.
 ///
@@ -5344,8 +5528,8 @@
 /// @param[in] velocitiesLocal Node velocities to set in the actor's local frame.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft (not soft-skinned), shell and rod actors.
-/// @note For soft and shell actors: 3 values per node [m/s] — (vx, vy, vz).
+/// @note Only supported for standalone soft actors, shell actors, and rod actors.
+/// @note For standalone soft actors and shell actors: 3 values per node [m/s] — (vx, vy, vz).
 /// @note For rod actors: 4 values per node — (vx, vy, vz) in [m/s] plus a twist rate [rad/s].
 /// @note Resets multi-step time integrators, e.g. BDF2 falls back to backward Euler in the first time step after this method is called.
 ///
@@ -5357,7 +5541,7 @@
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 /// @return Current node positions [m] of the visual mesh in the actor's local frame (3 values per node: x, y, z). The number of nodes is available via @ref mochi::Actor::GetVisualMesh "GetVisualMesh". The order of the nodes is 1-to-1 with @ref mochi::Actor::GetVisualMeshNodeNormalsLocal "GetVisualMeshNodeNormalsLocal".
 ///
-/// @note Includes visual mesh nodes not referenced by any visual triangle. Unlike surface mesh getters, visual mesh getters do not omit unreferenced nodes.
+/// @note Unlike surface mesh getters, visual mesh getters include any nodes that no visual triangle references.
 /// @note Requires registering @ref mochi::QueryType::VisualNodePositions "QueryType::VisualNodePositions" before the simulation step. Results are available after the simulation step completes.
 /// @note Requires the actor to support @ref mochi::QueryType::VisualNodePositions "QueryType::VisualNodePositions".
 ///
@@ -5369,13 +5553,39 @@
 /// @brief Get the normal direction to each node of the visual mesh in the actor's local frame.
 ///
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
-/// @return Flattened normals (3 values per node: nx, ny, nz) in the actor's local frame. The number of nodes is available via @ref mochi::Actor::GetVisualMesh "GetVisualMesh". The order of the nodes is 1-to-1 with @ref mochi::Actor::GetVisualMeshNodePositionsLocal "GetVisualMeshNodePositionsLocal". Normals for visual nodes not referenced by any visual triangle are zero.
+/// @return Flattened normals (3 values per node: nx, ny, nz) in the actor's local frame. The number of nodes is available via @ref mochi::Actor::GetVisualMesh "GetVisualMesh". The order of the nodes is 1-to-1 with @ref mochi::Actor::GetVisualMeshNodePositionsLocal "GetVisualMeshNodePositionsLocal". Normals of nodes that no visual triangle references are zero.
 ///
-/// @note Includes visual mesh nodes not referenced by any visual triangle. Unlike surface mesh getters, visual mesh getters do not omit unreferenced nodes.
+/// @note Unlike surface mesh getters, visual mesh getters include any nodes that no visual triangle references.
 /// @note Requires registering @ref mochi::QueryType::VisualNodeNormals "QueryType::VisualNodeNormals" before the simulation step. Results are available after the simulation step completes.
 /// @note Requires the actor to support @ref mochi::QueryType::VisualNodeNormals "QueryType::VisualNodeNormals".
 ///
 /// @see @ref mochi::Actor::RegisterQuery "RegisterQuery", @ref mochi::QueryType::VisualNodeNormals "QueryType::VisualNodeNormals", @ref mochi::Actor::GetVisualMesh "GetVisualMesh", @ref mochi::Actor::GetVisualMeshNodePositionsLocal "GetVisualMeshNodePositionsLocal"
+///
+
+/// @fn Span<real const> mochi::Actor::GetContactSkinMeshNodePositionsLocal(Error& error) const
+///
+/// @brief Get the current positions of the contact skin mesh nodes in the actor's local frame.
+///
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+/// @return Current node positions [m] of the contact skin mesh in the actor's local frame (3 values per node: x, y, z). The number of nodes is available via @ref mochi::Actor::GetContactSkinMesh "GetContactSkinMesh". The order of the nodes is 1-to-1 with @ref mochi::Actor::GetContactSkinMeshNodeNormalsLocal "GetContactSkinMeshNodeNormalsLocal".
+///
+/// @note Requires registering @ref mochi::QueryType::ContactSkinNodePositions "QueryType::ContactSkinNodePositions" before the simulation step. Results are available after the simulation step completes.
+/// @note Requires the actor to support @ref mochi::QueryType::ContactSkinNodePositions "QueryType::ContactSkinNodePositions".
+///
+/// @see @ref mochi::Actor::RegisterQuery "RegisterQuery", @ref mochi::QueryType::ContactSkinNodePositions "QueryType::ContactSkinNodePositions", @ref mochi::Actor::GetContactSkinMesh "GetContactSkinMesh", @ref mochi::Actor::GetContactSkinMeshNodeNormalsLocal "GetContactSkinMeshNodeNormalsLocal"
+///
+
+/// @fn Span<real const> mochi::Actor::GetContactSkinMeshNodeNormalsLocal(Error& error) const
+///
+/// @brief Get the normal direction to each node of the contact skin mesh in the actor's local frame.
+///
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+/// @return Flattened normals (3 values per node: nx, ny, nz) in the actor's local frame, computed by normalizing the area-weighted sum of adjacent triangle normals. The number of nodes is available via @ref mochi::Actor::GetContactSkinMesh "GetContactSkinMesh". The order of the nodes is 1-to-1 with @ref mochi::Actor::GetContactSkinMeshNodePositionsLocal "GetContactSkinMeshNodePositionsLocal".
+///
+/// @note Requires registering @ref mochi::QueryType::ContactSkinNodeNormals "QueryType::ContactSkinNodeNormals" before the simulation step. Results are available after the simulation step completes.
+/// @note Requires the actor to support @ref mochi::QueryType::ContactSkinNodeNormals "QueryType::ContactSkinNodeNormals".
+///
+/// @see @ref mochi::Actor::RegisterQuery "RegisterQuery", @ref mochi::QueryType::ContactSkinNodeNormals "QueryType::ContactSkinNodeNormals", @ref mochi::Actor::GetContactSkinMesh "GetContactSkinMesh", @ref mochi::Actor::GetContactSkinMeshNodePositionsLocal "GetContactSkinMeshNodePositionsLocal"
 ///
 
 /// @fn Span<int const> mochi::Actor::GetBoundaryConditionDofIndices() const
@@ -5408,7 +5618,7 @@
 /// @brief Add boundary conditions to specified DoFs.
 ///
 /// @param[in] dofIndices DoF indices to constrain.
-/// @param[in] dofValuesWorld Target values in the actor-specific representations described below. Length must equal @p dofIndices.
+/// @param[in] dofValuesWorld Target values in the actor-specific representations described below. Length must equal @p dofIndices. Values must be finite.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
 /// @note Not supported for nested soft actors (see @ref mochi::Actor::GetNestedSoftActors "GetNestedSoftActors").
@@ -5432,7 +5642,7 @@
 /// @brief Add permanent boundary conditions to specified DoFs.
 ///
 /// @param[in] dofIndices DoF indices to constrain.
-/// @param[in] dofValuesWorld Target values in the actor-specific representations documented by @ref mochi::Actor::AddBoundaryConditionDofsWorld "AddBoundaryConditionDofsWorld". Length must equal @p dofIndices.
+/// @param[in] dofValuesWorld Target values in the actor-specific representations documented by @ref mochi::Actor::AddBoundaryConditionDofsWorld "AddBoundaryConditionDofsWorld". Length must equal @p dofIndices. Values must be finite.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
 /// @note Not supported for nested soft actors (see @ref mochi::Actor::GetNestedSoftActors "GetNestedSoftActors").
@@ -5450,10 +5660,10 @@
 /// @brief Add world-space boundary conditions for specified nodes.
 ///
 /// @param[in] nodeIndices Node indices to constrain.
-/// @param[in] nodePositionsWorld Target positions [m] in world frame. Length must be 3 times the size of @p nodeIndices.
+/// @param[in] nodePositionsWorld Target positions [m] in world frame. Length must be 3 times the size of @p nodeIndices. Values must be finite.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft and shell actors, except nested soft actors (see @ref mochi::Actor::GetNestedSoftActors "GetNestedSoftActors").
+/// @note Only supported for standalone soft actors and shell actors.
 /// @note Not supported in differentiable scenes (`diffsim::MakeSceneDifferentiable`) or for ROM actors.
 /// @note Boundary conditions can be cleared with @ref mochi::Actor::ClearBoundaryConditions "ClearBoundaryConditions".
 /// @note Equivalent to calling @ref mochi::Actor::AddBoundaryConditionDofsWorld "AddBoundaryConditionDofsWorld" with DoF indices (3*i, 3*i+1, 3*i+2) for each node i.
@@ -5469,10 +5679,10 @@
 /// @brief Add permanent world-space boundary conditions for specified nodes.
 ///
 /// @param[in] nodeIndices Node indices to constrain.
-/// @param[in] nodePositionsWorld Target positions [m] in world frame. Length must be 3 times the size of @p nodeIndices.
+/// @param[in] nodePositionsWorld Target positions [m] in world frame. Length must be 3 times the size of @p nodeIndices. Values must be finite.
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft and shell actors, except nested soft actors (see @ref mochi::Actor::GetNestedSoftActors "GetNestedSoftActors").
+/// @note Only supported for standalone soft actors and shell actors.
 /// @note Not supported in differentiable scenes (`diffsim::MakeSceneDifferentiable`) or for ROM actors.
 /// @note Same as @ref mochi::Actor::AddBoundaryConditionNodesWorld "AddBoundaryConditionNodesWorld", except boundary conditions cannot be cleared.
 /// @note See @ref mochi::Actor::AddBoundaryConditionDofsWorldPermanent "AddBoundaryConditionDofsWorldPermanent" for interaction with clearable entries later added to the same DoF.
@@ -5488,7 +5698,7 @@
 ///
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft and shell actors, except nested soft actors (see @ref mochi::Actor::GetNestedSoftActors "GetNestedSoftActors").
+/// @note Only supported for standalone soft actors and shell actors.
 /// @note Not supported in differentiable scenes (`diffsim::MakeSceneDifferentiable`) or for ROM actors.
 /// @note Boundary conditions can be cleared with @ref mochi::Actor::ClearBoundaryConditions "ClearBoundaryConditions".
 /// @note Applies to constrained nodes specified by the actor's mesh. Has no effect if none are specified.
@@ -5506,7 +5716,7 @@
 ///
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 ///
-/// @note Only supported for soft and shell actors, except nested soft actors (see @ref mochi::Actor::GetNestedSoftActors "GetNestedSoftActors").
+/// @note Only supported for standalone soft actors and shell actors.
 /// @note Not supported in differentiable scenes (`diffsim::MakeSceneDifferentiable`) or for ROM actors.
 /// @note Same as @ref mochi::Actor::AddBoundaryConditionConstrainedNodesAtRest "AddBoundaryConditionConstrainedNodesAtRest", except boundary conditions cannot be cleared.
 /// @note See @ref mochi::Actor::AddBoundaryConditionDofsWorldPermanent "AddBoundaryConditionDofsWorldPermanent" for interaction with clearable entries later added to the same DoF.
@@ -5768,6 +5978,7 @@
 /// @return Span of pointers to joint limit constraints.
 ///
 /// @note Only applicable to articulated actors.
+/// @note These constraints are owned by the articulated actor and cannot be destroyed directly with @ref mochi::Scene::DestroyConstraint "Scene::DestroyConstraint". They are destroyed with the actor.
 ///
 /// @see @ref mochi::Actor::GetArticulatedDofLimits "GetArticulatedDofLimits"
 ///
@@ -6084,6 +6295,7 @@
 /// @return Span of pose constraint information.
 ///
 /// @note Only applicable to articulated actors with a pose controller.
+/// @note These constraints are owned by the pose controller and cannot be destroyed individually with @ref mochi::Scene::DestroyConstraint "Scene::DestroyConstraint". Removing the pose controller with @ref mochi::Actor::RemoveArticulatedPoseController "RemoveArticulatedPoseController" destroys all of its constraints.
 ///
 /// @see @ref mochi::PoseConstraintInfo "PoseConstraintInfo", @ref mochi::Actor::GetArticulatedPoseControllerParams "GetArticulatedPoseControllerParams", @ref mochi::Actor::SetArticulatedPoseControllerParams "SetArticulatedPoseControllerParams"
 ///
@@ -6164,7 +6376,7 @@
 
 /// @fn bool mochi::Actor::IsNestedSoftActor() const
 ///
-/// @brief Check if the actor is a soft actor nested within a soft skinned articulated actor.
+/// @brief Check if the actor is a nested soft actor within a soft-skinned actor.
 ///
 /// @return True if the actor is a nested soft actor, false otherwise.
 ///
@@ -6793,10 +7005,11 @@
 /// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
 /// @return Pointer to the created @ref mochi::Actor "Actor", or nullptr on error.
 ///
-/// @note To access underlying soft actors, use @ref mochi::Actor::GetNestedSoftActors "Actor::GetNestedSoftActors".
-/// @note To access underlying rigid link actors, use @ref mochi::Actor::GetNestedLinkActors "Actor::GetNestedLinkActors".
+/// @note To access nested soft actors, use @ref mochi::Actor::GetNestedSoftActors "Actor::GetNestedSoftActors".
+/// @note To access nested link actors, use @ref mochi::Actor::GetNestedLinkActors "Actor::GetNestedLinkActors".
 ///
 /// @warning The skeleton must have at least one non-Hard joint.
+/// @warning For a blended skin, each vertex pair with a positive nested-soft blend weight must have exactly equal rest positions and identical ordered skinning indices and weights.
 ///
 /// @see @ref mochi::SoftSkinnedActorParams "SoftSkinnedActorParams", @ref mochi::Scene::DestroyActor "DestroyActor"
 ///
@@ -7098,6 +7311,7 @@
 /// @param[in] constraint Pointer to the constraint to destroy.
 ///
 /// @note If @p constraint is null, this function has no effect.
+/// @note Use this function to destroy constraints created through the scene's constraint-creation APIs. It has no effect on constraints created automatically while creating or configuring an actor, such as joint-limit, cycle-joint, or pose-controller constraints. To remove such a constraint, remove the corresponding actor feature, if supported, or destroy the actor.
 /// @note After the constraint is destroyed, do not use the pointer or its handle.
 ///
 /// @warning The pointer must be null or point to a live constraint owned by this scene. Passing a pointer to a constraint that has been destroyed is undefined behavior.
@@ -7112,6 +7326,7 @@
 /// @param[in] constraint Handle of the constraint to destroy. If valid, it must be owned by this scene.
 ///
 /// @note An invalid handle or one that does not currently identify a constraint in the scene has no effect.
+/// @note Use this function to destroy constraints created through the scene's constraint-creation APIs. It has no effect on constraints created automatically while creating or configuring an actor, such as joint-limit, cycle-joint, or pose-controller constraints. To remove such a constraint, remove the corresponding actor feature, if supported, or destroy the actor.
 /// @note After the constraint is destroyed, do not use its handle.
 ///
 /// @see @ref mochi::Scene::GetConstraint "GetConstraint", @ref mochi::Constraint::GetHandle "Constraint::GetHandle"
@@ -7173,41 +7388,6 @@
 /// @details Please call this periodically if you are not actively stepping the scene. If this function is never called and the scene is never stepped, then some debugger features will not work.
 ///
 /// @note Must be called on the scene's owning thread (like other @ref mochi::Scene "Scene" methods).
-///
-
-/// @fn bool mochi::Scene::IsRecording() const
-///
-/// @brief Check if the scene is currently recording.
-///
-/// @return True if recording is active, false otherwise.
-///
-/// @note A recording write failure does not end the recording session.
-///
-/// @see @ref mochi::Scene::StartRecording "StartRecording", @ref mochi::Scene::StopRecording "StopRecording"
-///
-
-/// @fn void mochi::Scene::StartRecording(std::string_view filePath, RecordingParams const& params, Error& error)
-///
-/// @brief Create or replace the specified file and start recording the scene to an HDF5 file.
-///
-/// @param[in] filePath Path to the output recording file (case sensitive on some filesystems). File will be created or replaced.
-/// @param[in] params Parameters controlling what data to record.
-/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
-///
-/// @note Enabling additional recording features will generally increase the recording file size and degrade performance.
-/// @note If the scene is already recording, the previous recording is stopped before starting the new one.
-///
-/// @warning Requires a build with HDF5 support.
-/// @warning The recording system may undergo a substantial refactor to expand its capabilities. Its API and recorded file format may change in future releases.
-///
-/// @see @ref mochi::Scene::StopRecording "StopRecording", @ref mochi::Scene::IsRecording "IsRecording", @ref mochi::RecordingParams "RecordingParams"
-///
-
-/// @fn void mochi::Scene::StopRecording()
-///
-/// @brief Stop recording the scene and close the recording file.
-///
-/// @see @ref mochi::Scene::StartRecording "StartRecording", @ref mochi::Scene::IsRecording "IsRecording"
 ///
 
 /// @fn void mochi::Scene::EnableLayerContactAsymmetric(std::string_view layerA, std::string_view layerB, bool enable, Error& error)
@@ -7309,6 +7489,60 @@
 /// @see @ref mochi::Scene::EnableActorContactAsymmetric "EnableActorContactAsymmetric", @ref mochi::Scene::EnableLayerContactSymmetric "EnableLayerContactSymmetric"
 ///
 
+/// @fn void mochi::Scene::SetContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, ContactPairParamsOverride const& paramsOverride, Error& error)
+///
+/// @brief Set contact parameter overrides for an unordered actor pair.
+///
+/// @param[in] actorA Handle of the first actor.
+/// @param[in] actorB Handle of the second actor.
+/// @param[in] paramsOverride Parameter override with at least one present field. This replaces any existing override for the pair; absent fields use the normal actor-parameter combination.
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+///
+/// @note Both actors must have contact parameters.
+/// @note The exact actors are used; nested actors are not included automatically.
+///
+/// @see @ref mochi::Scene::ClearContactPairParamsOverride "ClearContactPairParamsOverride", @ref mochi::Scene::HasContactPairParamsOverride "HasContactPairParamsOverride", @ref mochi::Scene::GetContactPairParamsOverride "GetContactPairParamsOverride"
+///
+
+/// @fn void mochi::Scene::ClearContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error)
+///
+/// @brief Clear contact parameter overrides for an unordered actor pair.
+///
+/// @param[in] actorA Handle of the first actor.
+/// @param[in] actorB Handle of the second actor.
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+///
+/// @note Clearing a valid pair without an override succeeds without changing the scene.
+///
+/// @see @ref mochi::Scene::SetContactPairParamsOverride "SetContactPairParamsOverride"
+///
+
+/// @fn bool mochi::Scene::HasContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error) const
+///
+/// @brief Check whether the exact unordered actor pair has a parameter override.
+///
+/// @param[in] actorA Handle of the first actor.
+/// @param[in] actorB Handle of the second actor.
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+/// @return True if the exact pair has a stored override.
+///
+/// @see @ref mochi::Scene::GetContactPairParamsOverride "GetContactPairParamsOverride"
+///
+
+/// @fn ContactPairParamsOverride mochi::Scene::GetContactPairParamsOverride(ActorHandle actorA, ActorHandle actorB, Error& error) const
+///
+/// @brief Get the parameter override for the exact unordered actor pair.
+///
+/// @param[in] actorA Handle of the first actor.
+/// @param[in] actorB Handle of the second actor.
+/// @param[in,out] error Error status. Check @ref mochi::Error::IsOK "Error::IsOK" for success.
+/// @return The complete stored override.
+///
+/// @note Reports an error when a valid pair has no stored override.
+///
+/// @see @ref mochi::Scene::SetContactPairParamsOverride "SetContactPairParamsOverride", @ref mochi::Scene::HasContactPairParamsOverride "HasContactPairParamsOverride"
+///
+
 /// @fn CallbackHandle mochi::Scene::RegisterPreStepCallback(std::string_view debugName, std::function<void(StepInfo const&)> callback, int priority)
 ///
 /// @brief Register a callback to execute before each simulation step.
@@ -7393,6 +7627,8 @@
 ///
 /// @note Executed before the next simulation step when Scene access is safe.
 /// @note When using lambdas, capture by value or use @ref mochi::AsyncScene::WaitForQueuedCommands "WaitForQueuedCommands" to ensure object lifespan.
+///
+/// @warning The callback receives borrowed access to the @ref mochi::Scene "Scene". Do not retain the pointer after the callback returns or pass it to APIs that take ownership.
 ///
 /// @see @ref mochi::AsyncScene::WaitForQueuedCommands "WaitForQueuedCommands", @ref mochi::AsyncScene::QueueActorCommand "QueueActorCommand"
 ///

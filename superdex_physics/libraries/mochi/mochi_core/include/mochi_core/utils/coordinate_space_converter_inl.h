@@ -27,20 +27,6 @@
 
 namespace mochi {
 
-namespace details {
-
-/**
- * @brief Extract the semantic direction (eg. @ref CoordinateSpaceAxes::Right), as an integer.
- *
- * @param[in] axes @ref CoordinateSpaceAxes value
- * @param[in] axisIndex 0 for X, 1 for Y, 2 for Z.
- */
-[[nodiscard]] constexpr int GetAxisDirection(CoordinateSpaceAxes axes, int axisIndex) {
-  return static_cast<int>((static_cast<uint16_t>(axes) >> (3 * axisIndex)) & 0x7);
-}
-
-} // namespace details
-
 inline CoordinateSpaceConverter::CoordinateSpaceConverter()
     : CoordinateSpaceConverter(CoordinateSpace::Default(), CoordinateSpace::Default()) {}
 

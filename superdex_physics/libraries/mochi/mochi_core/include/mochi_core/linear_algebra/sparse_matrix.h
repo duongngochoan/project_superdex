@@ -62,6 +62,8 @@ class SparseMatrix {
   using NonConstScalar = std::remove_const_t<Scalar>;
   using NonConstIdx = std::remove_const_t<CRIdx>;
   using NonConstPtr = std::remove_const_t<Ptr>;
+  // CSR is the BSR format of BlockSparseMatrix with 1x1 blocks.
+  static constexpr int kBlockSize = 1;
 
   static_assert(
       std::signed_integral<CRIdx> && std::signed_integral<Ptr>,
@@ -203,7 +205,9 @@ class SparseMatrix {
   }
 
   void SetZero() {
-    memset(_v.data(), 0, _v.size() * sizeof(Scalar));
+    if (!_v.empty()) MOCHI_LIKELY {
+      memset(_v.data(), 0, _v.size() * sizeof(Scalar));
+    }
   }
 
   void SetConstant(Scalar value) {
@@ -223,51 +227,51 @@ class SparseMatrix {
     }
   }
 
-  CRIdx Rows() const {
+  MOCHI_FORCE_INLINE CRIdx Rows() const {
     return _ptr.empty() ? 0 : (static_cast<CRIdx>(_ptr.size()) - 1);
   }
 
-  [[nodiscard]] constexpr auto CERows() const {
+  [[nodiscard]] MOCHI_FORCE_INLINE constexpr auto CERows() const {
     static_assert(
         std::is_same_v<NonConstIdx, int>,
         "SparseMatrix can only be used in matrix expressions if CRIdx = int");
     return details::IntOrEmpty<-1>{Rows()};
   }
 
-  CRIdx Cols() const {
+  MOCHI_FORCE_INLINE CRIdx Cols() const {
     return _nCol;
   }
 
-  [[nodiscard]] constexpr auto CECols() const {
+  [[nodiscard]] MOCHI_FORCE_INLINE constexpr auto CECols() const {
     static_assert(
         std::is_same_v<NonConstIdx, int>,
         "SparseMatrix can only be used in matrix expressions if CRIdx = int");
     return details::IntOrEmpty<-1>{Cols()};
   }
 
-  Ptr NumNonZeros() const {
+  MOCHI_FORCE_INLINE Ptr NumNonZeros() const {
     return static_cast<Ptr>(_idx.size());
   }
 
   // @brief Number of non-zeros in the row range [rBegin, rEnd).
   // @note The range end is NOT inclusive.
-  Ptr NumNonZerosInRowRange(CRIdx rBegin, CRIdx rEnd) const {
+  MOCHI_FORCE_INLINE Ptr NumNonZerosInRowRange(CRIdx rBegin, CRIdx rEnd) const {
     MOCHI_ASSERT_VERBOSE(rBegin >= 0 && rEnd <= Rows() && rBegin <= rEnd, "Invalid row range.");
     return (_ptr[rEnd] - _ptr[rBegin]);
   }
 
   // Return true if there are zero rows or columns (see default constructor).
-  [[nodiscard]] bool empty() const {
+  [[nodiscard]] MOCHI_FORCE_INLINE bool empty() const {
     return Rows() == 0 || Cols() == 0;
   }
 
-  bool IsRowEmpty(CRIdx r) const {
+  MOCHI_FORCE_INLINE bool IsRowEmpty(CRIdx r) const {
     MOCHI_ASSERT_VERBOSE(r >= 0 && r < Rows(), "Out of range row index.");
     return (_ptr[r] == _ptr[r + 1]);
   }
 
   // Return true if not empty (i.e. it was initialized with non-zero rows & columns).
-  explicit operator bool() const {
+  MOCHI_FORCE_INLINE explicit operator bool() const {
     return !empty();
   }
 
@@ -275,7 +279,7 @@ class SparseMatrix {
   /// @param[in] r Row index
   /// @returns Span of column indices
   ///
-  auto Indices(CRIdx r) {
+  MOCHI_FORCE_INLINE auto Indices(CRIdx r) {
     MOCHI_ASSERT_VERBOSE(r >= 0 && r < Rows(), "Out of range row index.");
     return Span{_idx.data() + _ptr[r], static_cast<size_t>(NumNonZerosInRowRange(r, r + 1))};
   }
@@ -284,7 +288,7 @@ class SparseMatrix {
   /// @param[in] r Row index
   /// @returns Span of column indices
   ///
-  auto Indices(CRIdx r) const {
+  MOCHI_FORCE_INLINE auto Indices(CRIdx r) const {
     MOCHI_ASSERT_VERBOSE(r >= 0 && r < Rows(), "Out of range row index.");
     return Span{_idx.data() + _ptr[r], static_cast<size_t>(NumNonZerosInRowRange(r, r + 1))};
   }
@@ -293,7 +297,7 @@ class SparseMatrix {
   /// @param[in] r Row index
   /// @returns Span of numerical values
   ///
-  auto Values(CRIdx r) {
+  MOCHI_FORCE_INLINE auto Values(CRIdx r) {
     MOCHI_ASSERT_VERBOSE(r >= 0 && r < Rows(), "Out of range row index.");
     return Span{_v.data() + _ptr[r], static_cast<size_t>(NumNonZerosInRowRange(r, r + 1))};
   }
@@ -302,7 +306,7 @@ class SparseMatrix {
   /// @param[in] r Row index
   /// @returns Span of numerical values
   ///
-  auto Values(CRIdx r) const {
+  MOCHI_FORCE_INLINE auto Values(CRIdx r) const {
     MOCHI_ASSERT_VERBOSE(r >= 0 && r < Rows(), "Out of range row index.");
     return Span{_v.data() + _ptr[r], static_cast<size_t>(NumNonZerosInRowRange(r, r + 1))};
   }
@@ -335,19 +339,19 @@ class SparseMatrix {
   template <typename MatrixIn, typename MatrixOut>
   void TransposeApply(MatrixIn const& x, MatrixOut&& Atx) const;
 
-  Span<Scalar> Values() {
+  MOCHI_FORCE_INLINE Span<Scalar> Values() {
     return _v;
   }
 
-  Span<Scalar const> Values() const {
+  MOCHI_FORCE_INLINE Span<Scalar const> Values() const {
     return _v;
   }
 
-  Span<CRIdx const> Indices() const {
+  MOCHI_FORCE_INLINE Span<CRIdx const> Indices() const {
     return _idx;
   }
 
-  Span<Ptr const> Pointers() const {
+  MOCHI_FORCE_INLINE Span<Ptr const> Pointers() const {
     return _ptr;
   }
 
@@ -737,33 +741,39 @@ void SparseMatrix<Scalar, CRIdx, Ptr, Storage>::AccessorApplyToRange(
       minRowsPerTask,
       numRows,
       [&](CRIdx rowBeginTask, CRIdx rowEndTask) {
+        //--- Local view of the matrix and copies of the accessors: compilers would otherwise reload
+        //--- their pointers and strides in every row. They must reload them after stores that may
+        //--- alias them, and they do not hoist loads out of conditional paths.
+        SparseMatrixView<Scalar const, CRIdx const, Ptr const> const A(*this);
+        auto const XLocal = X;
+        auto AXLocal = AX;
         constexpr auto kCostsX = AccessorIn::RowColCosts();
         if constexpr (kCostsX.first == 1) {
           //--- X is col-major
           for (NonConstIdx c = 0; c < numColsX; ++c) {
             for (NonConstIdx r = rowBeginTask; r < rowEndTask; ++r) {
               NonConstScalar result = 0;
-              if (!IsRowEmpty(r)) {
-                auto const rowIndices = Indices(r);
-                auto const valRow = Values(r);
+              if (!A.IsRowEmpty(r)) {
+                auto const rowIndices = A.Indices(r);
+                auto const valRow = A.Values(r);
                 details::AddRowSparseTimesColumnVector<NonConstScalar, NonConstIdx>(
-                    rowIndices, valRow, &X(0, c), result);
+                    rowIndices, valRow, &XLocal(0, c), result);
               }
-              AX.Store(r, c, result);
+              AXLocal.Store(r, c, result);
             }
           }
         } else {
           //--- X is row-major
           static_assert(kCostsX.second == 1, "Unexpected cost");
           for (NonConstIdx r = rowBeginTask; r < rowEndTask; ++r) {
-            if (!IsRowEmpty(r)) {
-              auto const rowIndices = Indices(r);
-              auto const rowValues = Values(r);
+            if (!A.IsRowEmpty(r)) {
+              auto const rowIndices = A.Indices(r);
+              auto const rowValues = A.Values(r);
               details::RowSparseTimesRowMajorDense<Scalar, CRIdx>(
-                  r, rowIndices, rowValues, X, AX, numColsX);
+                  r, rowIndices, rowValues, XLocal, AXLocal, numColsX);
             } else {
               for (int c = 0; c < numColsX; ++c) {
-                AX.Store(r, c, 0);
+                AXLocal.Store(r, c, 0);
               }
             }
           }
@@ -804,7 +814,7 @@ void SparseMatrix<Scalar, CRIdx, Ptr, Storage>::TransposeApply(MatrixIn const& X
           auto const aval = Load<SimdT>(&vrow[j]);
           auto const rhs = aval * xval;
           for (int k = 0; k < SimdT::kSize; ++k) {
-            AtX(idxTmp[j + k], 0) += Get(rhs, k);
+            AtX(idxTmp[j + k], 0) += rhs[k];
           }
         }
       }

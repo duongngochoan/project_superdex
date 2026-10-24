@@ -53,20 +53,19 @@ MOCHI_FORCE_INLINE void TaskScheduler::AddTask(
 
 template <typename FN>
 MOCHI_FORCE_INLINE void TaskScheduler::AddTask(
-    TaskSemaphore sem,
+    TaskSemaphore const& sem,
     [[maybe_unused]] std::string_view debugNameStringLiteral,
     FN&& fn) {
   sem.Add(1);
 #if MOCHI_TASK_PROFILE_VERBOSITY == MOCHI_TASK_PROFILE_VERBOSITY_HIGH
-  AddTaskVerboseProfile(
-      debugNameStringLiteral, [sem = std::move(sem), fn = std::forward<FN>(fn)]() mutable {
-        fn();
-        sem.Done();
-      });
+  AddTaskVerboseProfile(debugNameStringLiteral, [sem = sem, fn = std::forward<FN>(fn)]() mutable {
+    fn();
+    sem.Done();
+  });
 #else
   bool const isSingleThreaded = (GetNumThreads() == 0);
   AddTaskNoProfile(
-      [sem = std::move(sem), fn = std::forward<FN>(fn)]() mutable {
+      [sem = sem, fn = std::forward<FN>(fn)]() mutable {
 #if MOCHI_TASK_PROFILE_VERBOSITY != MOCHI_TASK_PROFILE_VERBOSITY_NONE
         MOCHI_PROFILE_SCOPE_N("RunTask");
 #endif
@@ -97,10 +96,10 @@ MOCHI_FORCE_INLINE void Schedule(std::string_view debugNameStringLiteral, FN&& f
 
 template <typename FN>
 MOCHI_FORCE_INLINE void
-Schedule(TaskSemaphore sem, std::string_view debugNameStringLiteral, FN&& fn) {
+Schedule(TaskSemaphore const& sem, std::string_view debugNameStringLiteral, FN&& fn) {
   auto* scheduler = TaskScheduler::TryGet();
   if (scheduler && (scheduler->GetNumOtherThreads() > 0)) {
-    scheduler->AddTask(std::move(sem), debugNameStringLiteral, std::forward<FN>(fn));
+    scheduler->AddTask(sem, debugNameStringLiteral, std::forward<FN>(fn));
   } else { // Single threaded fallback
 #if MOCHI_TASK_PROFILE_VERBOSITY == MOCHI_TASK_PROFILE_VERBOSITY_HIGH
     MOCHI_PROFILE_SCOPE();
@@ -151,12 +150,11 @@ void ParallelForRange(
   // Schedule tasks to handle each sub-range except the last one, which this thread will handle.
   int numTasks = numPerTask ? (count - 1) / numPerTask : 0;
   int localRangeBegin = globalRangeBegin;
-  TaskSemaphore sem;
+  TaskSemaphore const sem(numTasks);
   if (numTasks > 0) {
 #if MOCHI_TASK_PROFILE_VERBOSITY == MOCHI_TASK_PROFILE_VERBOSITY_HIGH
     MOCHI_PROFILE_DESCRIPTION_F("%d items, %d tasks", count, numTasks);
 #endif
-    sem.Add(numTasks);
     for (int i = 0; i < numTasks; ++i) {
       int localRangeEnd = localRangeBegin + numPerTask;
 #if MOCHI_TASK_PROFILE_VERBOSITY == MOCHI_TASK_PROFILE_VERBOSITY_HIGH

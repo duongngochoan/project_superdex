@@ -20,6 +20,7 @@
 // is available (MOCHI_USE_OCCT); elsewhere this header is an empty translation unit.
 #if MOCHI_USE_OCCT
 
+#include "occ_face_sizing.h"
 #include "occ_uniform_curve_tessellator.h"
 
 #include <IMeshData_Types.hxx>
@@ -31,10 +32,12 @@ namespace mochi::mesh::cli::occ {
 /// Model-level edge discretizer that caps edge segment length. Places evenly spaced arc-length
 /// samples (see UniformCurveTessellator), optionally raising their count to resolve curvature, so
 /// long straight edges get interior points suitable for the per-face CGAL mesher. Installed via
-/// IMeshTools_Context::SetEdgeDiscret.
+/// IMeshTools_Context::SetEdgeDiscret. An edge shared by faces with different sizing takes the
+/// smallest of each value, so both faces see identical, sufficiently fine boundary samples.
 class UniformEdgeDiscretizer : public IMeshTools_ModelAlgo {
  public:
-  UniformEdgeDiscretizer(double maxEdgeLength, CurveSampling sampling);
+  /// @param sizing Per-face target edge length and deflections. Must outlive the discretizer.
+  UniformEdgeDiscretizer(FaceSizingField const& sizing, CurveSampling sampling);
   ~UniformEdgeDiscretizer() override = default;
 
   /// Functor API for OSD_Parallel::For.
@@ -53,7 +56,7 @@ class UniformEdgeDiscretizer : public IMeshTools_ModelAlgo {
  private:
   void Process(Standard_Integer edgeIndex) const;
 
-  double _maxEdgeLength{};
+  FaceSizingField const* _sizing{};
   CurveSampling _sampling{};
   Handle(IMeshData_Model) _model;
   IMeshTools_Parameters _parameters;

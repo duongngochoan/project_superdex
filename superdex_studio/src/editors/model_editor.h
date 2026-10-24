@@ -41,6 +41,7 @@
 namespace mochi_renderer {
 class MaterialInstance;
 class Mesh;
+class RenderModel;
 class WireframeMesh;
 } // namespace mochi_renderer
 
@@ -50,6 +51,7 @@ class MochiModelAsset;
 class RenderModelAsset;
 class CadModelAsset;
 class SuperDexStudio;
+struct MeasureTarget;
 
 // One user-added "Additional Reference Model": a viewer-only reference asset shown alongside the
 // fixed CAD/render/mochi slots, with its own type, transform, and visualization toggles. Its
@@ -186,6 +188,12 @@ class ModelEditor : public AssetEditor {
   // (Re)builds the CAD surface + wireframe scene objects from _cadSections (the current opacity and
   // visibility flags apply). Does not re-tessellate.
   void RebuildCadModelMeshes();
+  // True when the CAD surface shows the file's own per-section colors: a colored STEP tessellation,
+  // no color override, and full opacity (translucency always uses the flat picker color).
+  bool ShowsCadFileColors() const;
+  // Unloads the render model backing a file-colored CAD surface. Its scene instance must already be
+  // destroyed.
+  void ReleaseCadColorModel();
   // Tessellates the slotted CAD file asynchronously (progress modal) into _cadSections and the
   // asset's thumbnail model, then rebuilds the CAD meshes. This is the standalone CAD-preview
   // tessellation (fixed default deflections); the modifier stack's source is where tessellation is
@@ -240,16 +248,6 @@ class ModelEditor : public AssetEditor {
   void GenerateChainWithExports(
       std::vector<std::size_t> const& chain,
       std::vector<std::size_t> const& exportChainPositions);
-  // The source-first list of enabled modifier indices feeding @p index (with @p index last), or
-  // empty when no source is reachable upstream. Stops at the nearest source -- one modifier's
-  // Generate rebuilds its own segment, not the segments feeding it through files.
-  [[nodiscard]] std::vector<std::size_t> BuildGenerationChain(std::size_t index) const;
-  // The whole enabled stack in order, from its first enabled source -- what Build/Export All
-  // builds, spanning every source->...->export segment. Empty when no enabled source exists.
-  [[nodiscard]] std::vector<std::size_t> BuildFullGenerationChain() const;
-  // The modifier index whose output an edge-swap at @p index references (its explicit upstream
-  // target, else the nearest preceding source), or -1 if none.
-  int ReferenceModifierIndex(std::size_t index) const;
   // Whether Generate is available for @p index: a source is reachable upstream and has its input
   // file/slot, and no async task is running. Deliberately NOT gated on intermediate buffers being
   // up to date (the cascade rebuilds stale ones).
@@ -277,22 +275,6 @@ class ModelEditor : public AssetEditor {
   // Directory holding OriginModelPath, or empty when there is no origin. Only used to give an
   // export Browse dialog somewhere sensible to open when there is no source to suggest from.
   std::string OriginModelFolder() const;
-  // The file the stack's source (first) modifier reads, which every export modifier derives its
-  // default output path from. Empty when the stack is empty or its source has no file yet.
-  std::string StackSourceFilePath() const;
-  // Re-derives every export modifier's path from @p sourceFilePath while its Auto toggle is on (see
-  // MeshProcessingMethod::RefreshAutoExportPath), so an export writes its file on Build/Export All
-  // without the user opening Browse, and an Auto path always matches what Browse would offer.
-  // Called once per frame from the stack UI, ahead of everything that reads an export path. Safe
-  // to run that often because an Auto path is never serialized, so re-deriving it cannot dirty the
-  // saved snapshot however much it moves.
-  void RefreshAutoExportPaths(std::string const& sourceFilePath);
-  // Per-modifier flag marking export modifiers that share an output file with another enabled
-  // export modifier, so the UI can say so. Two exports aimed at the same path silently overwrite
-  // each other; the Auto path is deliberately not disambiguated (it has to keep the model's own
-  // name to stay associated with it), so the fix is to turn Auto off on one of them. Compares
-  // resolved paths, so hand-picked duplicates are caught as well.
-  std::vector<bool> FindCollidingExportPaths() const;
   // Appends a new modifier of registry type @p name to the stack.
   void AddModifier(std::string_view name);
   // Inserts a new modifier of registry type @p name at @p at (clamped to [0, size]), updating
@@ -360,6 +342,10 @@ class ModelEditor : public AssetEditor {
   // modifier's MeshStats (guarded by outputGenId) and recomposites the display. Called once per
   // frame.
   void PumpHausdorffResults();
+  // Fills the Measure tool's pickable-object list: every slot, reference model and processing stage
+  // that has both a scene object and the CPU sections it was built from. The mochi slot (and a
+  // mochi reference) counts as collision geometry; everything else as render geometry.
+  void CollectMeasureTargets(std::vector<MeasureTarget>& out) const;
 
  private:
   std::unique_ptr<Viewport> _viewport;
@@ -407,6 +393,10 @@ class ModelEditor : public AssetEditor {
   // color. The CAD and mochi surfaces are always flat-shaded with their color; the render surface
   // keeps its PBR materials/textures unless _renderOverrideColor is set (or it is translucent).
   mochi::Real3 _cadColor = {0.60f, 0.60f, 0.62f};
+  // A STEP tessellation arrives as one section per CAD color. Shown in those colors unless this is
+  // set (like _renderOverrideColor); an STL has none, so it always uses _cadColor.
+  bool _cadOverrideColor = false;
+  bool _cadHasFileColors = false;
   mochi::Real3 _renderColor = {0.70f, 0.70f, 0.72f};
   bool _renderOverrideColor = false;
   mochi::Real3 _mochiColor = {0.5f, 0.7f, 1.0f};
@@ -416,6 +406,9 @@ class ModelEditor : public AssetEditor {
   mochi::Real3 _sdfColor = {1.0f, 0.0f, 0.0f};
   // scene objects
   mochi_renderer::SceneObject* _cadModelSurfaceMesh = nullptr;
+  // Per-section PBR render model behind _cadModelSurfaceMesh while ShowsCadFileColors(); null when
+  // the surface is a flat-lit mesh.
+  mochi_renderer::RenderModel* _cadColorModel = nullptr;
   mochi_renderer::WireframeMesh* _cadModelWireframeMesh = nullptr;
   mochi_renderer::SceneObject* _renderModelSurfaceMesh = nullptr;
   mochi_renderer::WireframeMesh* _renderModelWireframeMesh = nullptr;

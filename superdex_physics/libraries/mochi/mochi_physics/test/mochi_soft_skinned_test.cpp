@@ -19,9 +19,13 @@
 #include <mochi_physics/mochi_physics.h>
 
 #include <gtest/gtest.h>
+#include <mochi_physics/src/mochi_context.h>
+#include <mochi_physics/src/mochi_ecs.h>
+#include <mochi_physics/src/mochi_shape.h>
 
 #include <cstddef>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <string_view>
 
@@ -107,6 +111,45 @@ TEST_F(CreateSoftSkinnedActorNameTest, AcceptsAttachLinksMatchingAutocorrectedLi
 
   Actor const* actor = _scene->CreateSoftSkinnedActor(params, test::ExpectOK{});
   ASSERT_NE(nullptr, actor);
+}
+
+TEST_F(CreateSoftSkinnedActorNameTest, RejectsContactSkinOnNestedSoftActor) {
+  auto params = MakeParams({"soft"}, "");
+  params.softParams[0].shape =
+      _mochiContext->CreateModelShape(test::CreateUnitCubeContactSkinModel(), test::ExpectOK{});
+  params.softParams[0].useContactSkin = true;
+  params.softAttachLinks.push_back("link_0");
+  Error error;
+  EXPECT_EQ(nullptr, _scene->CreateSoftSkinnedActor(params, error));
+  EXPECT_STREQ("useContactSkin is not supported for nested soft actors.", error.GetDescription());
+}
+
+TEST_F(CreateSoftSkinnedActorNameTest, PreservesContactSkinWhenCloningAttachedSoftShape) {
+  auto params = MakeParams({"soft"}, "");
+  ModelData model = test::CreateUnitCubeContactSkinModel();
+  model.constrainedNodes = DynamicArray<int>{0};
+  MeshData const expectedContactSkin = *model.contactSkinMesh;
+
+  params.softParams[0].shape = _mochiContext->CreateModelShape(model, test::ExpectOK{});
+  params.softAttachLinks.push_back("link_0");
+  Actor const* actor = _scene->CreateSoftSkinnedActor(params, test::ExpectOK{});
+  ASSERT_NE(nullptr, actor);
+
+  auto const& softActors = actor->GetNestedSoftActors(test::ExpectOK{});
+  ASSERT_EQ(size_t{1}, softActors.size());
+  auto& registry = GetRegistry();
+  auto const entity = GetEntity(softActors[0]);
+  auto const& shape = registry.get<CShape const>(entity).shape;
+  auto const tetShape = std::dynamic_pointer_cast<TetrahedralMeshShape const>(shape);
+  ASSERT_NE(nullptr, tetShape);
+  ModelData const clonedModel = tetShape->GetModelData(test::ExpectOK{});
+  ASSERT_TRUE(clonedModel.contactSkinMesh.has_value());
+  EXPECT_EQ(expectedContactSkin, *clonedModel.contactSkinMesh);
+
+  Actor const* const softActor = _scene->GetActor(softActors[0]);
+  ASSERT_NE(nullptr, softActor);
+  EXPECT_EQ(expectedContactSkin.GetNumNodes(), softActor->GetContactSkinMesh().GetNumNodes());
+  EXPECT_TRUE(softActor->IsQuerySupported(QueryType::ContactSkinNodePositions));
 }
 
 TEST_F(CreateSoftSkinnedActorNameTest, AssignsCollisionFreeEmptyNestedSoftLocalNames) {

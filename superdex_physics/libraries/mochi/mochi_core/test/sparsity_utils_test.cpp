@@ -154,20 +154,6 @@ TEST(SparsityUtils, MakeSparsityGraphFromCoordsMatrixFormatWithSpecifiedNumRows)
   EXPECT_TRUE(test::EqualSpan(goldTargets, graph.GetTargets()));
 }
 
-TEST(SparsityUtils, MakeDenseSparsityGraph) {
-  constexpr int kSizes[] = {1, 2, 3, 8};
-  for (int numRows : kSizes) {
-    for (int numCols : kSizes) {
-      auto denseMat = Matrix<real>{numRows, numCols};
-      auto graph = MakeDenseSparsityGraph(numRows, numCols);
-      auto sparseMat = SparseMatrix<real>{numCols, std::move(graph)};
-      denseMat.SetConstant(1_r);
-      sparseMat.SetConstant(1_r);
-      EXPECT_TRUE(test::NearEqualMatrices(denseMat, sparseMat)); // Compare every entry
-    }
-  }
-}
-
 TEST(SparsityUtils, MatAddSubBlocks_BlockSparseMatrix_BlockSize3) {
   // Create a 9x9 block sparse matrix with block size 3
   DynamicArray<int> blockPointers = {0, 2, 4, 6};
@@ -353,84 +339,6 @@ TEST(SparsityUtils, MatAddSubBlocks_BlockSparseMatrix_MultipleGroups_BlockSize4)
     }
   }
   EXPECT_TRUE(test::NearEqualMatrices(expected, bSp));
-}
-
-TEST(SparsityUtils, MakeSparsityGraphFromL2G) {
-  // Create a tetrahedral mesh (arbitrary shape)
-  auto mesh = TetrahedralMesh{test::CreateMinimalTetMeshUnitGrid()};
-
-  // Use the node connectivity to build a dense matrix, such that denseConnectivityMatrix(i, j) is
-  // 1 if the node with DOF i is connected to the node with DOF j.
-  int numNodes = mesh.GetNumNodes();
-  int numDofs = numNodes * 3;
-  auto denseDofConnectivityMat = RowMatrix<real>::Zero(numDofs, numDofs);
-  for (Int4 const& elem : mesh.GetElementConnectivity()) {
-    for (int iNode : elem) {
-      for (int jNode : elem) {
-        for (int ii = 0; ii < 3; ++ii) {
-          for (int jj = 0; jj < 3; ++jj) {
-            denseDofConnectivityMat(3 * iNode + ii, 3 * jNode + jj) = 1_r;
-          }
-        }
-      }
-    }
-  }
-
-  // Use Local2GlobalMap to construct the sparsity pattern as a Graph.
-  // Then use the Graph to construct a SparseMatrix
-  Local2GlobalMap map;
-  map.InitializeFromMesh(&mesh, 3);
-  auto sparsityGraph = MakeSparsityGraph(map);
-  auto pointers = sparsityGraph.GetPointers();
-  auto indices = sparsityGraph.GetTargets();
-  EXPECT_EQ(numDofs + 1, isize(pointers));
-
-  // Verify that column indices are sorted along each row
-  for (int r = 0; r < numDofs; ++r) {
-    EXPECT_TRUE(std::is_sorted(indices.begin() + pointers[r], indices.begin() + pointers[r + 1]));
-  }
-
-  // Use the sparsity graph to initialize a SparseMatrix
-  SparseMatrix<real> sparseMat(numDofs, std::move(sparsityGraph));
-  EXPECT_EQ(numDofs, sparseMat.Rows());
-  EXPECT_EQ(numDofs, sparseMat.Cols());
-
-  // Set all values in the SparseMatrix to 1
-  std::fill(sparseMat.Values().begin(), sparseMat.Values().end(), 1_r);
-
-  // If the sparsity graph was correct, then the non-zero entries in the sparse matrix should
-  // match the non-zero entries in denseDofConnectivityMat.
-  EXPECT_TRUE(test::NearEqualMatrices(denseDofConnectivityMat, sparseMat));
-}
-
-TEST(SparsityUtils, MakeSparseMatrixFromL2G) {
-  auto mesh = TetrahedralMesh{test::CreateMinimalTetMeshUnitGrid()}; // arbitrary mesh
-  Local2GlobalMap map;
-  map.InitializeFromMesh(&mesh, 3);
-  Graph<int, int> sparsity = MakeSparsityGraph(map);
-  SparseMatrix<real> spmat = MakeSparseMatrix(map);
-  EXPECT_EQ(mesh.GetNumNodes() * 3, spmat.Rows());
-  EXPECT_EQ(mesh.GetNumNodes() * 3, spmat.Cols());
-  EXPECT_EQ(sparsity.GetPointers(), spmat.Pointers());
-  EXPECT_EQ(sparsity.GetTargets(), spmat.Indices());
-  std::vector<real> zeros(sparsity.NumTargets(), 0_r);
-  EXPECT_EQ(MakeSpan(zeros), spmat.Values());
-}
-
-TEST(SparsityUtils, AppendNonZeroCoordinates) {
-  // |xx |
-  // |xxx|
-  // |x x|
-  auto graph = Graph<int, int>{{0, 2, 5, 7}, {0, 1, 0, 1, 2, 0, 2}};
-  std::vector<Int2> coords;
-  coords.emplace_back(123, 456);
-  int dofOffset = 10;
-  AppendNonZeroCoordinates(coords, graph, dofOffset);
-  EXPECT_TRUE(
-      test::EqualSpan(
-          std::vector<Int2>{
-              {123, 456}, {10, 10}, {10, 11}, {11, 10}, {11, 11}, {11, 12}, {12, 10}, {12, 12}},
-          coords));
 }
 
 TEST(SparsityUtils, SetZeroOnRowsCols_SparseMatrix) {
@@ -813,16 +721,10 @@ TEST(SparsityUtils, SetZeroOnCols_ValueIndicesCache) {
     SparseMatrix<real> symSp{MakeSparsityGraph(coords)};
     symSp.SetConstant(1_r);
 
-    // Create an owning graph from the sparse matrix for AppendColValueIndexCache
-    auto graphView = AsGraphView(symSp);
-    Graph<int, int> sparsityGraph{
-        DynamicArray<int>(graphView.GetPointers().begin(), graphView.GetPointers().end()),
-        DynamicArray<int>(graphView.GetTargets().begin(), graphView.GetTargets().end())};
-
     // Build the cache for columns {0, 2}
     int constexpr kCols[] = {0, 2};
     DynamicArray<int> colValueIndices;
-    AppendColValueIndexCache(sparsityGraph, MakeSpan(kCols), colValueIndices);
+    AppendColValueIndexCache(AsConstView(symSp), MakeSpan(kCols), colValueIndices);
     EXPECT_FALSE(colValueIndices.empty());
 
     // Test that using the cache produces the same result as without cache
@@ -845,37 +747,22 @@ TEST(SparsityUtils, SetZeroOnCols_ValueIndicesCache) {
   }
 
   // BlockSparseMatrix
-  // For BlockSparseMatrix, the cache is built using AppendColValueIndexCache with a scalar
-  // sparsity graph that matches the BlockSparseMatrix's value array layout. Each block of
-  // size 3x3 stores 9 consecutive values in row-major order.
   {
-    // Create a 9x9 diagonal BlockSparseMatrix with 3 blocks of 3x3:
-    //   Block row 0: block at col 0
-    //   Block row 1: block at col 1
-    //   Block row 2: block at col 2
-    // This is a symmetric block sparsity pattern.
-    DynamicArray<int> blockPointers = {0, 1, 2, 3};
-    DynamicArray<int> blockIndices = {0, 1, 2};
+    // Create a 9x9 BlockSparseMatrix with a symmetric pattern of 3x3 blocks, several per block row:
+    //   Block row 0: blocks at cols 0, 1
+    //   Block row 1: blocks at cols 0, 1, 2
+    //   Block row 2: blocks at cols 1, 2
+    DynamicArray<int> blockPointers = {0, 2, 5, 7};
+    DynamicArray<int> blockIndices = {0, 1, 0, 1, 2, 1, 2};
     DynamicArray<real> values(blockIndices.size() * 3 * 3);
     std::fill(values.begin(), values.end(), 1_r);
 
     BlockSparseMatrix<real, 3> bSp(3, blockPointers, blockIndices, values);
 
-    // Construct the scalar sparsity graph that matches the BlockSparseMatrix's value layout.
-    // For each scalar row r, the columns are in the block at block row r/3.
-    // The value indices must match the BlockSparseMatrix's Values() array layout.
-    //   Rows 0-2 have cols 0-2 (block 0, values 0-8)
-    //   Rows 3-5 have cols 3-5 (block 1, values 9-17)
-    //   Rows 6-8 have cols 6-8 (block 2, values 18-26)
-    DynamicArray<int> scalarPointers = {0, 3, 6, 9, 12, 15, 18, 21, 24, 27};
-    DynamicArray<int> scalarIndices = {0, 1, 2, 0, 1, 2, 0, 1, 2, 3, 4, 5, 3, 4,
-                                       5, 3, 4, 5, 6, 7, 8, 6, 7, 8, 6, 7, 8};
-    Graph<int, int> scalarSparsityGraph{std::move(scalarPointers), std::move(scalarIndices)};
-
-    // Build the cache for columns {0, 2} using AppendColValueIndexCache
-    int constexpr kCols[] = {0, 2};
+    // Build the cache for columns {0, 2, 4}, in block columns 0 and 1
+    int constexpr kCols[] = {0, 2, 4};
     DynamicArray<int> colValueIndices;
-    AppendColValueIndexCache(scalarSparsityGraph, MakeSpan(kCols), colValueIndices);
+    AppendColValueIndexCache(AsConstView(bSp), MakeSpan(kCols), colValueIndices);
     EXPECT_FALSE(colValueIndices.empty());
 
     // Test that using the cache produces the same result as without cache
@@ -898,7 +785,8 @@ TEST(SparsityUtils, SetZeroOnCols_ValueIndicesCache) {
 
     // Also verify that other columns are NOT zeroed
     EXPECT_EQ(1_r, bSp(0, 1));
-    EXPECT_EQ(1_r, bSp(3, 4));
+    EXPECT_EQ(1_r, bSp(3, 5));
+    EXPECT_EQ(1_r, bSp(7, 3));
   }
 
   // Matrix
@@ -908,6 +796,9 @@ TEST(SparsityUtils, SetZeroOnCols_ValueIndicesCache) {
     Matrix<real> mat2 = mat;
     int constexpr kCols[] = {0, 2};
     DynamicArray<int> dummyCache = {0, 1, 2}; // Must be ignored by dense implementation.
+    DynamicArray<int> denseCache;
+    AppendColValueIndexCache(AsConstView(mat), MakeSpan(kCols), denseCache);
+    EXPECT_TRUE(denseCache.empty());
     SetZeroOnCols(AsView(mat), MakeSpan(kCols), 0, AsConstView(mat));
     SetZeroOnCols(AsView(mat2), MakeSpan(kCols), 0, AsConstView(mat2), MakeConstSpan(dummyCache));
     EXPECT_TRUE(test::NearEqualMatrices(mat, mat2));
@@ -949,18 +840,16 @@ TEST(SparsityUtils, AppendColValueIndexCache) {
       {4, 4} // row 4
   };
 
-  auto sparsityGraph = MakeSparsityGraph(coords);
+  SparseMatrix<real> const mat{MakeSparsityGraph(coords)};
 
-  // Verify the graph structure matches our expectations
-  EXPECT_TRUE(test::EqualSpan(std::vector<int>{0, 2, 4, 8, 10, 11}, sparsityGraph.GetPointers()));
-  EXPECT_TRUE(
-      test::EqualSpan(
-          std::vector<int>{0, 2, 1, 2, 0, 1, 2, 3, 2, 3, 4}, sparsityGraph.GetTargets()));
+  // Verify the sparsity pattern matches our expectations
+  EXPECT_TRUE(test::EqualSpan(std::vector<int>{0, 2, 4, 8, 10, 11}, mat.Pointers()));
+  EXPECT_TRUE(test::EqualSpan(std::vector<int>{0, 2, 1, 2, 0, 1, 2, 3, 2, 3, 4}, mat.Indices()));
 
   // Test empty input: should not modify the cache
   {
     DynamicArray<int> cache;
-    AppendColValueIndexCache(sparsityGraph, Span<int const>{}, cache);
+    AppendColValueIndexCache(AsConstView(mat), Span<int const>{}, cache);
     EXPECT_TRUE(cache.empty());
   }
 
@@ -973,7 +862,7 @@ TEST(SparsityUtils, AppendColValueIndexCache) {
   {
     DynamicArray<int> cache;
     int constexpr kCols[] = {2};
-    AppendColValueIndexCache(sparsityGraph, MakeSpan(kCols), cache);
+    AppendColValueIndexCache(AsConstView(mat), MakeSpan(kCols), cache);
     // Expected: value indices for (0,2), (1,2), (2,2), (3,2) = {1, 3, 6, 8}
     EXPECT_TRUE(test::EqualSpan(std::vector<int>{1, 3, 6, 8}, cache));
   }
@@ -984,7 +873,7 @@ TEST(SparsityUtils, AppendColValueIndexCache) {
   {
     DynamicArray<int> cache;
     int constexpr kCols[] = {4};
-    AppendColValueIndexCache(sparsityGraph, MakeSpan(kCols), cache);
+    AppendColValueIndexCache(AsConstView(mat), MakeSpan(kCols), cache);
     EXPECT_TRUE(test::EqualSpan(std::vector<int>{10}, cache));
   }
 
@@ -995,7 +884,7 @@ TEST(SparsityUtils, AppendColValueIndexCache) {
   {
     DynamicArray<int> cache;
     int constexpr kCols[] = {0, 3};
-    AppendColValueIndexCache(sparsityGraph, MakeSpan(kCols), cache);
+    AppendColValueIndexCache(AsConstView(mat), MakeSpan(kCols), cache);
     // Expected: {0, 4, 7, 9} (col 0 indices first, then col 3 indices)
     EXPECT_TRUE(test::EqualSpan(std::vector<int>{0, 4, 7, 9}, cache));
   }
@@ -1005,10 +894,10 @@ TEST(SparsityUtils, AppendColValueIndexCache) {
     DynamicArray<int> cache;
     int constexpr kCols1[] = {1};
     int constexpr kCols2[] = {4};
-    AppendColValueIndexCache(sparsityGraph, MakeSpan(kCols1), cache);
+    AppendColValueIndexCache(AsConstView(mat), MakeSpan(kCols1), cache);
     // Col 1: rows {1, 2} -> value indices 2, 5
     EXPECT_TRUE(test::EqualSpan(std::vector<int>{2, 5}, cache));
-    AppendColValueIndexCache(sparsityGraph, MakeSpan(kCols2), cache);
+    AppendColValueIndexCache(AsConstView(mat), MakeSpan(kCols2), cache);
     // After appending col 4: {2, 5, 10}
     EXPECT_TRUE(test::EqualSpan(std::vector<int>{2, 5, 10}, cache));
   }
@@ -1017,7 +906,7 @@ TEST(SparsityUtils, AppendColValueIndexCache) {
   {
     DynamicArray<int> cache;
     int constexpr kCols[] = {0, 1, 2, 3, 4};
-    AppendColValueIndexCache(sparsityGraph, MakeSpan(kCols), cache);
+    AppendColValueIndexCache(AsConstView(mat), MakeSpan(kCols), cache);
     // All value indices should be present (and sorted).
     EXPECT_TRUE(test::EqualSpan(std::vector{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, cache));
   }
@@ -1034,7 +923,7 @@ TEST(SparsityUtils, DuplicateAndPrune) {
 
   // Dense non-zeros -> same
   for (int blockSize = 1; blockSize <= 3; ++blockSize) {
-    SparseMatrix<real> mat{6, MakeDenseSparsityGraph(6, 6)};
+    SparseMatrix<real> mat = ToSparseMatrix(Matrix<real>::Zero(6, 6));
     mat.SetConstant(1_r); // anything but zero
     auto copy = DuplicateAndPrune(mat, blockSize);
     EXPECT_TRUE(test::NearEqualMatrices(mat, copy));
@@ -1043,7 +932,7 @@ TEST(SparsityUtils, DuplicateAndPrune) {
 
   // Dense all zeros -> same dims, but empty non-zero structure
   for (int blockSize = 1; blockSize <= 3; ++blockSize) {
-    SparseMatrix<real> mat{6, MakeDenseSparsityGraph(6, 6)};
+    SparseMatrix<real> mat = ToSparseMatrix(Matrix<real>::Zero(6, 6));
     mat.SetZero();
     auto copy = DuplicateAndPrune(mat, blockSize);
     EXPECT_TRUE(test::NearEqualMatrices(mat, copy));
@@ -1054,7 +943,7 @@ TEST(SparsityUtils, DuplicateAndPrune) {
   for (int blockSize = 1; blockSize <= 3; ++blockSize) {
     for (int i = 0; i < 6; ++i) {
       for (int j = 0; j < 6; ++j) {
-        SparseMatrix<real> mat{6, MakeDenseSparsityGraph(6, 6)};
+        SparseMatrix<real> mat = ToSparseMatrix(Matrix<real>::Zero(6, 6));
         mat.SetZero();
         mat.SetValue(i, j, 1_r); // single non-zero value
         auto copy = DuplicateAndPrune(mat, blockSize);

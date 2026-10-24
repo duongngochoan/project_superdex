@@ -339,8 +339,7 @@ void TestPk2D() {
   constexpr int kSpaceDim = 3;
   for (int e = 0; e < numElements; e++) {
     for (int q = 0; q < elements[e].kNumQuadPoints; q++) {
-      volume +=
-          Dot(elements[e].mapEvaluated[q], elements[e].normals[q]) * elements[e].quadWeights[q];
+      volume += Dot(elements[e].mapEvaluated[q], elements[e].Normal()) * elements[e].quadWeights[q];
     }
   }
   volume /= kSpaceDim;
@@ -350,7 +349,7 @@ void TestPk2D() {
   Real3 flux = {};
   for (int e = 0; e < numElements; e++) {
     for (int q = 0; q < elements[e].kNumQuadPoints; q++) {
-      flux += elements[e].normals[q] * elements[e].quadWeights[q];
+      flux += elements[e].Normal() * elements[e].quadWeights[q];
     }
   }
   EXPECT_NEAR(Norm(flux), 0_r, 1.e-4);

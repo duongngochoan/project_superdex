@@ -53,16 +53,6 @@ static constexpr real kBaseDForce[3][3] = {
     {-0.6_r, 0.7_r, 4.0_r}};
 static constexpr real kRefTol = MOCHI_USE_DOUBLE_PRECISION ? 1e-9_r : 1e-5_r;
 
-template <int kNumQuadPoints>
-static auto const& TraceQuadratureForFace(int face) {
-  if constexpr (kNumQuadPoints == 1) {
-    return tetrahedral::kTetrahedralTraceQuadrature1[face];
-  } else {
-    static_assert(kNumQuadPoints == 3);
-    return tetrahedral::kTetrahedralTraceQuadrature3[face];
-  }
-}
-
 namespace {
 template <class TraceT>
 struct TractionTestData {
@@ -72,14 +62,10 @@ struct TractionTestData {
 
   TractionTestData()
       : mesh(test::CreateMinimalTetMeshSingleTet()),
-        volumeElement(
-            0,
-            mesh.GetNodeCoordinates(),
-            mesh.GetElementConnectivity(),
-            tetrahedral::kTetrahedralQuadrature1) {
+        volumeElement(0, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity()) {
     traces.reserve(kNumFaces);
     for (int f = 0; f < kNumFaces; ++f) {
-      traces.emplace_back(volumeElement, f, TraceQuadratureForFace<TraceT::kNumQuadPoints>(f));
+      traces.emplace_back(volumeElement, f);
     }
   }
 };

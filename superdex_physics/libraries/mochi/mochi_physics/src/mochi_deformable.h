@@ -21,15 +21,16 @@
 #include "mochi_simulation.h"
 
 #include <mochi_core/element_operations/element_assembler.h>
-#include <mochi_core/element_operations/fem_inertia.h>
 #include <mochi_core/element_operations/fem_traction.h>
 #include <mochi_core/linear_algebra/matrix_fwd.h>
 #include <mochi_core/linear_algebra/utils/assembly.h>
-#include <mochi_core/utils/array_utils.h>
 #include <mochi_core/utils/batch_config.h>
 #include <mochi_core/utils/batch_types.h>
 #include <mochi_core/utils/simd.h>
+#include <mochi_core/utils/task_scheduler.h>
 #include <mochi_core/utils/vmatrix.h>
+
+#include <type_traits>
 
 namespace mochi {
 
@@ -43,37 +44,26 @@ void PreStepDeformableActorAsync(entt::registry& reg, entt::entity e);
 // actors, including (volume) soft actors, shell actors and rod actors.
 namespace deformable {
 
-template <typename BlockSparseMatViewT, typename ElemMassMatT>
-void SetZeroMassMatrix(
-    BlockSparseMatViewT& outMassMatrix,
-    Span<ElemMassMatT> outPerElemMassMatrix) {
-  outMassMatrix.SetZero();
-  Fill(outPerElemMassMatrix, ElemMassMatT{});
-}
-
-/**
- * @brief Computes the row-sum lumped mass matrix from a sparse mass matrix.
- *
- * @param[in] sparsity The sparsity pattern of the mass matrix.
- * @param[in] massMatrix The full sparse mass matrix values (must match sparsity pattern).
- * @param[out] outLumpedMassMatrix The output lumped mass matrix values.
- */
-void ComputeLumpedMassMatrix(
-    CFullSparsityPattern const& sparsity,
-    CMassMatrix const& massMatrix,
-    CLumpedMassMatrix& outLumpedMassMatrix);
+// Update the maximum world-space nodal speed for an ordinary soft or shell actor.
+void UpdateMaxGeometrySpeed(
+    ecs::Included<TagDeformableActor>,
+    ecs::Excluded<TagNestedSoftActor, TagRodActor>,
+    CVelocitySlice<real, TimeStep::Current> const& velocity,
+    CColliderInfo const& collider,
+    CContactSkinningData const* contactSkinning,
+    CConservativeStepBounds& outStepBounds);
 
 // (Actors with a deforming surface) Set up normals of all active collision points.
-template <ContactType kContactType, typename DiscretizationT>
+template <bool kIsSync, typename DiscretizationT>
 void SetupActiveCollisionNormals(
-    ecs::Excluded<TagShellActor, TagRodActor>,
+    ecs::Excluded<TagShellActor, TagRodActor, TagUseDeformableContactSkin>,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     DiscretizationT const& femDisc,
     CFinalDisplacementRef<TimeStep::Current> const& currentDispl,
     CFinalDisplacementRef<TimeStep::StageStart> const& stageStartDispl,
     CRootTransform const& transform,
     CContactSamples<TimeStep::Current> const& contactPositions,
-    CActiveCollisions<kContactType, TimeStep::Current>& activeCollisions);
+    CActiveCollisions<kIsSync, TimeStep::Current>& activeCollisions);
 
 template <typename DiscretizationType, int kNumFields>
 void ComputeAsyncContactResponse(
@@ -84,7 +74,7 @@ void ComputeAsyncContactResponse(
     DiscretizationType const& femBoundaryDisc,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CTimeIntegratorState const& intState,
     CRootTransform const& rootTransform,
     AssemblyParams const& params,
@@ -159,29 +149,11 @@ template <
   };
 }
 
-/**
- * @brief Creates a batched op that adds precomputed per-element mass matrices into the dresidual.
- */
-template <class ElementT, int kBatchSize = kDefaultFemBatchSize, size_t kMassDof>
-[[nodiscard]] auto MakeAddMassMatrixToDResOp(
-    Span<NdArray<real, kMassDof, kMassDof> const> mmPerElem) {
-  return [mmPerElem](
-             NdArray<int, kBatchSize> const& elemIndices,
-             Span<int const> /*indicesFlat*/,
-             BatchDouble<kBatchSize>* /*outEnergy*/,
-             fem::BatchElementVector<kBatchSize, ElementT>* /*outRes*/,
-             fem::BatchElementMatrix<kBatchSize, ElementT>* outDRes,
-             bool /*projectPsd*/) -> bool {
-    MOCHI_ASSERT_VERBOSE(outDRes != nullptr, "outDRes must be non-null.");
-    return fem::AddMassMatrixToDRes<kBatchSize, ElementT>(elemIndices, mmPerElem, *outDRes);
-  };
-}
-
 // Compute the contact Jacobians as colliding actor
 template <typename ActorTag, typename DiscretizationType>
 void SetupCollidingJacobians(
     ecs::Included<ActorTag>,
-    ecs::Excluded<TagRomActor, TagSoftSkinnedActor, TagUseVisualMeshContact>,
+    ecs::Excluded<TagRomActor, TagNestedSoftActor, TagUseDeformableContactSkin>,
     DiscretizationType const& discretization,
     CRootTransform const& transform,
     CDofOffset const& dofOffset,
@@ -198,13 +170,18 @@ void SetupColliderJacobians(
 
 // Emplace components needed for contact of all deformable actors. Sub-types (soft volume, shell,
 // articulated skin, etc.) may need additional components.
-void EmplaceContactComponents(entt::registry& reg, entt::entity e, int numCollidingSamples);
+void EmplaceContactComponents(
+    entt::registry& reg,
+    entt::entity e,
+    int numCollidingSamples,
+    int numContactPartitions);
 
 void RecordState(
     CDisplacementSlice<real, TimeStep::Current> const* disp,
     CVelocitySlice<real, TimeStep::Current> const& vel,
     CDisplacementSlice<real, TimeStep::Current, DisplacementLayer::Skinned> const* dispSkinned,
     CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned> const* velSkinned,
+    CIntegrationVelocitySlices<DisplacementLayer::Skinned> const* integrationVelSkinned,
     CRodPose<TimeStep::Current> const* rodPose,
     ecs::OptionalTag<TagSoftActor> isSoft,
     ecs::OptionalTag<TagShellActor> isShell,
@@ -216,6 +193,66 @@ void RecordRigidTransformEval(CRigidTransformEval const& eval, CRecordingData& o
 void RecordingPipeline(entt::registry& reg, Span<entt::entity const> entities);
 
 namespace details {
+
+// Writes each active collision's colliding normals in the collider frame. Normals of P1 elements
+// are constant, so elementNormal(discretizationImpl, elementIndex, quadPointIndex) is evaluated
+// once per element and must return the normal in the colliding actor's local frame.
+template <typename DiscretizationT, typename ActiveCollisionsT, typename ElementNormalFn>
+void SetupActiveCollisionNormalsFromElements(
+    bool explicitNormals,
+    CRootTransform const& transform,
+    DiscretizationT const& femDisc,
+    ActiveCollisionsT& activeCollisions,
+    ElementNormalFn const& elementNormal) {
+  auto const rotWorldFromCollidingT = ToVMatrix3x3Transpose(transform.worldFromLocal.GetRotation());
+
+  ParallelForEach("SetupCollisionResultNormals", activeCollisions, 1, [&](auto& activeCollision) {
+    auto& collisionResult = activeCollision.collisionResult;
+    if (collisionResult.sampleIndices.empty()) {
+      return;
+    }
+
+    collisionResult.normalColliding.resize_noinit(collisionResult.sampleIndices.size());
+
+    // Initialize with the transform of the first contact. For rigid colliders, it is shared by all.
+    auto const& jacColliderFromWorld = explicitNormals
+        ? collisionResult.jacColliderFromWorldStageStart
+        : collisionResult.jacColliderFromWorld;
+    auto const jacColliderFromCollidingT =
+        Dot3x3(rotWorldFromCollidingT, Transpose3x3(jacColliderFromWorld[0]));
+
+    femDisc.Visit([&](auto const& discretizationImpl) {
+      using DiscretizationImplT = std::decay_t<decltype(discretizationImpl)>;
+      using BaseElementT =
+          std::decay_t<decltype(discretizationImpl.femElements[0].GetBaseElement())>;
+      static_assert(
+          BaseElementT::kPolyOrder == 1, "Collision-normal caching requires P1 elements.");
+      static int constexpr kNumQuads = DiscretizationImplT::kNumQuads;
+      int prevElementIndex = -1;
+      Vec4r normalColliding;
+
+      for (int i = 0; i < isize(collisionResult.sampleIndices); ++i) {
+        int const sampleIndex = collisionResult.sampleIndices[i];
+        int const elementIndex = sampleIndex / kNumQuads;
+        if (elementIndex != prevElementIndex) {
+          normalColliding =
+              elementNormal(discretizationImpl, elementIndex, sampleIndex % kNumQuads);
+          prevElementIndex = elementIndex;
+        }
+
+        // Transform to the collider's local frame.
+        if (jacColliderFromWorld.size() == 1) {
+          collisionResult.normalColliding[i] =
+              ToReal3(DotVecMat3x3(normalColliding, jacColliderFromCollidingT));
+        } else {
+          auto const normalWorld = DotVecMat3x3(normalColliding, rotWorldFromCollidingT);
+          collisionResult.normalColliding[i] =
+              ToReal3(DotMatVec3x3(jacColliderFromWorld[i], normalWorld));
+        }
+      }
+    });
+  });
+}
 
 /**
  * @brief Assemble one translational external-force entry (3 displacement DoFs) into the
@@ -234,7 +271,8 @@ namespace details {
  * `externalForces.dofs[i]`.
  * @param[in] worldFromLocalR Rotation from local to world (used to bring force into local frame).
  * @param[in] displacements Local-frame displacement DoFs of the actor.
- * @param[in,out] outObj Optional objective accumulator.
+ * @param[in] stageStartDisplacements Local-frame stage-start displacement DoFs of the actor.
+ * @param[in,out] outObj Optional objective accumulator. The energy is relative to the stage start.
  * @param[in,out] outRes Optional residual accumulator.
  * @return Number of additional `externalForces` entries consumed beyond `i` (0 or 2). The caller
  * should advance its loop index by this amount in addition to its own `++i`.
@@ -246,6 +284,7 @@ namespace details {
     int nodeStartIndex,
     VMatrix3x3r const& worldFromLocalR,
     ColumnVectorView<real const> displacements,
+    ColumnVectorView<real const> stageStartDisplacements,
     double* outObj,
     ColumnVectorView<real>* outRes) {
   int const numForces = isize(externalForces.dofs);
@@ -259,18 +298,17 @@ namespace details {
   int extraConsumed = 0;
   if ((component == 0) && ((i + 2) < numForces) &&
       (externalForces.dofs[i + 1] == nodeStartIndex + 1) &&
-      (externalForces.dofs[i + 2] == nodeStartIndex + 2))
-    MOCHI_LIKELY {
-      forceWorld = Load<3, Vec4r>(&(externalForces.forces[i]));
-      extraConsumed = 2;
-    }
-  else {
+      (externalForces.dofs[i + 2] == nodeStartIndex + 2)) MOCHI_LIKELY {
+    forceWorld = Load<3, Vec4r>(&(externalForces.forces[i]));
+    extraConsumed = 2;
+  } else {
     forceWorld = Set(Vec4r{}, component, externalForces.forces[i]);
   }
   Vec4r const forceLocal =
       DotVecMat3x3(forceWorld, worldFromLocalR); // worldFromLocalR^T * forceWorld
   if (outObj) {
-    Vec4r const dispLocal = Load<3, Vec4r>(&displacements[nodeStartIndex]);
+    Vec4r const dispLocal = Load<3, Vec4r>(&displacements[nodeStartIndex]) -
+        Load<3, Vec4r>(&stageStartDisplacements[nodeStartIndex]);
     *outObj -= StaticCast<double>(Dot<3>(dispLocal, forceLocal));
   }
   if (outRes) {

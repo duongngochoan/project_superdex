@@ -18,13 +18,14 @@
 
 // clang-format off
 
-#include <limits>
-#include <mochi_physics/mochi_physics.h>
 #include <mochi_core/geometry/model_utils.h>
 #include <mochi_physics/diffsim/mochi_diffsim.h>
+#include <mochi_physics/mochi_physics.h>
 #include <mochi_physics/mochi_physics_experimental.h>
-#include <mochi_physics/utils/mochi_prefab.h>
 #include <mochi_physics/utils/mochi_physics_api_checks.generated.h>
+#include <mochi_physics/utils/mochi_prefab.h>
+
+#include <limits>
 
 #if MOCHI_COMPILER_MSVC
 #define MOCHI_ASSERT_EQ(a, b, message) MOCHI_ASSERT(mochi::NearEqual((a), (b), std::numeric_limits<decltype(b)>::epsilon()), message)
@@ -122,6 +123,7 @@ static_assert(std::is_same_v<decltype(&mochi::prefab::SoftActorPrefab::renderMod
 static_assert(std::is_same_v<decltype(&mochi::prefab::SoftActorPrefab::renderModelScale), mochi::Real3 mochi::prefab::SoftActorPrefab::*>, "\n  ERROR: Field mochi::prefab::SoftActorPrefab::renderModelScale is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::SoftActorPrefab::renderModelRotation), mochi::Quaternion mochi::prefab::SoftActorPrefab::*>, "\n  ERROR: Field mochi::prefab::SoftActorPrefab::renderModelRotation is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::SoftActorPrefab::renderModelTranslation), mochi::Real3 mochi::prefab::SoftActorPrefab::*>, "\n  ERROR: Field mochi::prefab::SoftActorPrefab::renderModelTranslation is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::prefab::SoftActorPrefab::nodeDisplacements), std::optional<mochi::DynamicArray<mochi::real>> mochi::prefab::SoftActorPrefab::*>, "\n  ERROR: Field mochi::prefab::SoftActorPrefab::nodeDisplacements is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::prefab::ArticulatedLinkPrefab
 static_assert(std::is_same_v<decltype(&mochi::prefab::ArticulatedLinkPrefab::shapeFile), mochi::DynamicString mochi::prefab::ArticulatedLinkPrefab::*>, "\n  ERROR: Field mochi::prefab::ArticulatedLinkPrefab::shapeFile is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -151,6 +153,7 @@ static_assert(std::is_same_v<decltype(&mochi::prefab::ArticulatedActorPrefab::jo
 static_assert(std::is_same_v<decltype(&mochi::prefab::ArticulatedActorPrefab::links), mochi::DynamicArray<mochi::prefab::ArticulatedLinkPrefab> mochi::prefab::ArticulatedActorPrefab::*>, "\n  ERROR: Field mochi::prefab::ArticulatedActorPrefab::links is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::ArticulatedActorPrefab::skin), std::optional<mochi::prefab::ArticulatedSkinPrefab> mochi::prefab::ArticulatedActorPrefab::*>, "\n  ERROR: Field mochi::prefab::ArticulatedActorPrefab::skin is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::ArticulatedActorPrefab::jointVelocities), std::optional<mochi::DynamicArray<mochi::real>> mochi::prefab::ArticulatedActorPrefab::*>, "\n  ERROR: Field mochi::prefab::ArticulatedActorPrefab::jointVelocities is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::prefab::ArticulatedActorPrefab::jointPose), std::optional<mochi::DynamicArray<mochi::real>> mochi::prefab::ArticulatedActorPrefab::*>, "\n  ERROR: Field mochi::prefab::ArticulatedActorPrefab::jointPose is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::prefab::SoftSkinnedActorPrefab
 static_assert(std::is_same_v<decltype(&mochi::prefab::SoftSkinnedActorPrefab::comment), std::optional<mochi::DynamicString> mochi::prefab::SoftSkinnedActorPrefab::*>, "\n  ERROR: Field mochi::prefab::SoftSkinnedActorPrefab::comment is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -255,6 +258,10 @@ static_assert(std::is_same_v<decltype(&mochi::prefab::ActorContactEntry::enable)
 static_assert(std::is_same_v<decltype(&mochi::prefab::ActorContactEntry::actors), mochi::DynamicArray<mochi::DynamicString> mochi::prefab::ActorContactEntry::*>, "\n  ERROR: Field mochi::prefab::ActorContactEntry::actors is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::ActorContactEntry::includeNestedActors), bool mochi::prefab::ActorContactEntry::*>, "\n  ERROR: Field mochi::prefab::ActorContactEntry::includeNestedActors is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
+// struct mochi::prefab::ContactPairParamsOverrideEntry
+static_assert(std::is_same_v<decltype(&mochi::prefab::ContactPairParamsOverrideEntry::actors), mochi::DynamicArray<mochi::DynamicString> mochi::prefab::ContactPairParamsOverrideEntry::*>, "\n  ERROR: Field mochi::prefab::ContactPairParamsOverrideEntry::actors is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::prefab::ContactPairParamsOverrideEntry::paramsOverride), mochi::ContactPairParamsOverride mochi::prefab::ContactPairParamsOverrideEntry::*>, "\n  ERROR: Field mochi::prefab::ContactPairParamsOverrideEntry::paramsOverride is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
 // struct mochi::prefab::LayerContactEntry
 static_assert(std::is_same_v<decltype(&mochi::prefab::LayerContactEntry::enable), bool mochi::prefab::LayerContactEntry::*>, "\n  ERROR: Field mochi::prefab::LayerContactEntry::enable is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::LayerContactEntry::layers), mochi::DynamicArray<mochi::DynamicString> mochi::prefab::LayerContactEntry::*>, "\n  ERROR: Field mochi::prefab::LayerContactEntry::layers is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -275,6 +282,7 @@ static_assert(std::is_same_v<decltype(&mochi::prefab::ScenePrefab::prefabs), moc
 static_assert(std::is_same_v<decltype(&mochi::prefab::ScenePrefab::scene), std::optional<mochi::prefab::SceneParams> mochi::prefab::ScenePrefab::*>, "\n  ERROR: Field mochi::prefab::ScenePrefab::scene is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::ScenePrefab::sourceFilePath), std::optional<mochi::DynamicString> mochi::prefab::ScenePrefab::*>, "\n  ERROR: Field mochi::prefab::ScenePrefab::sourceFilePath is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::prefab::ScenePrefab::contactFilter), std::optional<mochi::prefab::ContactFilter> mochi::prefab::ScenePrefab::*>, "\n  ERROR: Field mochi::prefab::ScenePrefab::contactFilter is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::prefab::ScenePrefab::contactPairParamsOverrides), std::optional<mochi::DynamicArray<mochi::prefab::ContactPairParamsOverrideEntry>> mochi::prefab::ScenePrefab::*>, "\n  ERROR: Field mochi::prefab::ScenePrefab::contactPairParamsOverrides is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::prefab::PrefabParams
 static_assert(std::is_same_v<decltype(&mochi::prefab::PrefabParams::name), mochi::DynamicString mochi::prefab::PrefabParams::*>, "\n  ERROR: Field mochi::prefab::PrefabParams::name is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -288,6 +296,10 @@ static_assert(std::is_same_v<decltype(&mochi::prefab::AddToSceneResult::actors),
 static_assert(std::is_same_v<decltype(&mochi::prefab::AddToSceneResult::constraints), mochi::DynamicArray<mochi::Constraint*> mochi::prefab::AddToSceneResult::*>, "\n  ERROR: Field mochi::prefab::AddToSceneResult::constraints is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(static_cast<mochi::DynamicArray<mochi::Actor*> (mochi::prefab::AddToSceneResult::*)(mochi::ActorType) const>(&mochi::prefab::AddToSceneResult::Filter)), mochi::DynamicArray<mochi::Actor*> (mochi::prefab::AddToSceneResult::*)(mochi::ActorType) const>, "\n  ERROR: Function mochi::prefab::AddToSceneResult::Filter is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(static_cast<mochi::DynamicArray<mochi::Constraint*> (mochi::prefab::AddToSceneResult::*)(mochi::ConstraintType) const>(&mochi::prefab::AddToSceneResult::Filter)), mochi::DynamicArray<mochi::Constraint*> (mochi::prefab::AddToSceneResult::*)(mochi::ConstraintType) const>, "\n  ERROR: Function mochi::prefab::AddToSceneResult::Filter is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// struct mochi::prefab::ExportParams
+static_assert(std::is_same_v<decltype(&mochi::prefab::ExportParams::excludeActors), mochi::DynamicArray<mochi::ActorHandle> mochi::prefab::ExportParams::*>, "\n  ERROR: Field mochi::prefab::ExportParams::excludeActors is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::prefab::ExportParams::exportCurrentPose), bool mochi::prefab::ExportParams::*>, "\n  ERROR: Field mochi::prefab::ExportParams::exportCurrentPose is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // free function mochi::prefab::LoadFromFile
 static_assert(std::is_same_v<decltype(&mochi::prefab::LoadFromFile), mochi::prefab::ScenePrefab (*)(std::string_view, std::string_view, mochi::Context*, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::LoadFromFile is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -332,13 +344,16 @@ static_assert(std::is_same_v<decltype(&mochi::prefab::LoadShapes), void (*)(moch
 static_assert(std::is_same_v<decltype(&mochi::prefab::EnsureFullyLoaded), void (*)(mochi::prefab::ScenePrefab&, std::string_view, mochi::Context*, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::EnsureFullyLoaded is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
 // free function mochi::prefab::ExportScene
-static_assert(std::is_same_v<decltype(&mochi::prefab::ExportScene), void (*)(mochi::Scene const*, std::string_view, std::string_view, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::ExportScene is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(static_cast<void (*)(mochi::Scene const*, std::string_view, std::string_view, mochi::prefab::ExportParams const&, mochi::Error&)>(&mochi::prefab::ExportScene)), void (*)(mochi::Scene const*, std::string_view, std::string_view, mochi::prefab::ExportParams const&, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::ExportScene is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
-// free function mochi::prefab::ExportSceneExcluding
-static_assert(std::is_same_v<decltype(&mochi::prefab::ExportSceneExcluding), void (*)(mochi::Scene const*, std::string_view, std::string_view, mochi::Span<mochi::ActorHandle const>, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::ExportSceneExcluding is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+// free function mochi::prefab::ExportScene
+static_assert(std::is_same_v<decltype(static_cast<void (*)(mochi::Scene const*, std::string_view, std::string_view, mochi::Error&)>(&mochi::prefab::ExportScene)), void (*)(mochi::Scene const*, std::string_view, std::string_view, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::ExportScene is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
 // free function mochi::prefab::ExportActor
-static_assert(std::is_same_v<decltype(&mochi::prefab::ExportActor), void (*)(mochi::Actor const*, std::string_view, std::string_view, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::ExportActor is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(static_cast<void (*)(mochi::Actor const*, std::string_view, std::string_view, mochi::prefab::ExportParams const&, mochi::Error&)>(&mochi::prefab::ExportActor)), void (*)(mochi::Actor const*, std::string_view, std::string_view, mochi::prefab::ExportParams const&, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::ExportActor is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// free function mochi::prefab::ExportActor
+static_assert(std::is_same_v<decltype(static_cast<void (*)(mochi::Actor const*, std::string_view, std::string_view, mochi::Error&)>(&mochi::prefab::ExportActor)), void (*)(mochi::Actor const*, std::string_view, std::string_view, mochi::Error&)>, "\n  ERROR: Function mochi::prefab::ExportActor is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
 // enum mochi::experimental::ControlType
 static_assert(static_cast<int>(mochi::experimental::ControlType::SingleDof) == 0, "\n  ERROR: enum value mochi::experimental::ControlType::SingleDof is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
@@ -431,8 +446,8 @@ static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::mate
 static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::colliderType), mochi::ColliderType mochi::experimental::RodActorParams::*>, "\n  ERROR: Field mochi::experimental::RodActorParams::colliderType is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::pointCloudCollider), mochi::experimental::PointCloudColliderParams mochi::experimental::RodActorParams::*>, "\n  ERROR: Field mochi::experimental::RodActorParams::pointCloudCollider is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::hasGravity), bool mochi::experimental::RodActorParams::*>, "\n  ERROR: Field mochi::experimental::RodActorParams::hasGravity is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::useVisualMeshContact), bool mochi::experimental::RodActorParams::*>, "\n  ERROR: Field mochi::experimental::RodActorParams::useVisualMeshContact is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::visualMeshContactElementType), mochi::ActorBoundaryElementType mochi::experimental::RodActorParams::*>, "\n  ERROR: Field mochi::experimental::RodActorParams::visualMeshContactElementType is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::useContactSkin), bool mochi::experimental::RodActorParams::*>, "\n  ERROR: Field mochi::experimental::RodActorParams::useContactSkin is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RodActorParams::contactSkinElementType), mochi::ActorBoundaryElementType mochi::experimental::RodActorParams::*>, "\n  ERROR: Field mochi::experimental::RodActorParams::contactSkinElementType is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::experimental::ShellMaterialParams
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellMaterialParams::membraneLambda), mochi::real mochi::experimental::ShellMaterialParams::*>, "\n  ERROR: Field mochi::experimental::ShellMaterialParams::membraneLambda is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -442,6 +457,7 @@ static_assert(std::is_same_v<decltype(&mochi::experimental::ShellMaterialParams:
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellMaterialParams::density), mochi::real mochi::experimental::ShellMaterialParams::*>, "\n  ERROR: Field mochi::experimental::ShellMaterialParams::density is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellMaterialParams::massDampingCoefficient), mochi::real mochi::experimental::ShellMaterialParams::*>, "\n  ERROR: Field mochi::experimental::ShellMaterialParams::massDampingCoefficient is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellMaterialParams::stiffnessDampingCoefficient), mochi::real mochi::experimental::ShellMaterialParams::*>, "\n  ERROR: Field mochi::experimental::ShellMaterialParams::stiffnessDampingCoefficient is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::ShellMaterialParams::membraneCollapseBarrierScale), mochi::real mochi::experimental::ShellMaterialParams::*>, "\n  ERROR: Field mochi::experimental::ShellMaterialParams::membraneCollapseBarrierScale is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::experimental::ShellActorParams
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellActorParams::name), mochi::DynamicString mochi::experimental::ShellActorParams::*>, "\n  ERROR: Field mochi::experimental::ShellActorParams::name is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -454,9 +470,29 @@ static_assert(std::is_same_v<decltype(&mochi::experimental::ShellActorParams::co
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellActorParams::pointCloudCollider), mochi::experimental::PointCloudColliderParams mochi::experimental::ShellActorParams::*>, "\n  ERROR: Field mochi::experimental::ShellActorParams::pointCloudCollider is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellActorParams::hasGravity), bool mochi::experimental::ShellActorParams::*>, "\n  ERROR: Field mochi::experimental::ShellActorParams::hasGravity is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::experimental::ShellActorParams::contactElementType), mochi::ActorBoundaryElementType mochi::experimental::ShellActorParams::*>, "\n  ERROR: Field mochi::experimental::ShellActorParams::contactElementType is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::ShellActorParams::useContactSkin), bool mochi::experimental::ShellActorParams::*>, "\n  ERROR: Field mochi::experimental::ShellActorParams::useContactSkin is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct mochi::experimental::SleepParams
+static_assert(std::is_same_v<decltype(&mochi::experimental::SleepParams::canSleep), bool mochi::experimental::SleepParams::*>, "\n  ERROR: Field mochi::experimental::SleepParams::canSleep is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::SleepParams::sleepThreshold), double mochi::experimental::SleepParams::*>, "\n  ERROR: Field mochi::experimental::SleepParams::sleepThreshold is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::SleepParams::minStepsBeforeSleep), int mochi::experimental::SleepParams::*>, "\n  ERROR: Field mochi::experimental::SleepParams::minStepsBeforeSleep is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::experimental::DebugStats
 static_assert(std::is_same_v<decltype(&mochi::experimental::DebugStats::maxResidualNormRelativeError), mochi::real mochi::experimental::DebugStats::*>, "\n  ERROR: Field mochi::experimental::DebugStats::maxResidualNormRelativeError is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct mochi::experimental::RecordingParams
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordActorMeshes), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordActorMeshes is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordActorLocalToGlobalMap), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordActorLocalToGlobalMap is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordTargetState), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordTargetState is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordDynamicActorState), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordDynamicActorState is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordStaticActorState), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordStaticActorState is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordContactPoints), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordContactPoints is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordNodeContactForces), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordNodeContactForces is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::recordSdfDistances), bool mochi::experimental::RecordingParams::*>, "\n  ERROR: Field mochi::experimental::RecordingParams::recordSdfDistances is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::experimental::RecordingParams::All), mochi::experimental::RecordingParams (*)(bool)>, "\n  ERROR: Function mochi::experimental::RecordingParams::All is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// free function mochi::experimental::AddToScene
+static_assert(std::is_same_v<decltype(&mochi::experimental::AddToScene), mochi::prefab::AddToSceneResult (*)(std::string_view, std::string_view, mochi::Scene*, mochi::prefab::PrefabParams const&, mochi::experimental::RomParams const&, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::AddToScene is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
 // free function mochi::experimental::RestoreStateFromScene
 static_assert(std::is_same_v<decltype(&mochi::experimental::RestoreStateFromScene), void (*)(mochi::Scene*, mochi::Scene const*, mochi::StateHandle, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::RestoreStateFromScene is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -466,6 +502,9 @@ static_assert(std::is_same_v<decltype(&mochi::experimental::ApplyImprovedConverg
 
 // free function mochi::experimental::GetContactForceWorldBatch
 static_assert(std::is_same_v<decltype(&mochi::experimental::GetContactForceWorldBatch), mochi::real (*)(mochi::Span<mochi::Actor const* const>, mochi::Span<mochi::Actor const* const>, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::GetContactForceWorldBatch is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// free function mochi::experimental::SetActorPreconditionerType
+static_assert(std::is_same_v<decltype(&mochi::experimental::SetActorPreconditionerType), void (*)(mochi::Actor*, mochi::PreconditionerType, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::SetActorPreconditionerType is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
 // free function mochi::experimental::EnableNewtonEulerInertia
 static_assert(std::is_same_v<decltype(&mochi::experimental::EnableNewtonEulerInertia), void (*)(mochi::Actor*, bool, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::EnableNewtonEulerInertia is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -551,8 +590,23 @@ static_assert(std::is_same_v<decltype(&mochi::experimental::CalibrateNormalVisco
 // free function mochi::experimental::EffectiveCoefficientOfRestitution
 static_assert(std::is_same_v<decltype(&mochi::experimental::EffectiveCoefficientOfRestitution), mochi::real (*)(mochi::real, mochi::real, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::EffectiveCoefficientOfRestitution is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
+// free function mochi::experimental::GetSleepParams
+static_assert(std::is_same_v<decltype(&mochi::experimental::GetSleepParams), mochi::experimental::SleepParams (*)(mochi::Scene const*, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::GetSleepParams is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// free function mochi::experimental::SetSleepParams
+static_assert(std::is_same_v<decltype(&mochi::experimental::SetSleepParams), void (*)(mochi::Scene*, mochi::experimental::SleepParams const&, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::SetSleepParams is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
 // free function mochi::experimental::GetDebugStats
 static_assert(std::is_same_v<decltype(&mochi::experimental::GetDebugStats), mochi::experimental::DebugStats (*)(mochi::Scene const*, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::GetDebugStats is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// free function mochi::experimental::IsRecording
+static_assert(std::is_same_v<decltype(&mochi::experimental::IsRecording), bool (*)(mochi::Scene const*, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::IsRecording is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// free function mochi::experimental::StartRecording
+static_assert(std::is_same_v<decltype(&mochi::experimental::StartRecording), void (*)(mochi::Scene*, std::string_view, mochi::experimental::RecordingParams const&, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::StartRecording is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+
+// free function mochi::experimental::StopRecording
+static_assert(std::is_same_v<decltype(&mochi::experimental::StopRecording), void (*)(mochi::Scene*, mochi::Error&)>, "\n  ERROR: Function mochi::experimental::StopRecording is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 #if MOCHI_INTERNAL
 
 // struct mochi::experimental::OperationalSpaceControllerParams
@@ -644,9 +698,6 @@ static_assert(std::is_same_v<decltype(&mochi::diffsim::PrepareBackPropagate), vo
 
 // free function mochi::diffsim::BackPropagate
 static_assert(std::is_same_v<decltype(&mochi::diffsim::BackPropagate), void (*)(mochi::Scene*, mochi::Error&)>, "\n  ERROR: Function mochi::diffsim::BackPropagate is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
-
-// free function mochi::diffsim::GetStepJacobian
-static_assert(std::is_same_v<decltype(&mochi::diffsim::GetStepJacobian), void (*)(mochi::Scene*, mochi::StateHandle, mochi::StateHandle, mochi::StateHandle, mochi::Span<mochi::real>, mochi::Span<mochi::real>, mochi::Error&)>, "\n  ERROR: Function mochi::diffsim::GetStepJacobian is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 
 // free function mochi::diffsim::ConvertRigidGradientLieToRotationVector
 static_assert(std::is_same_v<decltype(&mochi::diffsim::ConvertRigidGradientLieToRotationVector), void (*)(mochi::TransformRT const&, mochi::Span<mochi::real>, mochi::Error&)>, "\n  ERROR: Function mochi::diffsim::ConvertRigidGradientLieToRotationVector is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -769,14 +820,16 @@ static_assert(static_cast<int>(mochi::QueryType::SurfaceNodePositions) == 2, "\n
 static_assert(static_cast<int>(mochi::QueryType::SurfaceNodeNormals) == 3, "\n  ERROR: enum value mochi::QueryType::SurfaceNodeNormals is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
 static_assert(static_cast<int>(mochi::QueryType::VisualNodePositions) == 4, "\n  ERROR: enum value mochi::QueryType::VisualNodePositions is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
 static_assert(static_cast<int>(mochi::QueryType::VisualNodeNormals) == 5, "\n  ERROR: enum value mochi::QueryType::VisualNodeNormals is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::ContactPoints) == 6, "\n  ERROR: enum value mochi::QueryType::ContactPoints is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::ElasticEnergy) == 7, "\n  ERROR: enum value mochi::QueryType::ElasticEnergy is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::NodeContactForces) == 8, "\n  ERROR: enum value mochi::QueryType::NodeContactForces is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::ConstraintForce) == 9, "\n  ERROR: enum value mochi::QueryType::ConstraintForce is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::ArticulatedControllerForce) == 10, "\n  ERROR: enum value mochi::QueryType::ArticulatedControllerForce is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::SdfDistances) == 11, "\n  ERROR: enum value mochi::QueryType::SdfDistances is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::TotalContactForce) == 12, "\n  ERROR: enum value mochi::QueryType::TotalContactForce is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
-static_assert(static_cast<int>(mochi::QueryType::Count) == 13, "\n  ERROR: enum value mochi::QueryType::Count is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::ContactSkinNodePositions) == 6, "\n  ERROR: enum value mochi::QueryType::ContactSkinNodePositions is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::ContactSkinNodeNormals) == 7, "\n  ERROR: enum value mochi::QueryType::ContactSkinNodeNormals is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::ContactPoints) == 8, "\n  ERROR: enum value mochi::QueryType::ContactPoints is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::ElasticEnergy) == 9, "\n  ERROR: enum value mochi::QueryType::ElasticEnergy is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::NodeContactForces) == 10, "\n  ERROR: enum value mochi::QueryType::NodeContactForces is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::ConstraintForce) == 11, "\n  ERROR: enum value mochi::QueryType::ConstraintForce is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::ArticulatedControllerForce) == 12, "\n  ERROR: enum value mochi::QueryType::ArticulatedControllerForce is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::SdfDistances) == 13, "\n  ERROR: enum value mochi::QueryType::SdfDistances is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::TotalContactForce) == 14, "\n  ERROR: enum value mochi::QueryType::TotalContactForce is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
+static_assert(static_cast<int>(mochi::QueryType::Count) == 15, "\n  ERROR: enum value mochi::QueryType::Count is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
 
 // enum mochi::IncludeNestedActors
 static_assert(static_cast<int>(mochi::IncludeNestedActors::No) == 0, "\n  ERROR: enum value mochi::IncludeNestedActors::No is out-of-sync with C++.\n  Please check the enum definition, then run mochi_gen_py to regenerate this file.\n");
@@ -797,6 +850,13 @@ static_assert(std::is_same_v<decltype(&mochi::RecenteringParams::translationEpsi
 // struct mochi::BoundarySubsamplingParams
 static_assert(std::is_same_v<decltype(&mochi::BoundarySubsamplingParams::subsamplingDensity), mochi::real mochi::BoundarySubsamplingParams::*>, "\n  ERROR: Field mochi::BoundarySubsamplingParams::subsamplingDensity is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::BoundarySubsamplingParams::strategy), mochi::BoundarySubsamplingStrategy mochi::BoundarySubsamplingParams::*>, "\n  ERROR: Field mochi::BoundarySubsamplingParams::strategy is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+
+// struct mochi::ContactPairParamsOverride
+static_assert(std::is_same_v<decltype(&mochi::ContactPairParamsOverride::penaltyCoefficient), std::optional<mochi::real> mochi::ContactPairParamsOverride::*>, "\n  ERROR: Field mochi::ContactPairParamsOverride::penaltyCoefficient is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::ContactPairParamsOverride::frictionFalloffVel), std::optional<mochi::real> mochi::ContactPairParamsOverride::*>, "\n  ERROR: Field mochi::ContactPairParamsOverride::frictionFalloffVel is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::ContactPairParamsOverride::viscousFrictionCoefficient), std::optional<mochi::real> mochi::ContactPairParamsOverride::*>, "\n  ERROR: Field mochi::ContactPairParamsOverride::viscousFrictionCoefficient is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::ContactPairParamsOverride::coulombFrictionCoefficient), std::optional<mochi::real> mochi::ContactPairParamsOverride::*>, "\n  ERROR: Field mochi::ContactPairParamsOverride::coulombFrictionCoefficient is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::ContactPairParamsOverride::normalViscousDampingCoefficient), std::optional<mochi::real> mochi::ContactPairParamsOverride::*>, "\n  ERROR: Field mochi::ContactPairParamsOverride::normalViscousDampingCoefficient is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::ArticulatedShapeInfo
 static_assert(std::is_same_v<decltype(&mochi::ArticulatedShapeInfo::rootFromLinksAtRest), mochi::Span<mochi::TransformRT const> mochi::ArticulatedShapeInfo::*>, "\n  ERROR: Field mochi::ArticulatedShapeInfo::rootFromLinksAtRest is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -845,6 +905,7 @@ static_assert(std::is_same_v<decltype(&mochi::SoftActorParams::contact), mochi::
 static_assert(std::is_same_v<decltype(&mochi::SoftActorParams::hasGravity), bool mochi::SoftActorParams::*>, "\n  ERROR: Field mochi::SoftActorParams::hasGravity is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::SoftActorParams::hasInertia), bool mochi::SoftActorParams::*>, "\n  ERROR: Field mochi::SoftActorParams::hasInertia is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::SoftActorParams::hasStress), bool mochi::SoftActorParams::*>, "\n  ERROR: Field mochi::SoftActorParams::hasStress is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::SoftActorParams::useContactSkin), bool mochi::SoftActorParams::*>, "\n  ERROR: Field mochi::SoftActorParams::useContactSkin is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::SoftActorParams::boundaryElementType), mochi::ActorBoundaryElementType mochi::SoftActorParams::*>, "\n  ERROR: Field mochi::SoftActorParams::boundaryElementType is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::ArticulatedJointParams
@@ -881,6 +942,7 @@ static_assert(std::is_same_v<decltype(&mochi::ArticulatedSkinParams::layer), moc
 static_assert(std::is_same_v<decltype(&mochi::ArticulatedSkinParams::contact), mochi::ContactParams mochi::ArticulatedSkinParams::*>, "\n  ERROR: Field mochi::ArticulatedSkinParams::contact is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ArticulatedSkinParams::boundaryElementType), mochi::ActorBoundaryElementType mochi::ArticulatedSkinParams::*>, "\n  ERROR: Field mochi::ArticulatedSkinParams::boundaryElementType is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::ArticulatedSkinParams::boundarySubsampling), std::optional<mochi::BoundarySubsamplingParams> mochi::ArticulatedSkinParams::*>, "\n  ERROR: Field mochi::ArticulatedSkinParams::boundarySubsampling is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::ArticulatedSkinParams::nonCollidingLinks), std::optional<mochi::DynamicArray<mochi::DynamicString>> mochi::ArticulatedSkinParams::*>, "\n  ERROR: Field mochi::ArticulatedSkinParams::nonCollidingLinks is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
 // struct mochi::ArticulatedCycleJointParams
 static_assert(std::is_same_v<decltype(&mochi::ArticulatedCycleJointParams::parentLink), int mochi::ArticulatedCycleJointParams::*>, "\n  ERROR: Field mochi::ArticulatedCycleJointParams::parentLink is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -1049,18 +1111,6 @@ static_assert(std::is_same_v<decltype(&mochi::SolverStats::residualNorm), double
 static_assert(std::is_same_v<decltype(&mochi::SolverStats::maxLineSearchIters), int mochi::SolverStats::*>, "\n  ERROR: Field mochi::SolverStats::maxLineSearchIters is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::SolverStats::convergenceStatus), mochi::ConvergenceStatus mochi::SolverStats::*>, "\n  ERROR: Field mochi::SolverStats::convergenceStatus is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 
-// struct mochi::RecordingParams
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordActorMeshes), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordActorMeshes is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordActorLocalToGlobalMap), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordActorLocalToGlobalMap is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordActorMassMatrix), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordActorMassMatrix is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordTargetState), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordTargetState is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordDynamicActorState), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordDynamicActorState is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordStaticActorState), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordStaticActorState is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordContactPoints), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordContactPoints is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordNodeContactForces), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordNodeContactForces is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::recordSdfDistances), bool mochi::RecordingParams::*>, "\n  ERROR: Field mochi::RecordingParams::recordSdfDistances is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::RecordingParams::All), mochi::RecordingParams (*)(bool)>, "\n  ERROR: Function mochi::RecordingParams::All is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
-
 // struct mochi::PoseTrackingParams
 static_assert(std::is_same_v<decltype(&mochi::PoseTrackingParams::stiffness), mochi::real mochi::PoseTrackingParams::*>, "\n  ERROR: Field mochi::PoseTrackingParams::stiffness is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::PoseTrackingParams::damping), mochi::real mochi::PoseTrackingParams::*>, "\n  ERROR: Field mochi::PoseTrackingParams::damping is out-of-sync with C++ definition.\n  Please check the field type, then run mochi_gen_py to regenerate this file.\n");
@@ -1125,6 +1175,7 @@ static_assert(std::is_same_v<decltype(&mochi::Context::CreateSphereShape), mochi
 static_assert(std::is_same_v<decltype(&mochi::Context::CreatePlaneShape), mochi::ShapeHandle (mochi::Context::*)(mochi::Real3 const&, mochi::real, mochi::Error&)>, "\n  ERROR: Function mochi::Context::CreatePlaneShape is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Context::GetShapeMesh), mochi::MeshDataView (mochi::Context::*)(mochi::ShapeHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Context::GetShapeMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Context::GetShapeSurfaceMesh), mochi::MeshDataView (mochi::Context::*)(mochi::ShapeHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Context::GetShapeSurfaceMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Context::GetShapeContactSkinMesh), mochi::MeshDataView (mochi::Context::*)(mochi::ShapeHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Context::GetShapeContactSkinMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Context::GetShapeVisualMesh), mochi::MeshDataView (mochi::Context::*)(mochi::ShapeHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Context::GetShapeVisualMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Context::GetShapeAabb), mochi::Aabb (mochi::Context::*)(mochi::ShapeHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Context::GetShapeAabb is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Context::GetArticulatedShapeInfo), mochi::ArticulatedShapeInfo (mochi::Context::*)(mochi::ShapeHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Context::GetArticulatedShapeInfo is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -1189,6 +1240,7 @@ static_assert(std::is_same_v<decltype(&mochi::Actor::SetSoftMaterialParams), voi
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetMesh), mochi::MeshDataView (mochi::Actor::*)() const>, "\n  ERROR: Function mochi::Actor::GetMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetSurfaceMesh), mochi::MeshDataView (mochi::Actor::*)() const>, "\n  ERROR: Function mochi::Actor::GetSurfaceMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetVisualMesh), mochi::MeshDataView (mochi::Actor::*)() const>, "\n  ERROR: Function mochi::Actor::GetVisualMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Actor::GetContactSkinMesh), mochi::MeshDataView (mochi::Actor::*)() const>, "\n  ERROR: Function mochi::Actor::GetContactSkinMesh is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetSurfaceMeshNodePositionsLocal), mochi::Span<mochi::real const> (mochi::Actor::*)(mochi::Error&) const>, "\n  ERROR: Function mochi::Actor::GetSurfaceMeshNodePositionsLocal is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetSurfaceMeshNodeNormalsLocal), mochi::Span<mochi::real const> (mochi::Actor::*)(mochi::Error&) const>, "\n  ERROR: Function mochi::Actor::GetSurfaceMeshNodeNormalsLocal is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetReferenceShape), mochi::ShapeHandle (mochi::Actor::*)(mochi::Error&) const>, "\n  ERROR: Function mochi::Actor::GetReferenceShape is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -1209,6 +1261,8 @@ static_assert(std::is_same_v<decltype(&mochi::Actor::SetNodePositionsLocal), voi
 static_assert(std::is_same_v<decltype(&mochi::Actor::SetNodeVelocitiesLocal), void (mochi::Actor::*)(mochi::Span<mochi::real const>, mochi::Error&)>, "\n  ERROR: Function mochi::Actor::SetNodeVelocitiesLocal is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetVisualMeshNodePositionsLocal), mochi::Span<mochi::real const> (mochi::Actor::*)(mochi::Error&) const>, "\n  ERROR: Function mochi::Actor::GetVisualMeshNodePositionsLocal is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetVisualMeshNodeNormalsLocal), mochi::Span<mochi::real const> (mochi::Actor::*)(mochi::Error&) const>, "\n  ERROR: Function mochi::Actor::GetVisualMeshNodeNormalsLocal is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Actor::GetContactSkinMeshNodePositionsLocal), mochi::Span<mochi::real const> (mochi::Actor::*)(mochi::Error&) const>, "\n  ERROR: Function mochi::Actor::GetContactSkinMeshNodePositionsLocal is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Actor::GetContactSkinMeshNodeNormalsLocal), mochi::Span<mochi::real const> (mochi::Actor::*)(mochi::Error&) const>, "\n  ERROR: Function mochi::Actor::GetContactSkinMeshNodeNormalsLocal is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetBoundaryConditionDofIndices), mochi::Span<int const> (mochi::Actor::*)() const>, "\n  ERROR: Function mochi::Actor::GetBoundaryConditionDofIndices is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::GetBoundaryConditionDofValuesWorld), mochi::Span<mochi::real const> (mochi::Actor::*)() const>, "\n  ERROR: Function mochi::Actor::GetBoundaryConditionDofValuesWorld is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Actor::AddBoundaryConditionDofsWorld), void (mochi::Actor::*)(mochi::Span<int const>, mochi::Span<mochi::real const>, mochi::Error&)>, "\n  ERROR: Function mochi::Actor::AddBoundaryConditionDofsWorld is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -1358,9 +1412,6 @@ static_assert(std::is_same_v<decltype(static_cast<void (mochi::Scene::*)(std::fu
 static_assert(std::is_same_v<decltype(static_cast<mochi::DebugDraw& (mochi::Scene::*)()>(&mochi::Scene::GetDebugDraw)), mochi::DebugDraw& (mochi::Scene::*)()>, "\n  ERROR: Function mochi::Scene::GetDebugDraw is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(static_cast<mochi::DebugDraw const& (mochi::Scene::*)() const>(&mochi::Scene::GetDebugDraw)), mochi::DebugDraw const& (mochi::Scene::*)() const>, "\n  ERROR: Function mochi::Scene::GetDebugDraw is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::UpdateDebugger), void (mochi::Scene::*)()>, "\n  ERROR: Function mochi::Scene::UpdateDebugger is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::Scene::IsRecording), bool (mochi::Scene::*)() const>, "\n  ERROR: Function mochi::Scene::IsRecording is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::Scene::StartRecording), void (mochi::Scene::*)(std::string_view, mochi::RecordingParams const&, mochi::Error&)>, "\n  ERROR: Function mochi::Scene::StartRecording is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
-static_assert(std::is_same_v<decltype(&mochi::Scene::StopRecording), void (mochi::Scene::*)()>, "\n  ERROR: Function mochi::Scene::StopRecording is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::EnableLayerContactAsymmetric), void (mochi::Scene::*)(std::string_view, std::string_view, bool, mochi::Error&)>, "\n  ERROR: Function mochi::Scene::EnableLayerContactAsymmetric is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::EnableLayerContactSymmetric), void (mochi::Scene::*)(std::string_view, std::string_view, bool, mochi::Error&)>, "\n  ERROR: Function mochi::Scene::EnableLayerContactSymmetric is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::IsLayerContactEnabled), bool (mochi::Scene::*)(std::string_view, std::string_view) const>, "\n  ERROR: Function mochi::Scene::IsLayerContactEnabled is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -1368,6 +1419,10 @@ static_assert(std::is_same_v<decltype(&mochi::Scene::GetNumContactLayers), int (
 static_assert(std::is_same_v<decltype(&mochi::Scene::EnumerateContactLayerNames), void (mochi::Scene::*)(std::function<void(std::string_view)> const&) const>, "\n  ERROR: Function mochi::Scene::EnumerateContactLayerNames is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::EnableActorContactAsymmetric), void (mochi::Scene::*)(mochi::ActorHandle, mochi::ActorHandle, bool, mochi::IncludeNestedActors, mochi::Error&)>, "\n  ERROR: Function mochi::Scene::EnableActorContactAsymmetric is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::EnableActorContactSymmetric), void (mochi::Scene::*)(mochi::ActorHandle, mochi::ActorHandle, bool, mochi::IncludeNestedActors, mochi::Error&)>, "\n  ERROR: Function mochi::Scene::EnableActorContactSymmetric is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Scene::SetContactPairParamsOverride), void (mochi::Scene::*)(mochi::ActorHandle, mochi::ActorHandle, mochi::ContactPairParamsOverride const&, mochi::Error&)>, "\n  ERROR: Function mochi::Scene::SetContactPairParamsOverride is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Scene::ClearContactPairParamsOverride), void (mochi::Scene::*)(mochi::ActorHandle, mochi::ActorHandle, mochi::Error&)>, "\n  ERROR: Function mochi::Scene::ClearContactPairParamsOverride is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Scene::HasContactPairParamsOverride), bool (mochi::Scene::*)(mochi::ActorHandle, mochi::ActorHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Scene::HasContactPairParamsOverride is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
+static_assert(std::is_same_v<decltype(&mochi::Scene::GetContactPairParamsOverride), mochi::ContactPairParamsOverride (mochi::Scene::*)(mochi::ActorHandle, mochi::ActorHandle, mochi::Error&) const>, "\n  ERROR: Function mochi::Scene::GetContactPairParamsOverride is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::RegisterPreStepCallback), mochi::CallbackHandle (mochi::Scene::*)(std::string_view, std::function<void(mochi::StepInfo const&)>, int)>, "\n  ERROR: Function mochi::Scene::RegisterPreStepCallback is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::RegisterPostStepCallback), mochi::CallbackHandle (mochi::Scene::*)(std::string_view, std::function<void(mochi::StepInfo const&)>, int)>, "\n  ERROR: Function mochi::Scene::RegisterPostStepCallback is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
 static_assert(std::is_same_v<decltype(&mochi::Scene::CancelCallback), void (mochi::Scene::*)(mochi::CallbackHandle)>, "\n  ERROR: Function mochi::Scene::CancelCallback is out-of-sync with C++.\n  Please check the function signature, then run mochi_gen_py to regenerate this file.\n");
@@ -1416,7 +1471,7 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   }
   {
     mochi::prefab::SoftActorPrefab params{};
-    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::None), "DSL default value for SoftActorPrefab::colliderType doesn't match C++ default. DSL says None, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::None), "DSL default value for SoftActorPrefab::colliderType doesn't match C++ default. DSL says ColliderType::None, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.useRecentering == bool(true)), "DSL default value for SoftActorPrefab::useRecentering doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.scale == mochi::Real3{1.0_r, 1.0_r, 1.0_r}), "DSL default value for SoftActorPrefab::scale doesn't match C++ default. DSL says kReal3Ones, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.renderModelScale == mochi::Real3{1.0_r, 1.0_r, 1.0_r}), "DSL default value for SoftActorPrefab::renderModelScale doesn't match C++ default. DSL says kReal3Ones, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -1460,6 +1515,10 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
     MOCHI_ASSERT((params.applySceneSettings == bool(true)), "DSL default value for PrefabParams::applySceneSettings doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
+    mochi::prefab::ExportParams params{};
+    MOCHI_ASSERT((params.exportCurrentPose == bool(false)), "DSL default value for ExportParams::exportCurrentPose doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
     mochi::experimental::DisplacementControlActuatorParams params{};
     MOCHI_ASSERT_EQ(params.targetDisplacement, 0.0_r, "DSL default value for DisplacementControlActuatorParams::targetDisplacement doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.stiffness, 1e9_r, "DSL default value for DisplacementControlActuatorParams::stiffness doesn't match C++ default. DSL says 1e9, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -1474,7 +1533,7 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   {
     mochi::experimental::IKSolverParams params{};
     MOCHI_ASSERT((params.maxIter == int(20)), "DSL default value for IKSolverParams::maxIter doesn't match C++ default. DSL says 20, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for IKSolverParams::verbosity doesn't match C++ default. DSL says Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for IKSolverParams::verbosity doesn't match C++ default. DSL says VerbosityLevel::Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.absTol, 0.01_r, "DSL default value for IKSolverParams::absTol doesn't match C++ default. DSL says 0.01, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.relTol, 1e-8_r, "DSL default value for IKSolverParams::relTol doesn't match C++ default. DSL says 1e-8, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.positionErrorThres, 0.01_r, "DSL default value for IKSolverParams::positionErrorThres doesn't match C++ default. DSL says 0.01, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -1484,7 +1543,7 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   }
   {
     mochi::experimental::ExperimentalSoftActorParams params{};
-    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::None), "DSL default value for ExperimentalSoftActorParams::colliderType doesn't match C++ default. DSL says None, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::None), "DSL default value for ExperimentalSoftActorParams::colliderType doesn't match C++ default. DSL says ColliderType::None, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.useRecentering == bool(true)), "DSL default value for ExperimentalSoftActorParams::useRecentering doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
@@ -1506,11 +1565,11 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   }
   {
     mochi::experimental::RodActorParams params{};
-    MOCHI_ASSERT((params.contactElementType == mochi::ActorSegmentElementType::Default), "DSL default value for RodActorParams::contactElementType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::None), "DSL default value for RodActorParams::colliderType doesn't match C++ default. DSL says None, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.contactElementType == mochi::ActorSegmentElementType::Default), "DSL default value for RodActorParams::contactElementType doesn't match C++ default. DSL says ActorSegmentElementType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::None), "DSL default value for RodActorParams::colliderType doesn't match C++ default. DSL says ColliderType::None, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.hasGravity == bool(true)), "DSL default value for RodActorParams::hasGravity doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.useVisualMeshContact == bool(false)), "DSL default value for RodActorParams::useVisualMeshContact doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.visualMeshContactElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for RodActorParams::visualMeshContactElementType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.useContactSkin == bool(false)), "DSL default value for RodActorParams::useContactSkin doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.contactSkinElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for RodActorParams::contactSkinElementType doesn't match C++ default. DSL says ActorBoundaryElementType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::experimental::ShellMaterialParams params{};
@@ -1521,12 +1580,31 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
     MOCHI_ASSERT_EQ(params.density, 1.0_r, "DSL default value for ShellMaterialParams::density doesn't match C++ default. DSL says 1.0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.massDampingCoefficient, 0.0_r, "DSL default value for ShellMaterialParams::massDampingCoefficient doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.stiffnessDampingCoefficient, 0.0_r, "DSL default value for ShellMaterialParams::stiffnessDampingCoefficient doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.membraneCollapseBarrierScale, 0.001_r, "DSL default value for ShellMaterialParams::membraneCollapseBarrierScale doesn't match C++ default. DSL says 0.001, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::experimental::ShellActorParams params{};
-    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::PointCloud), "DSL default value for ShellActorParams::colliderType doesn't match C++ default. DSL says PointCloud, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::PointCloud), "DSL default value for ShellActorParams::colliderType doesn't match C++ default. DSL says ColliderType::PointCloud, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.hasGravity == bool(true)), "DSL default value for ShellActorParams::hasGravity doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.contactElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for ShellActorParams::contactElementType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.contactElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for ShellActorParams::contactElementType doesn't match C++ default. DSL says ActorBoundaryElementType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.useContactSkin == bool(false)), "DSL default value for ShellActorParams::useContactSkin doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::experimental::SleepParams params{};
+    MOCHI_ASSERT((params.canSleep == bool(false)), "DSL default value for SleepParams::canSleep doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.sleepThreshold, 0.5, "DSL default value for SleepParams::sleepThreshold doesn't match C++ default. DSL says 0.5, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.minStepsBeforeSleep == int(20)), "DSL default value for SleepParams::minStepsBeforeSleep doesn't match C++ default. DSL says 20, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::experimental::RecordingParams params{};
+    MOCHI_ASSERT((params.recordActorMeshes == bool(true)), "DSL default value for RecordingParams::recordActorMeshes doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.recordActorLocalToGlobalMap == bool(false)), "DSL default value for RecordingParams::recordActorLocalToGlobalMap doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.recordTargetState == bool(true)), "DSL default value for RecordingParams::recordTargetState doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.recordDynamicActorState == bool(true)), "DSL default value for RecordingParams::recordDynamicActorState doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.recordStaticActorState == bool(false)), "DSL default value for RecordingParams::recordStaticActorState doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.recordContactPoints == bool(false)), "DSL default value for RecordingParams::recordContactPoints doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.recordNodeContactForces == bool(false)), "DSL default value for RecordingParams::recordNodeContactForces doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.recordSdfDistances == bool(false)), "DSL default value for RecordingParams::recordSdfDistances doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
 #if MOCHI_INTERNAL
   {
@@ -1548,19 +1626,19 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
     MOCHI_ASSERT((params.maxIter == int(1)), "DSL default value for OperationalSpaceControllerParams::maxIter doesn't match C++ default. DSL says 1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.torqueRelTol, 0.01_r, "DSL default value for OperationalSpaceControllerParams::torqueRelTol doesn't match C++ default. DSL says 0.01, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.resAbsTol, 0.01_r, "DSL default value for OperationalSpaceControllerParams::resAbsTol doesn't match C++ default. DSL says 0.01, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for OperationalSpaceControllerParams::verbosity doesn't match C++ default. DSL says Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for OperationalSpaceControllerParams::verbosity doesn't match C++ default. DSL says VerbosityLevel::Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
 #endif // MOCHI_INTERNAL
   {
     mochi::diffsim::BackPropagationSolverParams params{};
-    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for BackPropagationSolverParams::verbosity doesn't match C++ default. DSL says Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.verbosity == mochi::VerbosityLevel::Warning), "DSL default value for BackPropagationSolverParams::verbosity doesn't match C++ default. DSL says VerbosityLevel::Warning, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.useNewtonOuterSolver == bool(false)), "DSL default value for BackPropagationSolverParams::useNewtonOuterSolver doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.outerSolverMaxIter == int(10)), "DSL default value for BackPropagationSolverParams::outerSolverMaxIter doesn't match C++ default. DSL says 10, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.outerSolverAbsTol, 0.001_r, "DSL default value for BackPropagationSolverParams::outerSolverAbsTol doesn't match C++ default. DSL says 0.001, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.outerSolverRelTol, 1e-10_r, "DSL default value for BackPropagationSolverParams::outerSolverRelTol doesn't match C++ default. DSL says 1e-10, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.outerSolverConvergenceMode == mochi::NonLinearSolverConvergenceMode::Global), "DSL default value for BackPropagationSolverParams::outerSolverConvergenceMode doesn't match C++ default. DSL says Global, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.outerSolverConvergenceMode == mochi::NonLinearSolverConvergenceMode::Global), "DSL default value for BackPropagationSolverParams::outerSolverConvergenceMode doesn't match C++ default. DSL says NonLinearSolverConvergenceMode::Global, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.innerSolverAbsTol, 1e-10_r, "DSL default value for BackPropagationSolverParams::innerSolverAbsTol doesn't match C++ default. DSL says 1e-10, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT_EQ(params.epsFiniteDiff, mochi::kDefaultBackPropagationEpsFiniteDiff, "DSL default value for BackPropagationSolverParams::epsFiniteDiff doesn't match C++ default. DSL says kDefaultBackPropagationEpsFiniteDiff, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.epsFiniteDiff == mochi::kDefaultBackPropagationEpsFiniteDiff), "DSL default value for BackPropagationSolverParams::epsFiniteDiff doesn't match C++ default. DSL says kDefaultBackPropagationEpsFiniteDiff, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.validateFiniteDiff == bool(false)), "DSL default value for BackPropagationSolverParams::validateFiniteDiff doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
@@ -1573,7 +1651,10 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   }
   {
     mochi::SolverParams params{};
-    MOCHI_ASSERT((params.integrationMethod == mochi::IntegrationMethod::Default), "DSL default value for SolverParams::integrationMethod doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.nonLinearSolver == mochi::NonLinearSolverParams{}), "DSL default value for SolverParams::nonLinearSolver doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.linearSolver == mochi::LinearSolverParams{}), "DSL default value for SolverParams::linearSolver doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.integrationMethod == mochi::IntegrationMethod::Default), "DSL default value for SolverParams::integrationMethod doesn't match C++ default. DSL says IntegrationMethod::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.experimentalEval == mochi::ExperimentalEvalParams{}), "DSL default value for SolverParams::experimentalEval doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::RecenteringParams params{};
@@ -1584,25 +1665,32 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   {
     mochi::BoundarySubsamplingParams params{};
     MOCHI_ASSERT_EQ(params.subsamplingDensity, 1.0_r, "DSL default value for BoundarySubsamplingParams::subsamplingDensity doesn't match C++ default. DSL says 1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.strategy == mochi::BoundarySubsamplingStrategy::UniformProbability), "DSL default value for BoundarySubsamplingParams::strategy doesn't match C++ default. DSL says UniformProbability, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.strategy == mochi::BoundarySubsamplingStrategy::UniformProbability), "DSL default value for BoundarySubsamplingParams::strategy doesn't match C++ default. DSL says BoundarySubsamplingStrategy::UniformProbability, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::StepInfo params{};
+    MOCHI_ASSERT((params.scene == nullptr), "DSL default value for StepInfo::scene doesn't match C++ default. DSL says nullptr, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.timeStepSec, 0.0, "DSL default value for StepInfo::timeStepSec doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::RigidActorParams params{};
-    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::Auto), "DSL default value for RigidActorParams::colliderType doesn't match C++ default. DSL says Auto, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::Auto), "DSL default value for RigidActorParams::colliderType doesn't match C++ default. DSL says ColliderType::Auto, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.isStatic == bool(false)), "DSL default value for RigidActorParams::isStatic doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.hasGravity == bool(true)), "DSL default value for RigidActorParams::hasGravity doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for RigidActorParams::boundaryElementType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for RigidActorParams::boundaryElementType doesn't match C++ default. DSL says ActorBoundaryElementType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::SoftActorParams params{};
+    MOCHI_ASSERT((params.material == mochi::SoftMaterialParams{}), "DSL default value for SoftActorParams::material doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.hasGravity == bool(true)), "DSL default value for SoftActorParams::hasGravity doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.hasInertia == bool(true)), "DSL default value for SoftActorParams::hasInertia doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.hasStress == bool(true)), "DSL default value for SoftActorParams::hasStress doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for SoftActorParams::boundaryElementType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.useContactSkin == bool(false)), "DSL default value for SoftActorParams::useContactSkin doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for SoftActorParams::boundaryElementType doesn't match C++ default. DSL says ActorBoundaryElementType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ArticulatedJointParams params{};
-    MOCHI_ASSERT((params.type == mochi::ArticulatedJointType::Invalid), "DSL default value for ArticulatedJointParams::type doesn't match C++ default. DSL says Invalid, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.type == mochi::ArticulatedJointType::Invalid), "DSL default value for ArticulatedJointParams::type doesn't match C++ default. DSL says ArticulatedJointType::Invalid, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.axis == mochi::Real3{}), "DSL default value for ArticulatedJointParams::axis doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.limitStiffness, 100.0_r, "DSL default value for ArticulatedJointParams::limitStiffness doesn't match C++ default. DSL says 100, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.limitDamping, 0.0_r, "DSL default value for ArticulatedJointParams::limitDamping doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -1610,18 +1698,19 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   {
     mochi::ArticulatedLinkParams params{};
     MOCHI_ASSERT((params.parentLink == int(-1)), "DSL default value for ArticulatedLinkParams::parentLink doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::Auto), "DSL default value for ArticulatedLinkParams::colliderType doesn't match C++ default. DSL says Auto, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.colliderType == mochi::ColliderType::Auto), "DSL default value for ArticulatedLinkParams::colliderType doesn't match C++ default. DSL says ColliderType::Auto, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.hasGravity == bool(true)), "DSL default value for ArticulatedLinkParams::hasGravity doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for ArticulatedLinkParams::boundaryElementType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for ArticulatedLinkParams::boundaryElementType doesn't match C++ default. DSL says ActorBoundaryElementType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ArticulatedSkinParams params{};
-    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for ArticulatedSkinParams::boundaryElementType doesn't match C++ default. DSL says Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.boundaryElementType == mochi::ActorBoundaryElementType::Default), "DSL default value for ArticulatedSkinParams::boundaryElementType doesn't match C++ default. DSL says ActorBoundaryElementType::Default, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ArticulatedCycleJointParams params{};
     MOCHI_ASSERT((params.parentLink == int(-1)), "DSL default value for ArticulatedCycleJointParams::parentLink doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.childLink == int(-1)), "DSL default value for ArticulatedCycleJointParams::childLink doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.jointFromChildLink == mochi::TransformRT{}), "DSL default value for ArticulatedCycleJointParams::jointFromChildLink doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.stiffness, 50000.0_r, "DSL default value for ArticulatedCycleJointParams::stiffness doesn't match C++ default. DSL says 50000, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
@@ -1638,44 +1727,100 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
     MOCHI_ASSERT_EQ(params.saturation, -1.0_r, "DSL default value for ConstraintParams::saturation doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
+    mochi::RigidSphericalJointConstraintParams params{};
+    MOCHI_ASSERT((params.localPosA == mochi::Real3{}), "DSL default value for RigidSphericalJointConstraintParams::localPosA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.localPosB == mochi::Real3{}), "DSL default value for RigidSphericalJointConstraintParams::localPosB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorA == mochi::ActorHandle{}), "DSL default value for RigidSphericalJointConstraintParams::actorA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorB == mochi::ActorHandle{}), "DSL default value for RigidSphericalJointConstraintParams::actorB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::RigidPrismaticJointConstraintParams params{};
+    MOCHI_ASSERT((params.freeAxis == mochi::Real3{}), "DSL default value for RigidPrismaticJointConstraintParams::freeAxis doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorA == mochi::ActorHandle{}), "DSL default value for RigidPrismaticJointConstraintParams::actorA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorB == mochi::ActorHandle{}), "DSL default value for RigidPrismaticJointConstraintParams::actorB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.max == std::optional<mochi::real>{}), "DSL default value for RigidPrismaticJointConstraintParams::max doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.min == std::optional<mochi::real>{}), "DSL default value for RigidPrismaticJointConstraintParams::min doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
     mochi::DeformableNodeToDeformableNodeConstraintParams params{};
     MOCHI_ASSERT((params.nodeIndexA == int(-1)), "DSL default value for DeformableNodeToDeformableNodeConstraintParams::nodeIndexA doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.nodeIndexB == int(-1)), "DSL default value for DeformableNodeToDeformableNodeConstraintParams::nodeIndexB doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorA == mochi::ActorHandle{}), "DSL default value for DeformableNodeToDeformableNodeConstraintParams::actorA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorB == mochi::ActorHandle{}), "DSL default value for DeformableNodeToDeformableNodeConstraintParams::actorB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.findClosest == bool(false)), "DSL default value for DeformableNodeToDeformableNodeConstraintParams::findClosest doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::RodElementRotationToRigidConstraintParams params{};
+    MOCHI_ASSERT((params.refFrameRotVec == mochi::Real3{}), "DSL default value for RodElementRotationToRigidConstraintParams::refFrameRotVec doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.rigidActor == mochi::ActorHandle{}), "DSL default value for RodElementRotationToRigidConstraintParams::rigidActor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.rodActor == mochi::ActorHandle{}), "DSL default value for RodElementRotationToRigidConstraintParams::rodActor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.elementIndex == int(0)), "DSL default value for RodElementRotationToRigidConstraintParams::elementIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::DeformableNodeToRigidConstraintParams params{};
+    MOCHI_ASSERT((params.rigidLocalPos == mochi::Real3{}), "DSL default value for DeformableNodeToRigidConstraintParams::rigidLocalPos doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.deformableNodeIndex == int(-1)), "DSL default value for DeformableNodeToRigidConstraintParams::deformableNodeIndex doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.rigidActor == mochi::ActorHandle{}), "DSL default value for DeformableNodeToRigidConstraintParams::rigidActor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.deformableActor == mochi::ActorHandle{}), "DSL default value for DeformableNodeToRigidConstraintParams::deformableActor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.findClosest == bool(false)), "DSL default value for DeformableNodeToRigidConstraintParams::findClosest doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.fixToDeformablePos == bool(true)), "DSL default value for DeformableNodeToRigidConstraintParams::fixToDeformablePos doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::JointRotationRangeConstraintParams params{};
+    MOCHI_ASSERT((params.refFrameRotVec == mochi::Real3{}), "DSL default value for JointRotationRangeConstraintParams::refFrameRotVec doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.angleRangeX == mochi::kMinus2PiPlus2Pi), "DSL default value for JointRotationRangeConstraintParams::angleRangeX doesn't match C++ default. DSL says kMinus2PiPlus2Pi, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.angleRangeY == mochi::kMinus2PiPlus2Pi), "DSL default value for JointRotationRangeConstraintParams::angleRangeY doesn't match C++ default. DSL says kMinus2PiPlus2Pi, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.angleRangeZ == mochi::kMinus2PiPlus2Pi), "DSL default value for JointRotationRangeConstraintParams::angleRangeZ doesn't match C++ default. DSL says kMinus2PiPlus2Pi, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorA == mochi::ActorHandle{}), "DSL default value for JointRotationRangeConstraintParams::actorA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorB == mochi::ActorHandle{}), "DSL default value for JointRotationRangeConstraintParams::actorB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.rangeAroundRest == bool(true)), "DSL default value for JointRotationRangeConstraintParams::rangeAroundRest doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::RigidPivotPositionConstraintParams params{};
+    MOCHI_ASSERT((params.targetPosition == mochi::Real3{}), "DSL default value for RigidPivotPositionConstraintParams::targetPosition doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.localPosition == mochi::Real3{}), "DSL default value for RigidPivotPositionConstraintParams::localPosition doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for RigidPivotPositionConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::RigidPivotToRigidTargetConstraintParams params{};
+    MOCHI_ASSERT((params.targetTransform == mochi::TransformRT{}), "DSL default value for RigidPivotToRigidTargetConstraintParams::targetTransform doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.localPosition == mochi::Real3{}), "DSL default value for RigidPivotToRigidTargetConstraintParams::localPosition doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for RigidPivotToRigidTargetConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::RigidPivotRotationConstraintParams params{};
+    MOCHI_ASSERT((params.targetRotation == mochi::Real3{}), "DSL default value for RigidPivotRotationConstraintParams::targetRotation doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.localRotation == mochi::Real3{}), "DSL default value for RigidPivotRotationConstraintParams::localRotation doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for RigidPivotRotationConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::DeformableNodePositionConstraintParams params{};
     MOCHI_ASSERT((params.nodeIndex == int(-1)), "DSL default value for DeformableNodePositionConstraintParams::nodeIndex doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.position == mochi::Real3{}), "DSL default value for DeformableNodePositionConstraintParams::position doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for DeformableNodePositionConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::JointRotationTrackingConstraintParams params{};
+    MOCHI_ASSERT((params.refFrameRotVec == mochi::Real3{}), "DSL default value for JointRotationTrackingConstraintParams::refFrameRotVec doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorA == mochi::ActorHandle{}), "DSL default value for JointRotationTrackingConstraintParams::actorA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorB == mochi::ActorHandle{}), "DSL default value for JointRotationTrackingConstraintParams::actorB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ArticulatedSingleDofTargetConstraintParams params{};
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for ArticulatedSingleDofTargetConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.jointIndex == int(0)), "DSL default value for ArticulatedSingleDofTargetConstraintParams::jointIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.dofIndex == int(0)), "DSL default value for ArticulatedSingleDofTargetConstraintParams::dofIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.targetValue, 0.0_r, "DSL default value for ArticulatedSingleDofTargetConstraintParams::targetValue doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::Articulated3dRotationTargetConstraintParams params{};
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for Articulated3dRotationTargetConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.jointIndex == int(0)), "DSL default value for Articulated3dRotationTargetConstraintParams::jointIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.target == mochi::Quaternion{}), "DSL default value for Articulated3dRotationTargetConstraintParams::target doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ArticulatedSingleDofRangeConstraintParams params{};
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for ArticulatedSingleDofRangeConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.jointIndex == int(0)), "DSL default value for ArticulatedSingleDofRangeConstraintParams::jointIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.dofIndex == int(0)), "DSL default value for ArticulatedSingleDofRangeConstraintParams::dofIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT_EQ(params.minValue, 0.0_r, "DSL default value for ArticulatedSingleDofRangeConstraintParams::minValue doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
@@ -1683,11 +1828,35 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   }
   {
     mochi::Articulated3dRotationRangeConstraintParams params{};
+    MOCHI_ASSERT((params.actor == mochi::ActorHandle{}), "DSL default value for Articulated3dRotationRangeConstraintParams::actor doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.jointIndex == int(0)), "DSL default value for Articulated3dRotationRangeConstraintParams::jointIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.minValues == mochi::Real3{}), "DSL default value for Articulated3dRotationRangeConstraintParams::minValues doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.maxValues == mochi::Real3{}), "DSL default value for Articulated3dRotationRangeConstraintParams::maxValues doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::ContactPoint params{};
+    MOCHI_ASSERT((params.actorA == mochi::ActorHandle{}), "DSL default value for ContactPoint::actorA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.actorB == mochi::ActorHandle{}), "DSL default value for ContactPoint::actorB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.distance, 0.0_r, "DSL default value for ContactPoint::distance doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.posA == mochi::Real3{}), "DSL default value for ContactPoint::posA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.posB == mochi::Real3{}), "DSL default value for ContactPoint::posB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.normal == mochi::Real3{}), "DSL default value for ContactPoint::normal doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.force == mochi::Real3{}), "DSL default value for ContactPoint::force doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.pointVelocityA == mochi::Real3{}), "DSL default value for ContactPoint::pointVelocityA doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.pointVelocityB == mochi::Real3{}), "DSL default value for ContactPoint::pointVelocityB doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.sampleIndex == int(0)), "DSL default value for ContactPoint::sampleIndex doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.intWeight, 0.0_r, "DSL default value for ContactPoint::intWeight doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.elementIndex == int(-1)), "DSL default value for ContactPoint::elementIndex doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.parametricCoords == mochi::Real3{}), "DSL default value for ContactPoint::parametricCoords doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::NodeContactForce params{};
+    MOCHI_ASSERT((params.index == int(0)), "DSL default value for NodeContactForce::index doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.force == mochi::Real3{}), "DSL default value for NodeContactForce::force doesn't match C++ default. DSL says {}, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::SdfDistances params{};
+    MOCHI_ASSERT_EQ(params.maxSdfFarDistanceEvaluation, 0.0_r, "DSL default value for SdfDistances::maxSdfFarDistanceEvaluation doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::AsyncStepParams params{};
@@ -1697,16 +1866,19 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
     MOCHI_ASSERT_EQ(params.dynamicTimeStepMaxSeconds, 0.01, "DSL default value for AsyncStepParams::dynamicTimeStepMaxSeconds doesn't match C++ default. DSL says 0.01, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
-    mochi::RecordingParams params{};
-    MOCHI_ASSERT((params.recordActorMeshes == bool(true)), "DSL default value for RecordingParams::recordActorMeshes doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordActorLocalToGlobalMap == bool(false)), "DSL default value for RecordingParams::recordActorLocalToGlobalMap doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordActorMassMatrix == bool(false)), "DSL default value for RecordingParams::recordActorMassMatrix doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordTargetState == bool(true)), "DSL default value for RecordingParams::recordTargetState doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordDynamicActorState == bool(true)), "DSL default value for RecordingParams::recordDynamicActorState doesn't match C++ default. DSL says true, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordStaticActorState == bool(false)), "DSL default value for RecordingParams::recordStaticActorState doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordContactPoints == bool(false)), "DSL default value for RecordingParams::recordContactPoints doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordNodeContactForces == bool(false)), "DSL default value for RecordingParams::recordNodeContactForces doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
-    MOCHI_ASSERT((params.recordSdfDistances == bool(false)), "DSL default value for RecordingParams::recordSdfDistances doesn't match C++ default. DSL says false, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    mochi::PerformanceStats params{};
+    MOCHI_ASSERT_EQ(params.totalStepDurationSec, 0.0, "DSL default value for PerformanceStats::totalStepDurationSec doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.solveStepDurationSec, 0.0, "DSL default value for PerformanceStats::solveStepDurationSec doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.preStepCallbacksDurationSec, 0.0, "DSL default value for PerformanceStats::preStepCallbacksDurationSec doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.postStepCallbacksDurationSec, 0.0, "DSL default value for PerformanceStats::postStepCallbacksDurationSec doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.recordingStepDurationSec, 0.0, "DSL default value for PerformanceStats::recordingStepDurationSec doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+  }
+  {
+    mochi::SolverStats params{};
+    MOCHI_ASSERT((params.maxNonLinearIters == int(0)), "DSL default value for SolverStats::maxNonLinearIters doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT_EQ(params.residualNorm, 0.0, "DSL default value for SolverStats::residualNorm doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.maxLineSearchIters == int(0)), "DSL default value for SolverStats::maxLineSearchIters doesn't match C++ default. DSL says 0, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.convergenceStatus == mochi::ConvergenceStatus::None), "DSL default value for SolverStats::convergenceStatus doesn't match C++ default. DSL says ConvergenceStatus::None, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }
   {
     mochi::PoseTrackingParams params{};
@@ -1716,7 +1888,7 @@ MOCHI_API void mochi::CheckPhysicsDslDefaultValues() {
   }
   {
     mochi::PoseConstraintInfo params{};
-    MOCHI_ASSERT((params.type == mochi::PoseConstraintType::Invalid), "DSL default value for PoseConstraintInfo::type doesn't match C++ default. DSL says Invalid, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
+    MOCHI_ASSERT((params.type == mochi::PoseConstraintType::Invalid), "DSL default value for PoseConstraintInfo::type doesn't match C++ default. DSL says PoseConstraintType::Invalid, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.link == int(-1)), "DSL default value for PoseConstraintInfo::link doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
     MOCHI_ASSERT((params.parent == int(-1)), "DSL default value for PoseConstraintInfo::parent doesn't match C++ default. DSL says -1, C++ has a different value. Please check the default value, then run mochi_gen_py to regenerate this file.")
   }

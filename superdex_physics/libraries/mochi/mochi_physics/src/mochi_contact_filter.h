@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include "mochi_contact.h"
 #include "mochi_ecs.h"
 
 #include <mochi_core/utils/container_utils.h>
@@ -45,7 +44,7 @@ enum class ContactLayerId : int { None = 0 };
  */
 struct CContactLayer : public NoCopy {
   ContactLayerId id = {};
-  std::string name; // kept for debugging
+  std::string name;
 };
 
 /**
@@ -129,14 +128,12 @@ struct CContactFilterTable : public NoCopy {
  * @brief Lookup a ContactLayerId by name. Return ContactLayerId::None if layerName is empty string
  * or not found.
  */
-MOCHI_API ContactLayerId
-GetContactLayerId(CContactFilterTable const& table, std::string_view layerName);
+ContactLayerId GetContactLayerId(CContactFilterTable const& table, std::string_view layerName);
 
 /**
  * @brief Lookup a ContactLayerId by name. Add it the first time (if not empty string).
  */
-MOCHI_API ContactLayerId
-GetOrAddContactLayerId(CContactFilterTable& table, std::string_view layerName);
+ContactLayerId GetOrAddContactLayerId(CContactFilterTable& table, std::string_view layerName);
 
 /**
  * @brief Emplace CContactLayer on the specified entity, and initialize it with

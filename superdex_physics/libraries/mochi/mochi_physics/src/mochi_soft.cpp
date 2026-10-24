@@ -103,6 +103,24 @@ void mochi::soft::EntityIncrementStep(
   currVel.value.SetZero(); // Reset current velocity to zero
 }
 
+void mochi::soft::EntityReconstructPreviousStep(
+    ecs::Included<TagSoftActor>,
+    ecs::Excluded<TagRomActor>,
+    ecs::CtxGlobal<CSceneTime const> time,
+    ecs::CtxGlobal<CSimulationParams const> simParams,
+    CDisplacementSlice<real, TimeStep::Current> const& currDispl,
+    CVelocitySlice<real, TimeStep::Current> const& currVel,
+    CIntegrationDisplacementSlices const& intDispls,
+    CIntegrationVelocitySlices<DisplacementLayer::Default> const& intVels,
+    CDisplacementSlice<real, TimeStep::Previous>& outPrevDispl,
+    CVelocitySlice<real, TimeStep::Previous>& outPrevVel) {
+  // Displacements and velocities are both differential variables.
+  auto const method = simParams->integrationMethod;
+  integration::ReconstructPreviousPoseFromHistoryOrExtrapolate(
+      method, time.value, intDispls, currDispl, currVel, outPrevDispl);
+  integration::ReconstructPreviousVelocityFromHistoryOrCopy(method, intVels, currVel, outPrevVel);
+}
+
 void mochi::soft::EntityPreFirstStage(
     ecs::Included<TagSoftActor>,
     ecs::Excluded<TagRomActor>,
@@ -207,15 +225,14 @@ void mochi::soft::AssembleBodyImpl(
     bool hasStress,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     TransformRT const& worldFromLocal,
     CSoftMaterialParams const& materialParams,
     CTimeIntegratorState const& intState,
     ColumnVectorView<real const> currDispl,
     ColumnVectorView<real const> stageStartDispl,
     ColumnVectorView<real const> stageStartVel,
-    CMassMatrix const& massMatrix,
+    CMassMatrix const* massMatrix,
     ActorSnle& outSnle,
     CActiveVolumeElements const* activeVolElems) {
   MOCHI_PROFILE_SCOPE();
@@ -225,12 +242,9 @@ void mochi::soft::AssembleBodyImpl(
       hasGravity || hasInertia || hasStress,
       "AssembleBodyImpl expects at least one body term. No-term cases must be filtered by the caller.");
 
-  // Damping scales. Mass damping requires inertia; stiffness damping requires stress. Mass damping
-  // is folded into the mass-matrix dresidual scale (alongside inertia), so it needs no per-element
-  // dresidual assembly.
+  // Damping scales. Mass damping requires inertia; stiffness damping requires stress.
   auto const dampingScales =
       soft::ComputeSoftDampingScales(materialParams, intState.dtStage, hasInertia, hasStress);
-  real const massScale = dampingScales.massScale;
   real const massDampingScale = dampingScales.massDampingScale;
   real const stiffnessDampingFactor = dampingScales.stiffnessDampingFactor;
   bool const includeStiffnessDampingGeometricTerm =
@@ -250,18 +264,24 @@ void mochi::soft::AssembleBodyImpl(
     // bandwidth, which is true in most architectures.
     // TODO: Limit max threads to the number of threads that saturate memory bandwidth.
     auto const numValues = GetNumValues(outSnle.fullDResidual);
+    // With inertia but no stress, the dresidual is the stored mass matrix scaled by
+    // 1/dt² + massDampingScale. It is copied rather than added element by element; the element loop
+    // runs only for the rest.
+    bool const copyMass = hasInertia && !hasStress;
+    real const massScale = 1_r / Sqr(intState.dtStage) + massDampingScale;
+    Span<real const> const massValues =
+        massMatrix ? MakeConstSpan(massMatrix->values) : Span<real const>{};
+    MOCHI_ASSERT(
+        !copyMass || isize(massValues) == numValues,
+        "A body with inertia but no stress needs a mass matrix of the dresidual's size.");
     constexpr int kMinValuesPerTask = 150000;
     ParallelForRange(
         "InitSoftDResidual", 0, numValues, kMinValuesPerTask, INT_MAX, [&](int rBegin, int rEnd) {
           MOCHI_ASSERT_VERBOSE(rBegin >= 0 && rBegin <= rEnd && rEnd <= numValues);
           ColumnVectorView<real> dresValues = AsView(GetValues(outSnle.fullDResidual));
-          if (massScale != 0_r) {
-            // Initialize the dresidual matrix by scaling the mass matrix (inertia + mass damping),
-            // instead of clearing it to zero. This eliminates the need to assemble the dresidual of
-            // the inertia and mass damping terms for each element.
-            MOCHI_ASSERT(dresValues.size() == massMatrix.values.size(), "Size mismatch.");
+          if (copyMass) {
             dresValues.MiddleRows(rBegin, rEnd - rBegin) =
-                massScale * AsView(MakeSpan(massMatrix.values)).MiddleRows(rBegin, rEnd - rBegin);
+                massScale * AsView(massValues).MiddleRows(rBegin, rEnd - rBegin);
           } else {
             dresValues.MiddleRows(rBegin, rEnd - rBegin).SetZero();
           }
@@ -269,9 +289,15 @@ void mochi::soft::AssembleBodyImpl(
   }
 
   AssemblyParams bodyParams = params;
-  bodyParams.assemDRes &= hasStress; // Only stress contributes to DRes
+  bodyParams.assemDRes &= hasStress; // Without stress, the dresidual is complete above.
   if (!bodyParams.assemObj && !bodyParams.assemRes && !bodyParams.assemDRes) {
     return;
+  }
+
+  // The elements gather the predicted target u₀ + dt·v₀, computed once per assembly.
+  ColumnVector<real> predTarget;
+  if (hasInertia && (bodyParams.assemObj || bodyParams.assemRes)) {
+    predTarget = stageStartDispl + intState.dtStage * stageStartVel;
   }
 
   AssemblyActiveSubset activeSubset = activeVolElems
@@ -286,8 +312,7 @@ void mochi::soft::AssembleBodyImpl(
       materialParams, [&]<typename ParamsT>(auto const& perElem) {
         auto batchedConstitutive = materials::MakeBatchedConstitutiveResponse<ParamsT>(perElem);
         auto bodyOp = MakeBatchedBodyOp(
-            MakeConstSpan(femLowVolDisc.femElements),
-            MakeConstSpan(femHighVolDisc.femElements),
+            MakeConstSpan(femVolDisc.femElements),
             batchedConstitutive,
             materialParams.referenceMaterialStiffness,
             hasStress,
@@ -295,8 +320,8 @@ void mochi::soft::AssembleBodyImpl(
             hasInertia,
             gravity,
             materialParams.density,
+            predTarget.GetConstSpan(),
             stageStartDispl.GetConstSpan(),
-            stageStartVel.GetConstSpan(),
             intState.dtStage,
             massDampingScale,
             stiffnessDampingFactor,
@@ -325,19 +350,18 @@ void mochi::soft::AssembleBody(
     ecs::OptionalTag<TagUseInertia> hasInertiaTag,
     ecs::OptionalTag<TagUseStress> hasStressTag,
     ecs::OptionalTag<TagRomActor> isRom,
-    [[maybe_unused]] ecs::OptionalTag<TagSoftSkinnedActor> isSkinned,
+    [[maybe_unused]] ecs::OptionalTag<TagNestedSoftActor> isNestedSoft,
     CSkinnedEnergy const& skinnedEnergy,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CFemVolumeDiscretizationP1Q1 const& femLowVolDisc,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CRootTransform const& rootTransform,
     CSoftMaterialParams const& materialParams,
     CTimeIntegratorState const& intState,
     CDisplacementSlice<real, TimeStep::Current> const& currDispl,
     CDisplacementSlice<real, TimeStep::StageStart> const& stageStartDispl,
     CVelocitySlice<real, TimeStep::StageStart> const& stageStartVel,
-    CMassMatrix const& massMatrix,
+    CMassMatrix const* massMatrix,
     CRomProjectionStrategy const* romProjectionStrategy,
     CActorSnle& outActorSnle,
     CActiveVolumeElements const* activeVolElems) {
@@ -350,10 +374,10 @@ void mochi::soft::AssembleBody(
       "Please update logic below if RomProjectionStrategy enum changes");
 
   if (!hasGravity && !hasInertia && !hasStress) {
-    // Only soft-skinned actors may reach here. Note their Dresidual in this case must NOT be
+    // Only nested soft actors may reach here. Note their Dresidual in this case must NOT be
     // modified in AssembleBodyImpl to prevent race conditions with skinned::EntityAssembleBody.
     MOCHI_ASSERT_VERBOSE(
-        isSkinned, "Only soft-skinned actors can assemble with no unposed body terms.");
+        isNestedSoft, "Only nested soft actors can assemble with no unposed body terms.");
     return;
   } else if (
       isRom &&
@@ -370,8 +394,7 @@ void mochi::soft::AssembleBody(
       hasStress,
       l2g,
       nbs,
-      femLowVolDisc,
-      femHighVolDisc,
+      femVolDisc,
       rootTransform.worldFromLocal,
       materialParams,
       intState,
@@ -388,7 +411,7 @@ void mochi::soft::AssembleAsyncContact(
     entt::entity e,
     ecs::Included<TagSoftActor, TagUseContact>,
     ecs::OptionalTag<TagRomActor> isRom,
-    ecs::Excluded<TagSoftSkinnedActor>,
+    ecs::Excluded<TagNestedSoftActor, TagUseDeformableContactSkin>,
     ecs::OptionalTag<TagQueryActiveContacts> queryActiveContacts,
     ecs::CtxGlobal<CSimulationParams const> simParams,
     CTimeIntegratorState const& intState,
@@ -398,7 +421,7 @@ void mochi::soft::AssembleAsyncContact(
     CBoundaryNodalBasedStructure const& bdNbs,
     CContactSamples<TimeStep::Current> const& samples,
     CColliderInfo const& colliderInfo,
-    CActiveCollisions<ContactType::Async, TimeStep::Current>& collisions,
+    CActiveCollisions</*kIsSync*/ false, TimeStep::Current>& collisions,
     CRootTransform const& rootTransform,
     CRomProjectionStrategy const* romProjectionStrategy,
     CDeformablePointAsyncCollisionsResponse& outResponse,
@@ -783,12 +806,12 @@ void mochi::soft::SetMaterialParamsField(
   std::visit(
       [&](auto const& baseP) {
         using P = std::decay_t<decltype(baseP)>;
-        auto const homogeneous = materials::BuildPerElementParams(baseP);
         auto& c = soft::details::GetMatchingPerElementParams<P>(outMaterial);
         auto const& p = soft::details::GetTypedMaterialParams<P>(materialParams);
 
         if constexpr (materials::kIsLameMaterial<P>) {
           if (isize(c) < numElements) {
+            auto const homogeneous = materials::BuildPerElementParams(baseP);
             c.mu.resize(numElements, homogeneous.mu[0]);
             c.lambda.resize(numElements, homogeneous.lambda[0]);
           }
@@ -798,11 +821,13 @@ void mochi::soft::SetMaterialParamsField(
           c.lambda[elementIndex] = lam;
         } else if constexpr (std::is_same_v<P, ArapMaterialParams>) {
           if (isize(c) < numElements) {
+            auto const homogeneous = materials::BuildPerElementParams(baseP);
             c.stiffness.resize(numElements, homogeneous.stiffness[0]);
           }
           c.stiffness[elementIndex] = p.stiffness;
         } else if constexpr (std::is_same_v<P, ActiveShapeTargetingArapMaterialParams>) {
           if (isize(c) < numElements) {
+            auto const homogeneous = materials::BuildPerElementParams(baseP);
             int const oldSize = isize(c);
             c.stiffness.resize(numElements, homogeneous.stiffness[0]);
             c.shapeTargetTensor.resize_noinit(numElements * 6);
@@ -816,6 +841,7 @@ void mochi::soft::SetMaterialParamsField(
         } else {
           static_assert(std::is_same_v<P, ActiveNeoHookeanMaterialParams>);
           if (isize(c) < numElements) {
+            auto const homogeneous = materials::BuildPerElementParams(baseP);
             c.lame.mu.resize(numElements, homogeneous.lame.mu[0]);
             c.lame.lambda.resize(numElements, homogeneous.lame.lambda[0]);
             c.aniso.alpha.resize(numElements, homogeneous.aniso.alpha[0]);
@@ -881,72 +907,68 @@ bool mochi::soft::IsMaterialParamsFieldCompatible(
 }
 
 void mochi::soft::UpdateSoftMass(
-    CActorSnle const& actorSnle,
+    CTetrahedralMesh const& mesh,
+    CSoftMaterialParams const& material,
+    CFemVolumeDiscretizationP1Q1 const& femVolDisc,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
-    CSoftMaterialParams const& material,
-    CFemVolumeDiscretizationP1Q4 const& femHighVolDisc,
-    CFullSparsityPattern const& sparsity,
-    CMassMatrix& outMassMatrix,
-    CPerElementMassMatrix<CFemVolumeDiscretizationP1Q4>& outPerElemMass,
+    CActorSnle const& actorSnle,
     CLumpedMassMatrix& outLumpedMass,
+    CMassMatrix* outMassMatrix,
     CActiveVolumeElements const* activeVolElems) {
   MOCHI_PROFILE_SCOPE();
-
-  // Wrap the mass matrix values in a BlockSparseMatrixView.
-  MOCHI_ASSERT_VERBOSE(
-      (std::holds_alternative<BlockSparseMatrix<real, 3>>(actorSnle.fullDResidual)),
-      "Expected block sparse actor matrix.");
-  auto const& dresidual = std::get<BlockSparseMatrix<real, 3>>(actorSnle.fullDResidual);
-  BlockSparseMatrixView<real, 3> outMassMatrixBSp(
-      dresidual.BlockCols(), dresidual.Pointers(), dresidual.Indices(), outMassMatrix.values);
-
-  // Initialize to zero.
-  outPerElemMass.values.resize_noinit(femHighVolDisc.femElements.size());
-  deformable::SetZeroMassMatrix(outMassMatrixBSp, MakeSpan(outPerElemMass.values));
-
   MOCHI_ASSERT(
       !activeVolElems || !activeVolElems->empty(), "Active volume elements must not be empty.");
   Span<int const> activeVolIndices =
       activeVolElems ? activeVolElems->ViewIndices() : Span<int const>{};
   Span<real const> activeVolWeights =
       activeVolElems ? activeVolElems->ViewWeights() : Span<real const>{};
-
-  // we need to first recompute the per-element mass matrices since this is used
-  // below for assembling the global mass matrix
-  fem::ComputeMassMatrixPerElement(
-      MakeConstSpan(femHighVolDisc.femElements),
+  outLumpedMass.values.resize_noinit(kSpaceDim3 * mesh.mesh->GetNumNodes());
+  fem::ComputeLumpedMass(
+      MakeConstSpan(femVolDisc.femElements),
       material.density,
-      MakeSpan(outPerElemMass.values),
       activeVolIndices,
-      activeVolWeights);
+      activeVolWeights,
+      MakeSpan(outLumpedMass.values));
+  if (!outMassMatrix) {
+    return;
+  }
 
-  //
-  // here we only request to assemble the DRes because we want
-  // to assemble the mass matrix
-  //
+  // The mass the element loop adds to the dresidual, from the same elements and weights, at unit
+  // time scale.
+  auto const& dresidual = std::get<BlockSparseMatrix<real, 3>>(actorSnle.fullDResidual);
+  outMassMatrix->values.resize_noinit(GetNumValues(actorSnle.fullDResidual));
+  BlockSparseMatrixView<real, 3> massMatrix(
+      dresidual.BlockCols(), dresidual.Pointers(), dresidual.Indices(), outMassMatrix->values);
+  massMatrix.SetZero();
+  constexpr int kBatchSize = kDefaultFemBatchSize;
+  auto const massOp = [&](NdArray<int, kBatchSize> const& elemIndices,
+                          Span<int const> /*indicesFlat*/,
+                          BatchDouble<kBatchSize>* /*outEnergy*/,
+                          fem::BatchElementVector<kBatchSize, SoftStencilElement>* /*outRes*/,
+                          fem::BatchElementMatrix<kBatchSize, SoftStencilElement>* outDRes,
+                          bool /*projectPsd*/) {
+    return fem::AddMassToDRes<kBatchSize, SoftStencilElement>(
+        elemIndices,
+        MakeConstSpan(femVolDisc.femElements),
+        material.density,
+        *outDRes,
+        activeVolWeights);
+  };
   AssemblyParams params{.assemObj = false, .assemRes = false, .assemDRes = true, .psdDRes = false};
-
   AssemblyActiveSubset activeSubset = activeVolElems
       ? AssemblyActiveSubset{activeVolIndices, activeVolElems->ViewIsActive()}
       : AssemblyActiveSubset{};
-
-  // Assemble the global mass matrix from precomputed per-element mass matrices.
-  auto const massMatrixOp = deformable::MakeAddMassMatrixToDResOp<SoftStencilElement>(
-      MakeConstSpan(outPerElemMass.values));
   AssembleObjResDRes<SoftStencilElement>(
       l2g,
       nbs,
-      massMatrixOp,
+      massOp,
       AssemblyResults<real>{
-          .outObj = nullptr, .outRes = {}, .outDRes = outMassMatrixBSp, .params = params},
+          .outObj = nullptr, .outRes = {}, .outDRes = massMatrix, .params = params},
       activeSubset);
-
-  // Compute lumped mass matrix.
-  deformable::ComputeLumpedMassMatrix(sparsity, outMassMatrix, outLumpedMass);
 }
 
-MOCHI_API void mochi::soft::RecenterSolutionUsingRigidTransformEval(
+void mochi::soft::RecenterSolutionUsingRigidTransformEval(
     ecs::RequiredTag<TagSoftActor>,
     ecs::Excluded<TagRomActor>,
     CRecenteringParams const& params,
@@ -960,8 +982,7 @@ MOCHI_API void mochi::soft::RecenterSolutionUsingRigidTransformEval(
     CVelocitySlice<real, TimeStep::Previous>& prevVel,
     CIntegrationVelocitySlices<DisplacementLayer::Default>& intVels,
     CRigidTransformEval& pivotEval,
-    CBoundingVolume<TimeStep::Current>* currBounds,
-    CBoundingVolume<TimeStep::Previous>* prevBounds) {
+    CBoundingVolume* bounds) {
   MOCHI_PROFILE_SCOPE();
   if (!params.useRecentering) {
     return;
@@ -1017,11 +1038,8 @@ MOCHI_API void mochi::soft::RecenterSolutionUsingRigidTransformEval(
   }
 
   // Update the local bounding volume (an Obb for soft actors)
-  if (currBounds) {
-    currBounds->localShape = TransformShape(newLocalFromOldLocal, currBounds->localShape);
-  }
-  if (prevBounds) {
-    prevBounds->localShape = TransformShape(newLocalFromOldLocal, prevBounds->localShape);
+  if (bounds) {
+    bounds->localShape = TransformShape(newLocalFromOldLocal, bounds->localShape);
   }
 }
 
@@ -1049,25 +1067,6 @@ static void EvaluateDisplacements(
   *gradientOut = x.DEval(dofValues);
 }
 
-void mochi::SetZeroDisplacements(entt::registry& reg, entt::entity e, Error& error) {
-  MOCHI_ERROR_RETURN(error);
-  MOCHI_PROFILE_SCOPE();
-
-  auto* currDispl = reg.try_get<CDisplacementSlice<real, TimeStep::Current>>(e);
-  MOCHI_ERROR_IF(
-      currDispl == nullptr, error, "CDisplacementSlice<real, TimeStep::Current> required.");
-  auto* prevDispl = reg.try_get<CDisplacementSlice<real, TimeStep::Previous>>(e);
-  MOCHI_ERROR_IF(
-      prevDispl == nullptr, error, "CDisplacementSlice<real, TimeStep::Previous> required.");
-  MOCHI_ERROR_RETURN(error);
-
-  currDispl->value.SetZero();
-  prevDispl->value.SetZero();
-
-  // External state changes invalidate step history.
-  InvalidateActorStepHistory(reg, e);
-}
-
 void mochi::SetNodePositionsLocal(
     entt::registry& reg,
     entt::entity e,
@@ -1077,9 +1076,9 @@ void mochi::SetNodePositionsLocal(
   MOCHI_PROFILE_SCOPE();
 
   MOCHI_ERROR_IF(
-      reg.any_of<TagSoftSkinnedActor>(e),
+      reg.any_of<TagNestedSoftActor>(e),
       error,
-      "SetNodePositionsLocal is not supported for soft-skinned actors.");
+      "SetNodePositionsLocal is not supported for nested soft actors.");
   auto* currDispl = reg.try_get<CDisplacementSlice<real, TimeStep::Current>>(e);
   MOCHI_ERROR_IF(
       currDispl == nullptr, error, "CDisplacementSlice<real, TimeStep::Current> required.");
@@ -1107,32 +1106,6 @@ void mochi::SetNodePositionsLocal(
   InvalidateActorStepHistory(reg, e);
 }
 
-void mochi::SetZeroVelocities(entt::registry& reg, entt::entity e, Error& error) {
-  MOCHI_ERROR_RETURN(error);
-  MOCHI_PROFILE_SCOPE();
-  auto* prevVel = reg.try_get<CVelocitySlice<real, TimeStep::Previous>>(e);
-  MOCHI_ERROR_IF(prevVel == nullptr, error, "Requires CVelocitySlice<real, TimeStep::Previous>.");
-  MOCHI_ERROR_RETURN(error);
-  prevVel->value.SetZero();
-  auto* currVel = reg.try_get<CVelocitySlice<real, TimeStep::Current>>(e);
-  MOCHI_ERROR_IF(currVel == nullptr, error, "Requires CVelocitySlice<real, TimeStep::Current>.");
-  MOCHI_ERROR_RETURN(error);
-  currVel->value.SetZero();
-
-  // Zero skinned velocity layers if they exist (soft-skinned actors).
-  if (auto* prevVelSkinned =
-          reg.try_get<CVelocitySlice<real, TimeStep::Previous, DisplacementLayer::Skinned>>(e)) {
-    prevVelSkinned->value.SetZero();
-  }
-  if (auto* currVelSkinned =
-          reg.try_get<CVelocitySlice<real, TimeStep::Current, DisplacementLayer::Skinned>>(e)) {
-    currVelSkinned->value.SetZero();
-  }
-
-  // External state changes invalidate step history.
-  InvalidateActorStepHistory(reg, e);
-}
-
 void mochi::SetNodeVelocitiesLocal(
     entt::registry& reg,
     entt::entity e,
@@ -1142,22 +1115,21 @@ void mochi::SetNodeVelocitiesLocal(
   MOCHI_PROFILE_SCOPE();
 
   MOCHI_ERROR_IF(
-      reg.any_of<TagSoftSkinnedActor>(e),
+      reg.any_of<TagNestedSoftActor>(e),
       error,
-      "SetNodeVelocitiesLocal is not supported for soft-skinned actors.");
+      "SetNodeVelocitiesLocal is not supported for nested soft actors.");
   auto* prevVel = reg.try_get<CVelocitySlice<real, TimeStep::Previous>>(e);
   MOCHI_ERROR_IF(prevVel == nullptr, error, "Requires CVelocitySlice<real, TimeStep::Previous>.");
   MOCHI_ERROR_IF(
       prevVel && prevVel->value.size() != inVelocitiesLocal.size(), error, "Array size mismatch");
-  MOCHI_ERROR_IF_NOT(IsFinite(inVelocitiesLocal), error, "Node velocities must be finite.");
-  MOCHI_ERROR_RETURN(error);
-
-  prevVel->value = AsConstView(inVelocitiesLocal); // copy values
   auto* currVel = reg.try_get<CVelocitySlice<real, TimeStep::Current>>(e);
   MOCHI_ERROR_IF(currVel == nullptr, error, "Requires CVelocitySlice<real, TimeStep::Current>.");
   MOCHI_ERROR_IF(
       currVel && currVel->value.size() != inVelocitiesLocal.size(), error, "Array size mismatch");
+  MOCHI_ERROR_IF_NOT(IsFinite(inVelocitiesLocal), error, "Node velocities must be finite.");
   MOCHI_ERROR_RETURN(error);
+
+  prevVel->value = AsConstView(inVelocitiesLocal); // copy values
   currVel->value = AsConstView(inVelocitiesLocal); // copy values
 
   // External state changes invalidate step history.
@@ -1166,7 +1138,7 @@ void mochi::SetNodeVelocitiesLocal(
 
 static void AssembleElasticEnergy(
     ColumnVectorView<real const> currSol,
-    soft::FemInfo const& femVolLow,
+    soft::FemInfo const& femVolDisc,
     CSoftMaterialParams const& materialParams,
     Local2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
@@ -1191,7 +1163,7 @@ static void AssembleElasticEnergy(
         auto batchedConstitutive = materials::MakeBatchedConstitutiveResponse<ParamsT>(perElem);
 
         auto const stressEnergyOp = MakeBatchedStressEnergyOp(
-            MakeConstSpan(femVolLow.femElements), batchedConstitutive, activeVolWeights);
+            MakeConstSpan(femVolDisc.femElements), batchedConstitutive, activeVolWeights);
 
         AssembleObjResDRes<soft::SoftStencilElement>(
             l2g,
@@ -1208,7 +1180,7 @@ void soft::UpdateQueryElasticEnergy(
     ecs::RequiredTag<TagSoftActor>,
     ecs::OptionalTag<TagUseStress> hasStressTag,
     CStressDisplacementRef const& currDisp,
-    FemInfo const& femVolLow,
+    FemInfo const& femVolDisc,
     CSoftMaterialParams const& material,
     CLocal2GlobalMap const& l2g,
     CNodalBasedStructure const& nbs,
@@ -1222,11 +1194,11 @@ void soft::UpdateQueryElasticEnergy(
   if (!outQuery.isEnergyAtRestInitialized) {
     auto zero = ColumnVector<real>::Zero(currDisp.value.Rows());
     AssembleElasticEnergy(
-        zero, femVolLow, material, l2g, nbs, outQuery.energyAtRest, activeVolElems);
+        zero, femVolDisc, material, l2g, nbs, outQuery.energyAtRest, activeVolElems);
     outQuery.isEnergyAtRestInitialized = true;
   }
   AssembleElasticEnergy(
-      currDisp.value, femVolLow, material, l2g, nbs, outQuery.energy, activeVolElems);
+      currDisp.value, femVolDisc, material, l2g, nbs, outQuery.energy, activeVolElems);
 }
 
 void soft::UpdateQueryElementsDeformationGradient(
@@ -1415,12 +1387,12 @@ void mochi::soft::ComputeTransformAtEvalPoint(
   }
 }
 
-MOCHI_API void soft::UpdateRigidVelocity(
+void soft::UpdateRigidVelocity(
     ecs::Included<TagSoftActor>,
     ecs::Excluded<TagRomActor>,
     ecs::CtxGlobal<CSceneTime const> time,
     CRootTransform const& root,
-    CBoundingVolume<TimeStep::Current> const& bounds,
+    CBoundingVolume const& bounds,
     CPrevRigidVelocity& outRigidVel) {
   // Approximate the center-of-mass using the center-of-volume.
   // Then compute velocity of that point based on the change in root transform.
@@ -1428,7 +1400,7 @@ MOCHI_API void soft::UpdateRigidVelocity(
   // TODO[Nate]: This only works if recentering is enabled with zero tolerance.
   //             It may be better to track the movement of CRigidTransformEval instead.
   outRigidVel.centerOfMassLocal = GetAabb(bounds.localShape).VGetCenter();
-  ComputeRigidVelocityWorldSpace(
+  FiniteDifferenceRigidTransformLie(
       static_cast<real>(time->DeltaTime()),
       root.worldFromLocal,
       root.worldFromLocalPrev,

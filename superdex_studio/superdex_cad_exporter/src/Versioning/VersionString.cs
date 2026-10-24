@@ -11,7 +11,7 @@ namespace CADRobotExporter.Versioning
     {
         public static string Get()
         {
-            return "V2.2.0";
+            return "V1.1.0";
         }
     }
 }

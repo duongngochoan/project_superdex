@@ -338,7 +338,7 @@ void LU<InputScalar, kRowsAtCT, kColsAtCT, kPermAlg, kBlockSize, kTrSize>::LeftS
   // Apply L^-1 in blocks.
   PartDown<kBlockSize, kSizeAtCT>(
       _LU.Rows(),
-      [](auto&& X, auto&& L) {
+      [](auto&& X, auto&& L) MOCHI_FORCE_INLINE_LAMBDA {
         auto currentX = X(DiagRows);
         auto prevX = X(Above);
         if (prevX.Rows() > 0) {
@@ -352,7 +352,7 @@ void LU<InputScalar, kRowsAtCT, kColsAtCT, kPermAlg, kBlockSize, kTrSize>::LeftS
   // Apply U^-1 in blocks.
   PartUp<kBlockSize, kSizeAtCT>(
       _LU.Rows(),
-      [](auto&& X, auto&& U) {
+      [](auto&& X, auto&& U) MOCHI_FORCE_INLINE_LAMBDA {
         auto currentX = X(DiagRows);
         auto prevX = X(Below);
         if (prevX.Rows() > 0) {
@@ -392,7 +392,7 @@ void LU<InputScalar, kRowsAtCT, kColsAtCT, kPermAlg, kBlockSize, kTrSize>::Right
   // Apply U^-1 in blocks.
   PartDown<kBlockSize, kSizeAtCT>(
       _LU.Rows(),
-      [](auto&& X, auto&& U) {
+      [](auto&& X, auto&& U) MOCHI_FORCE_INLINE_LAMBDA {
         auto currentX = X(DiagCols);
         auto prevX = X(Left);
         if (prevX.Cols() > 0) {
@@ -406,7 +406,7 @@ void LU<InputScalar, kRowsAtCT, kColsAtCT, kPermAlg, kBlockSize, kTrSize>::Right
   // Apply L^-1 in blocks.
   PartUp<kBlockSize, kSizeAtCT>(
       _LU.Rows(),
-      [](auto&& X, auto&& L) {
+      [](auto&& X, auto&& L) MOCHI_FORCE_INLINE_LAMBDA {
         auto currentX = X(DiagCols);
         auto prevX = X(Right);
         if (prevX.Cols() > 0) {

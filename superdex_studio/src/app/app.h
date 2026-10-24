@@ -16,6 +16,7 @@
 
 #pragma once
 
+#include "app/screenshot_command.h"
 #include "assets/asset_manager.h"
 #include "core/common.h"
 #include "core/settings.h"
@@ -41,6 +42,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <string>
 
 namespace mochi_renderer {
 class IBL;
@@ -58,6 +60,7 @@ class SuperDexStudio : public ImGuios::Application {
   SuperDexStudio();
   void OnInitialize() override;
   void OnUpdate() override;
+  void OnPostSwap() override;
   void OnShutdown() override;
 
   //------------------------------------------------------------------------------------------------
@@ -75,8 +78,7 @@ class SuperDexStudio : public ImGuios::Application {
   SuperDexStudioBotLoader const& GetBotLoader() const;
   AssetEditor* GetActiveAssetEditor() const;
   bool& GetWindowVisible(std::string const& name);
-  static std::string const& GetDefaultIblPath();
-  mochi_renderer::IBL* GetDefaultIbl() const;
+  mochi_renderer::IBL* GetCurrentIbl() const;
   mochi_renderer::SceneViewSettings const& GetViewSettings() const;
 
   //------------------------------------------------------------------------------------------------
@@ -89,7 +91,15 @@ class SuperDexStudio : public ImGuios::Application {
   void SelectAssetEditor(int index);
   void RefreshEditors(std::vector<IAssetReferencer*> const& referencers);
   void SaveActiveAssetEditor();
+  // Writes the active asset, including unsaved edits, to a new file of the same type and switches
+  // the editor to that file. The original file is left as it was on disk.
+  void SaveActiveAssetEditorAs();
   void SaveAllAssetEditors();
+#if MOCHI_INTERNAL
+  // Archives a saved .mochi_bot_scene and the files it references into a .mochi_bot_scene_archive
+  // chosen with a save dialog.
+  void CreateSceneArchive(mochi::Path const& scenePath);
+#endif // MOCHI_INTERNAL
 
   //------------------------------------------------------------------------------------------------
   // Screenshots
@@ -98,6 +108,27 @@ class SuperDexStudio : public ImGuios::Application {
   void
   SaveAssetThumbnail(Asset& asset, int sizePx, mochi::Path const& outFile, mochi::Error& error);
   void SaveViewportScreenshot(Viewport& viewport, mochi::Path const& outFile, mochi::Error& error);
+  // Largest width or height Viewport::WithRenderSize renders; the image is a single GPU texture.
+  // The largest image, 8192 x 8192, takes 256 MiB on the GPU and as much again when read back.
+  static constexpr int kMaxScreenshotSide = 8192;
+  // Renders @p editor's viewport at @p width x @p height pixels and writes it to @p outFile as a
+  // PNG, without a dialog. The size need not match the viewport's; see Viewport::WithRenderSize.
+  void RenderViewportScreenshot(
+      AssetEditor& editor,
+      int width,
+      int height,
+      mochi::Path const& outFile,
+      mochi::Error& error);
+  // Writes the window to @p outFile as a PNG. Call once a frame is on screen, as OnPostSwap does;
+  // the image may be a frame or two old, so wait that long after a change.
+  void SaveWindowScreenshot(mochi::Path const& outFile, mochi::Error& error);
+  // Makes this a screenshot run (see screenshot_command.h): the app stops by itself once the PNG is
+  // written or the run fails. Call before Run.
+  void StartScreenshotRun(ScreenshotOptions options);
+  // The exit code for the process: 1 when a screenshot run failed or did not finish, else 0.
+  int GetExitCode() const {
+    return _exitCode;
+  }
 
   //------------------------------------------------------------------------------------------------
   // File
@@ -145,6 +176,8 @@ class SuperDexStudio : public ImGuios::Application {
   void ApplyHighlightOverlayOpacity();
   // Pushes AppSettings::graphics into every open editor and the renderer's clear color.
   void ApplyGraphicsSettings();
+  // Resolves a path relative to assets/ibl and pushes the resulting IBL to every live scene.
+  void SetCurrentIbl(std::string const& relativePath, bool forceReload = false);
   // Broadcasts a committed settings change to every open editor (see
   // AssetEditor::OnAppSettingsChanged).
   void NotifyAppSettingsChanged();
@@ -194,8 +227,9 @@ class SuperDexStudio : public ImGuios::Application {
   std::unique_ptr<LogConsole> _logConsole;
   std::unique_ptr<AssetManager> _assetManager;
   std::unique_ptr<mochi_renderer::MochiRenderer> _mochiRenderer;
-  mochi_renderer::IBL* _defaultIbl =
+  mochi_renderer::IBL* _currentIbl =
       nullptr; // owned by the ResourceManager (inside _mochiRenderer)
+  std::string _currentIblRelativePath;
   std::unique_ptr<Renderer> _renderer;
   std::unique_ptr<SuperDexStudioBotLoader> _botLoader;
   std::vector<std::unique_ptr<AssetEditor>> _assetEditors;
@@ -205,11 +239,17 @@ class SuperDexStudio : public ImGuios::Application {
     bool save = true;
   };
   bool _openUnsavedChangesModal = false;
+  bool _saveAsRequested = false;
   char const* _unsavedPrompt = nullptr;
   std::vector<UnsavedAssetEntry> _unsavedEntries;
   std::function<void()> _onUnsavedProceed;
   Importer* _activeImporter = nullptr; // importer whose modal is currently open, if any
   AsyncTaskRunner _asyncTasks; // runs importer background work + its progress modal
+  std::unique_ptr<ScreenshotRun> _screenshotRun;
+  // Off for a screenshot run, which must leave the user's settings and layout as they were: batch
+  // runs would otherwise record every temp folder, and parallel ones race on the files.
+  bool _persistSettings = true;
+  int _exitCode = 0;
   int _activeAssetEditorIdx = -1;
   bool _needDefaultDockLayout = false;
   bool _needDefaultWindowFocus = false;

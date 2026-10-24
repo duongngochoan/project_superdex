@@ -23,10 +23,10 @@
 namespace mochi::mesh::cli::occ {
 
 IsotropicFaceMesherFactory::IsotropicFaceMesherFactory(
-    double targetEdgeLength,
+    FaceSizingField const& sizing,
     bool gradedInterior,
     FaceMeshFallbackStats* stats)
-    : _targetEdgeLength(targetEdgeLength),
+    : _sizing(&sizing),
       _gradedInterior(gradedInterior),
       _stats(stats),
       _fallbackFactory(new BRepMesh_DelabellaMeshAlgoFactory()) {}
@@ -35,10 +35,7 @@ Handle(IMeshTools_MeshAlgo) IsotropicFaceMesherFactory::GetAlgo(
     GeomAbs_SurfaceType surfaceType,
     IMeshTools_Parameters const& parameters) const {
   return new IsotropicFaceMesher(
-      _targetEdgeLength,
-      _gradedInterior,
-      _fallbackFactory->GetAlgo(surfaceType, parameters),
-      _stats);
+      *_sizing, _gradedInterior, _fallbackFactory->GetAlgo(surfaceType, parameters), _stats);
 }
 
 } // namespace mochi::mesh::cli::occ

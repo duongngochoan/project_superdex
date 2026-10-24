@@ -25,8 +25,8 @@ using SolidWorks.Interop.sldworks;
 #endif
 
 using CADRobotExporter.CAD;
+using CADRobotExporter.Export;
 using CADRobotExporter.RobotDescription;
-using CADRobotExporter.UI;
 using CADRobotExporter.Utilities;
 
 using Axis = CADRobotExporter.RobotDescription.Axis;

@@ -34,6 +34,7 @@ struct TerminalPanelState {
   std::string stashed; // live line saved while browsing history
   int historyPos = 0; // browse cursor; == history.size() means the live line
   bool refocus = false; // re-assert keyboard focus on the input next frame (after Enter)
+  bool bringToForegroundOnErrorOrWarning = true;
 };
 
 void BuildTerminalPanel(UiState& state);

@@ -57,14 +57,12 @@ inline Quaternion Slerp(Quaternion a, Quaternion b, real t) {
   }
 
   // Use linear interpolation and normalize if the angle is small enough
-  if (dot < 1_r - kDotThreshold)
-    MOCHI_LIKELY {
-      dot = Clamp(dot, -1.0_r, 1.0_r);
-      real theta = ACos(dot) * (real)t;
-      b.data = Normalize<4>(b.data - a.data * dot);
-      return Quaternion{a.data * std::cos(theta) + b.data * std::sin(theta)};
-    }
-  else {
+  if (dot < 1_r - kDotThreshold) MOCHI_LIKELY {
+    dot = Clamp(dot, -1.0_r, 1.0_r);
+    real theta = ACos(dot) * (real)t;
+    b.data = Normalize<4>(b.data - a.data * dot);
+    return Quaternion{a.data * std::cos(theta) + b.data * std::sin(theta)};
+  } else {
     return Lerp(a, b, t);
   }
 }
@@ -95,47 +93,43 @@ inline Real4 MatrixToAxisAngleImpl(Matrix3x3r const& matrix, real eps) {
   real t = 0.5_r * (matrix[0][0] + matrix[1][1] + matrix[2][2] - 1_r);
   real theta = ACos(Clamp(t, -1_r, 1_r));
   Real3 axis{};
-  if (NearEqual(theta, 0_r))
-    MOCHI_UNLIKELY {
-      // Singularity at zero degree rotation. Any axis will do.
-      theta = 0_r;
-      axis = {1_r, 0_r, 0_r};
-    }
-  else if (NearEqual(Abs(theta), kPI, eps))
-    MOCHI_UNLIKELY {
-      // Singularity at +/- 180 degree rotation (sign does not matter). Compute the axis.
-      theta = kPI;
-      real xx = (matrix[0][0] + 1_r) * 0.5_r;
-      real yy = (matrix[1][1] + 1_r) * 0.5_r;
-      real zz = (matrix[2][2] + 1_r) * 0.5_r;
-      real xy = (matrix[0][1] + matrix[1][0]) * 0.25_r;
-      real xz = (matrix[0][2] + matrix[2][0]) * 0.25_r;
-      real yz = (matrix[1][2] + matrix[2][1]) * 0.25_r;
-      real constexpr kSqrt2Over2 = kSqrt2 * 0.5_r;
-      if ((xx > yy) && (xx > zz)) { // matrix[0][0] is the largest diagonal term
-        if (xx < eps) {
-          axis = Real3{0_r, kSqrt2Over2, kSqrt2Over2};
-        } else {
-          real x = Sqrt(Clamp(xx, 0_r, 1_r));
-          axis = Real3{x, xy / x, xz / x};
-        }
-      } else if (yy > zz) { // matrix[1][1] is the largest diagonal term
-        if (yy < eps) {
-          axis = Real3{kSqrt2Over2, 0_r, kSqrt2Over2};
-        } else {
-          real y = Sqrt(Clamp(yy, 0_r, 1_r));
-          axis = Real3{xy / y, y, yz / y};
-        }
-      } else { // matrix[2][2] is the largest diagonal term so base result on this
-        if (zz < eps) {
-          axis = Real3{kSqrt2Over2, kSqrt2Over2, 0_r};
-        } else {
-          real z = Sqrt(Clamp(zz, 0_r, 1_r));
-          axis = Real3{xz / z, yz / z, z};
-        }
+  if (NearEqual(theta, 0_r)) MOCHI_UNLIKELY {
+    // Singularity at zero degree rotation. Any axis will do.
+    theta = 0_r;
+    axis = {1_r, 0_r, 0_r};
+  } else if (NearEqual(Abs(theta), kPI, eps)) MOCHI_UNLIKELY {
+    // Singularity at +/- 180 degree rotation (sign does not matter). Compute the axis.
+    theta = kPI;
+    real xx = (matrix[0][0] + 1_r) * 0.5_r;
+    real yy = (matrix[1][1] + 1_r) * 0.5_r;
+    real zz = (matrix[2][2] + 1_r) * 0.5_r;
+    real xy = (matrix[0][1] + matrix[1][0]) * 0.25_r;
+    real xz = (matrix[0][2] + matrix[2][0]) * 0.25_r;
+    real yz = (matrix[1][2] + matrix[2][1]) * 0.25_r;
+    real constexpr kSqrt2Over2 = kSqrt2 * 0.5_r;
+    if ((xx > yy) && (xx > zz)) { // matrix[0][0] is the largest diagonal term
+      if (xx < eps) {
+        axis = Real3{0_r, kSqrt2Over2, kSqrt2Over2};
+      } else {
+        real x = Sqrt(Clamp(xx, 0_r, 1_r));
+        axis = Real3{x, xy / x, xz / x};
+      }
+    } else if (yy > zz) { // matrix[1][1] is the largest diagonal term
+      if (yy < eps) {
+        axis = Real3{kSqrt2Over2, 0_r, kSqrt2Over2};
+      } else {
+        real y = Sqrt(Clamp(yy, 0_r, 1_r));
+        axis = Real3{xy / y, y, yz / y};
+      }
+    } else { // matrix[2][2] is the largest diagonal term so base result on this
+      if (zz < eps) {
+        axis = Real3{kSqrt2Over2, kSqrt2Over2, 0_r};
+      } else {
+        real z = Sqrt(Clamp(zz, 0_r, 1_r));
+        axis = Real3{xz / z, yz / z, z};
       }
     }
-  else {
+  } else {
     // No singularity. This is the normal case.
     real scale = 0.5_r / Sin(theta);
     axis = {

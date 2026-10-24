@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
@@ -52,16 +52,96 @@ namespace CADRobotExporter.CAD
 
         private List<Component2> _hiddenComponents;
 
+        private readonly bool _isPartDoc;
+
         private Dictionary<string, string> _topLevelCoordinateAxes;
         private List<string> _tempTopLevelCoordinateAxes;
+
+        private bool _documentDestroyed;
+
+        // The view the BufferSwapNotify handler is currently attached to, if any.
+        private ModelView _notifyView;
 
         public SolidworksBridge(ISldWorks app, ModelDoc2 model)
         {
             _app = app;
             _model = model;
+            _isPartDoc = model.GetType() == (int)swDocumentTypes_e.swDocPART;
 
             _topLevelCoordinateAxes = new Dictionary<string, string>();
             _tempTopLevelCoordinateAxes = new List<string>();
+
+            SubscribeToDocumentDestroyed();
+        }
+
+        private void SubscribeToDocumentDestroyed()
+        {
+            try
+            {
+                if (_isPartDoc)
+                {
+                    ((PartDoc)_model).DestroyNotify += OnDocumentDestroyed;
+                }
+                else
+                {
+                    ((AssemblyDoc)_model).DestroyNotify += OnDocumentDestroyed;
+                }
+            }
+            catch (Exception e)
+            {
+                logger.Warning("Could not subscribe to document destruction", e);
+            }
+        }
+
+        private int OnDocumentDestroyed()
+        {
+            logger.Information("Document was closed; the bridge will stop issuing document calls");
+            _documentDestroyed = true;
+
+            // The view went with the document, so there is nothing left to detach from.
+            _notifyView = null;
+
+            // Release the event sink, which would otherwise keep this bridge and its cached model
+            // alive for as long as the host process runs.
+            try
+            {
+                if (_isPartDoc)
+                {
+                    ((PartDoc)_model).DestroyNotify -= OnDocumentDestroyed;
+                }
+                else
+                {
+                    ((AssemblyDoc)_model).DestroyNotify -= OnDocumentDestroyed;
+                }
+            }
+            catch (Exception e)
+            {
+                logger.Warning("Could not unsubscribe from document destruction", e);
+            }
+
+            return 0;
+        }
+
+        public override bool IsDocumentValid
+        {
+            get
+            {
+                if (_documentDestroyed || _model == null)
+                {
+                    return false;
+                }
+
+                // Fallback should the destruction notification fail
+                try
+                {
+                    return _model.GetTitle() != null;
+                }
+                catch (Exception e)
+                {
+                    logger.Warning("Document handle is not currently usable", e);
+                    return false;
+                }
+            }
         }
 
         public override string GetDocumentTitle()
@@ -84,9 +164,15 @@ namespace CADRobotExporter.CAD
             return SwAddin.LatestExportPath;
         }
 
-        public override void SaveConfigurationFromTree(ExporterConfiguration config, LinkNode baseNode, bool warnUser, string featureNameOverride = null)
+        public override ConfigSaveResult SaveConfigurationFromTree(ExporterConfiguration config, LinkNode baseNode, bool warnUser, string featureNameOverride = null, bool allowCancel = false)
         {
-            CommonSwOperations.RetrieveSWComponentPIDs(_model, baseNode);
+            if (!IsDocumentValid)
+            {
+                logger.Warning("Skipping configuration save; the document is no longer open");
+                return ConfigSaveResult.NotNeeded;
+            }
+
+            CommonSwOperations.RetrieveSWComponentPIDs(_model, baseNode.Link);
 
             string featureName = "";
             if (featureNameOverride != null)
@@ -98,7 +184,14 @@ namespace CADRobotExporter.CAD
                 featureName = $"Robot Configuration ({config.robotName})";
             }
 
-            Feature exporterFeature = ConfigurationSerialization.SaveConfigTreeXML(_model, baseNode, warnUser, ExporterFeature, featureName);
+            ConfigSaveResult result;
+            Feature exporterFeature = ConfigurationSerialization.SaveConfigTreeXML(
+                _model, baseNode, warnUser, ExporterFeature, featureName, allowCancel, out result);
+
+            if (result == ConfigSaveResult.Cancelled)
+            {
+                return result;
+            }
 
             if (exporterFeature != null)
             {
@@ -108,6 +201,8 @@ namespace CADRobotExporter.CAD
                     ConfigurationSerialization.SaveExporterConfiguration(config, exporterFeature);
                 }
             }
+
+            return result;
         }
 
         public void SaveTendons(List<Tendon> tendons)
@@ -123,70 +218,91 @@ namespace CADRobotExporter.CAD
             return ConfigurationSerialization.LoadTendonData(ExporterFeature);
         }
 
-        public override void SelectLinkComponents(LinkNode node)
+        public override void SelectLinkComponents(Link link)
         {
             _model.ClearSelection2(true);
             SelectionMgr manager = _model.SelectionManager;
 
             SelectData data = manager.CreateSelectData();
             data.Mark = -1;
-            foreach (Component2 component in node.Link.SWVisualComponents)
+            SelectLinkGeometry(link, data);
+            if (link.Joint != null)
             {
-                component.Select4(true, data, false);
-            }
-            if (node.Link.SWVisualComponents.Count == 0)
-            {
-                foreach (Component2 component in node.Link.SWInertialComponents)
+                if (link.Joint.SWCoordinateSystemFeature != null)
                 {
-                    component.Select4(true, data, false);
+                    link.Joint.SWCoordinateSystemFeature.Select2(true, -1);
                 }
-            }
-            if (node.Link.Joint != null)
-            {
-                if (node.Link.Joint.SWCoordinateSystemFeature != null)
+                if (link.Joint.SWRefAxisFeature != null)
                 {
-                    node.Link.Joint.SWCoordinateSystemFeature.Select2(true, -1);
-                }
-                if (node.Link.Joint.SWRefAxisFeature != null)
-                {
-                    node.Link.Joint.SWRefAxisFeature.Select2(true, -1);
+                    link.Joint.SWRefAxisFeature.Select2(true, -1);
                 }
             }
         }
 
-        public override void SelectJointComponents(LinkNode node)
+        public override void SelectJointComponents(Link link)
         {
             _model.ClearSelection2(true);
             SelectionMgr manager = _model.SelectionManager;
 
             SelectData data = manager.CreateSelectData();
             data.Mark = -1;
-            foreach (Component2 component in node.Link.SWVisualComponents)
+            SelectLinkGeometry(link, data);
+            if (link.Joint != null)
+            {
+                if (link.Joint.SWCoordinateSystemFeature != null)
+                {
+                    link.Joint.SWCoordinateSystemFeature.Select2(true, -1);
+                }
+                if (link.Joint.SWRefAxisFeature != null)
+                {
+                    link.Joint.SWRefAxisFeature.Select2(true, -1);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Selects a link's visual geometry, falling back to its inertial geometry when the link has
+        /// no visuals. Appends to the current selection.
+        /// </summary>
+        private void SelectLinkGeometry(Link link, SelectData data)
+        {
+            if (_isPartDoc)
+            {
+                foreach (Body2 body in link.SWVisualBodies)
+                {
+                    body.Select2(true, data);
+                }
+                if (link.SWVisualBodies.Count == 0)
+                {
+                    foreach (Body2 body in link.SWInertialBodies)
+                    {
+                        body.Select2(true, data);
+                    }
+                }
+                return;
+            }
+
+            foreach (Component2 component in link.SWVisualComponents)
             {
                 component.Select4(true, data, false);
             }
-            if (node.Link.SWVisualComponents.Count == 0)
+            if (link.SWVisualComponents.Count == 0)
             {
-                foreach (Component2 component in node.Link.SWInertialComponents)
+                foreach (Component2 component in link.SWInertialComponents)
                 {
                     component.Select4(true, data, false);
-                }
-            }
-            if (node.Link.Joint != null)
-            {
-                if (node.Link.Joint.SWCoordinateSystemFeature != null)
-                {
-                    node.Link.Joint.SWCoordinateSystemFeature.Select2(true, -1);
-                }
-                if (node.Link.Joint.SWRefAxisFeature != null)
-                {
-                    node.Link.Joint.SWRefAxisFeature.Select2(true, -1);
                 }
             }
         }
 
         public override void HideAllComponents()
         {
+            // We don't hide bodies for parts (for mesh export)
+            if (_isPartDoc || !IsDocumentValid)
+            {
+                return;
+            }
+
             AssemblyDoc assyDoc = (AssemblyDoc)_model;
             _hiddenComponents = CommonSwOperations.FindHiddenComponents(assyDoc.GetComponents(false));
             logger.Information("Found " + _hiddenComponents.Count + " hidden components " + String.Join(", ", _hiddenComponents));
@@ -197,24 +313,80 @@ namespace CADRobotExporter.CAD
 
         public override void ShowHiddenComponents()
         {
+            if (_isPartDoc || !IsDocumentValid)
+            {
+                return;
+            }
+
             CommonSwOperations.ShowAllComponents(_model, _hiddenComponents);
         }
 
         public override void ShowHideVisualizations(bool show)
         {
-            ModelView view = _model.IActiveView;
-            if (show)
+            DetachBufferSwapNotify();
+
+            if (!show || !IsDocumentValid)
             {
-                view.BufferSwapNotify += View_BufferSwapNotify_Internal;
+                return;
             }
-            else
+
+            ModelView view = _model.IActiveView;
+            if (view == null)
             {
-                view.BufferSwapNotify -= View_BufferSwapNotify_Internal;
+                logger.Warning("No active view; skipping visualization overlay");
+                return;
+            }
+
+            view.BufferSwapNotify += View_BufferSwapNotify_Internal;
+            _notifyView = view;
+        }
+
+        private void DetachBufferSwapNotify()
+        {
+            if (_notifyView == null)
+            {
+                return;
+            }
+
+            try
+            {
+                _notifyView.BufferSwapNotify -= View_BufferSwapNotify_Internal;
+            }
+            catch (Exception e)
+            {
+                logger.Warning("Could not detach the visualization overlay", e);
+            }
+            finally
+            {
+                _notifyView = null;
             }
         }
 
+        /// <summary>
+        /// Called by SolidWorks from inside its own render loop on every buffer swap.
+        /// An exception crossing back into the host during a draw takes can crash SolidWorks.
+        /// </summary>
         private int View_BufferSwapNotify_Internal()
         {
+            try
+            {
+                return DrawVisualizations();
+            }
+            catch (Exception e)
+            {
+                logger.Warning("Visualization draw failed", e);
+                return 0;
+            }
+        }
+
+        private int DrawVisualizations()
+        {
+            // Use cheaper check because of frequency of calls
+            if (_documentDestroyed || _model == null)
+            {
+                return 0;
+            }
+
             double[] boundingBox = new double[6];
             GetModelBoundingBox(out boundingBox);
 
@@ -225,21 +397,21 @@ namespace CADRobotExporter.CAD
             double averageLength = (xLength + yLength + zLength) / 3.0;
 
             if (IsShowingJointGizmo && CurrentNodeShown != null &&
-                CurrentNodeShown.Link.Joint.originInGlobalSpace != null &&
-                CurrentNodeShown.Link.Joint.axisInGlobalSpace != null)
+                CurrentNodeShown.Joint.originInGlobalSpace != null &&
+                CurrentNodeShown.Joint.axisInGlobalSpace != null)
             {
-                double upperLimit = CurrentNodeShown.Link.Joint.Limit.Upper;
-                double lowerLimit = CurrentNodeShown.Link.Joint.Limit.Lower;
+                double upperLimit = CurrentNodeShown.Joint.Limit.Upper;
+                double lowerLimit = CurrentNodeShown.Joint.Limit.Lower;
 
-                double[] referenceDirection = GetCoMReferenceDirection(CurrentNodeShown.Link);
+                double[] referenceDirection = GetCoMReferenceDirection(CurrentNodeShown);
 
                 OpenGL.glDisable(OpenGL.GL_LIGHTING);
 
-                if (CurrentNodeShown.Link.Joint.Type == "revolute")
+                if (CurrentNodeShown.Joint.Type == "revolute")
                 {
                     SolidworksJointVisualizer.DrawCompleteRevoluteJoint(
-                        CurrentNodeShown.Link.Joint.originInGlobalSpace,
-                        CurrentNodeShown.Link.Joint.axisInGlobalSpace,
+                        CurrentNodeShown.Joint.originInGlobalSpace,
+                        CurrentNodeShown.Joint.axisInGlobalSpace,
                         lowerLimit,
                         upperLimit,
                         JointGizmoScale * averageLength,
@@ -247,11 +419,11 @@ namespace CADRobotExporter.CAD
                         referenceDirection);
                 }
 
-                if (CurrentNodeShown.Link.Joint.Type == "prismatic")
+                if (CurrentNodeShown.Joint.Type == "prismatic")
                 {
                     SolidworksJointVisualizer.DrawCompletePrismaticJoint(
-                        CurrentNodeShown.Link.Joint.originInGlobalSpace,
-                        CurrentNodeShown.Link.Joint.axisInGlobalSpace,
+                        CurrentNodeShown.Joint.originInGlobalSpace,
+                        CurrentNodeShown.Joint.axisInGlobalSpace,
                         lowerLimit,
                         upperLimit,
                         JointGizmoScale * 0.5 * 0.5 * averageLength,
@@ -377,7 +549,7 @@ namespace CADRobotExporter.CAD
 
         private void DrawInertialGizmo_Internal(double averageLength)
         {
-            var link = CurrentLinkNodeShown.Link;
+            var link = CurrentLinkNodeShown;
             if (link.Inertial == null || link.Inertial.Mass.Value <= 1e-10)
                 return;
             if (link.Joint == null || string.IsNullOrEmpty(link.Joint.CoordinateSystemName))
@@ -451,11 +623,21 @@ namespace CADRobotExporter.CAD
 
         public override void TriggerGraphicsRedraw()
         {
+            if (!IsDocumentValid)
+            {
+                return;
+            }
+
             _model.GraphicsRedraw2();
         }
 
         public override void BoostPerformance(bool enable)
         {
+            if (!IsDocumentValid)
+            {
+                return;
+            }
+
             ModelView modelView = _model.ActiveView;
             FeatureManager featureManager = _model.FeatureManager;
 
@@ -500,9 +682,11 @@ namespace CADRobotExporter.CAD
             _model.ClearSelection2(true);
 
             List<Component2> components = link.GetComponents(componentType);
+            List<Body2> bodies = link.GetBodies(componentType);
             MathTransform coordinateSystemTransform = GetCoordinateSystemTransform_Internal(coordinateSystemName);
 
-            if (components.Count == 0)
+            int geometryCount = components.Count + (bodies == null ? 0 : bodies.Count);
+            if (geometryCount == 0)
             {
                 mass = 0;
                 centerOfMass = new double[3];
@@ -510,7 +694,8 @@ namespace CADRobotExporter.CAD
                 return true;
             }
 
-            logger.Information("Start GetComponentsInertialProperties " + components[0].Name);
+            logger.Information("Start GetComponentsInertialProperties for " + link.Name
+                + " (" + components.Count + " components, " + (bodies == null ? 0 : bodies.Count) + " bodies)");
 
             bool originalPreference = _model.GetUserPreferenceToggle((int)swUserPreferenceToggle_e.swUsePositiveInertiaTensorNotation);
 
@@ -522,6 +707,15 @@ namespace CADRobotExporter.CAD
                 SelectData data = manager.CreateSelectData();
                 data.Mark = -1;
                 component.Select4(true, data, false);
+            }
+            if (bodies != null)
+            {
+                foreach (Body2 body in bodies)
+                {
+                    SelectData data = manager.CreateSelectData();
+                    data.Mark = -1;
+                    body.Select2(true, data);
+                }
             }
             MassProperty2 swMass = _model.Extension.CreateMassProperty2();
             swMass.SetCoordinateSystem(coordinateSystemTransform);
@@ -547,6 +741,17 @@ namespace CADRobotExporter.CAD
             {
                 ModelDoc2 componentModelDoc = components[0].GetModelDoc2();
                 values = componentModelDoc.MaterialPropertyValues;
+                values[7] = 1.0 - values[7];
+            }
+            else if (_isPartDoc && link.HasComponents(componentType))
+            {
+                // A body without an appearance of its own displays the part's, so that is the
+                // fallback. Face-level appearances are not considered.
+                List<Body2> bodies = link.GetBodies(componentType);
+                Body2 body = bodies != null && bodies.Count > 0 ? bodies[0] : null;
+                values = body != null && body.HasMaterialPropertyValues()
+                    ? (double[])body.MaterialPropertyValues2
+                    : (double[])_model.MaterialPropertyValues;
                 values[7] = 1.0 - values[7];
             }
 
@@ -985,6 +1190,13 @@ namespace CADRobotExporter.CAD
 
         public override void CleanUpTemporaryFeatures()
         {
+            if (!IsDocumentValid)
+            {
+                // The temporary features died with the document, so there is nothing to remove.
+                _tempTopLevelCoordinateAxes.Clear();
+                return;
+            }
+
             _model.ClearSelection2(true);
 
             foreach (string tempCsysName in _tempTopLevelCoordinateAxes)
@@ -997,8 +1209,20 @@ namespace CADRobotExporter.CAD
 
         public override void GetModelBoundingBox(out double[] boundingBox)
         {
-            AssemblyDoc assemblyDoc = (AssemblyDoc)_model;
+            if (!IsDocumentValid)
+            {
+                boundingBox = new double[6];
+                return;
+            }
 
+            if (_isPartDoc)
+            {
+                PartDoc partDoc = (PartDoc)_model;
+                boundingBox = (double[])partDoc.GetPartBox(true); // true retains system units
+                return;
+            }
+
+            AssemblyDoc assemblyDoc = (AssemblyDoc)_model;
             boundingBox = assemblyDoc.GetBox(0); // 0 = do not include planes or sketches
         }
 
@@ -1056,6 +1280,130 @@ namespace CADRobotExporter.CAD
             logger.Information("End CreateTempTopLevelCoordinateSystem:" + coordinateSystemName);
         }
 
+        /// <summary>
+        /// How a part document's export is narrowed down to one link's bodies.
+        ///
+        /// The two formats behave differently: STEP works with body selection,
+        /// while native SolidWorks STL exports meshes with missing faces somehow. (bug?)
+        /// STL therefore has to be scoped by hiding the other bodies instead.
+        /// </summary>
+        private enum PartExportScope
+        {
+            Selection,
+            Visibility,
+        }
+
+        /// <summary>
+        /// Records exactly which bodies a visibility-scoped export changed, so the document can be
+        /// put back the way the user left it. Body names rather than references, because a Body2
+        /// taken before an Extension.SaveAs cannot be trusted afterwards.
+        /// </summary>
+        private sealed class PartVisibilityScope
+        {
+            public List<string> HiddenByUs = new List<string>();
+            public List<string> ShownByUs = new List<string>();
+        }
+
+        /// <summary>
+        /// Scopes the export to this link's geometry.
+        ///
+        /// In an assembly, SaveAs exports what is *visible*, so components are shown and hidden
+        /// around each link. In a part it depends on the format - see <see cref="PartExportScope"/>.
+        /// </summary>
+        private void IsolateLinkGeometry(
+            Link link,
+            Link.ComponentType componentType,
+            PartExportScope scope,
+            out List<Component2> components,
+            out PartVisibilityScope visibilityScope)
+        {
+            components = link.GetComponents(componentType);
+            visibilityScope = null;
+
+            if (_isPartDoc)
+            {
+                List<Body2> bodies = link.GetBodies(componentType);
+
+                if (scope == PartExportScope.Selection)
+                {
+                    CommonSwOperations.SelectBodies(_model, bodies, true);
+                    logger.Information(link.Name + ": selected " + bodies.Count + " body(ies) for export");
+                    return;
+                }
+
+                visibilityScope = IsolateBodiesByVisibility(link, bodies);
+                return;
+            }
+
+            CommonSwOperations.ShowComponentsWithDependents(_app, components);
+            CommonSwOperations.HideComponents(_hiddenComponents);
+            CommonSwOperations.SelectComponents(_model, components);
+        }
+
+        /// <summary>
+        /// Hides every solid body except this link's, leaving bodies the user had already hidden
+        /// alone, and showing any of the link's own bodies that were hidden so the link does not
+        /// silently export empty.
+        /// </summary>
+        private PartVisibilityScope IsolateBodiesByVisibility(Link link, List<Body2> keepBodies)
+        {
+            var scope = new PartVisibilityScope();
+
+            var keepNames = new HashSet<string>();
+            foreach (Body2 body in keepBodies)
+            {
+                keepNames.Add(body.Name);
+            }
+
+            var visibleNames = new HashSet<string>(CommonSwOperations.GetSolidBodyNames(_model, true));
+
+            foreach (string name in visibleNames)
+            {
+                if (!keepNames.Contains(name))
+                {
+                    scope.HiddenByUs.Add(name);
+                }
+            }
+
+            foreach (string name in keepNames)
+            {
+                if (!visibleNames.Contains(name))
+                {
+                    scope.ShownByUs.Add(name);
+                }
+            }
+
+            CommonSwOperations.SetBodyVisibilityByName(_model, scope.HiddenByUs, true);
+            CommonSwOperations.SetBodyVisibilityByName(_model, scope.ShownByUs, false);
+
+            _model.ClearSelection2(true);
+            _model.GraphicsRedraw2();
+
+            logger.Information(link.Name + ": isolated " + keepNames.Count + " body(ies) by visibility, hid "
+                + scope.HiddenByUs.Count + ", revealed " + scope.ShownByUs.Count);
+            return scope;
+        }
+
+        /// <summary>
+        /// Undoes <see cref="IsolateLinkGeometry"/> so the next link starts from a clean state.
+        /// </summary>
+        private void RestoreLinkGeometry(List<Component2> components, PartVisibilityScope visibilityScope)
+        {
+            if (_isPartDoc)
+            {
+                if (visibilityScope != null)
+                {
+                    CommonSwOperations.SetBodyVisibilityByName(_model, visibilityScope.HiddenByUs, false);
+                    CommonSwOperations.SetBodyVisibilityByName(_model, visibilityScope.ShownByUs, true);
+                    _model.GraphicsRedraw2();
+                }
+                _model.ClearSelection2(true);
+                return;
+            }
+
+            CommonSwOperations.HideComponents(components);
+        }
+
         public override bool SaveStpFile(Link link, Link.ComponentType componentType, string windowsMeshFilename)
         {
             int errors = 0;
@@ -1065,11 +1413,9 @@ namespace CADRobotExporter.CAD
 
             logger.Information(link.Name + ": Exporting STEP with coordinate frame " + coordsysName);
 
-            List<Component2> components = link.GetComponents(componentType);
-
-            CommonSwOperations.ShowComponentsWithDependents(_app, components);
-            CommonSwOperations.HideComponents(_hiddenComponents);
-            CommonSwOperations.SelectComponents(_model, components);
+            // STEP works with body selections, so no visibility changes are needed.
+            IsolateLinkGeometry(link, componentType, PartExportScope.Selection,
+                out List<Component2> components, out PartVisibilityScope visibilityScope);
 
             int saveOptions = (int)swSaveAsOptions_e.swSaveAsOptions_Silent |
                 (int)swSaveAsOptions_e.swSaveAsOptions_Copy;
@@ -1087,7 +1433,7 @@ namespace CADRobotExporter.CAD
                     " or warnings " + warnings);
             }
 
-            CommonSwOperations.HideComponents(components);
+            RestoreLinkGeometry(components, visibilityScope);
 
             return true;
         }
@@ -1101,11 +1447,9 @@ namespace CADRobotExporter.CAD
 
             logger.Information(link.Name + ": Exporting STL with coordinate frame " + coordsysName);
 
-            List<Component2> components = link.GetComponents(componentType);
-
-            CommonSwOperations.ShowComponentsWithDependents(_app, components);
-            CommonSwOperations.HideComponents(_hiddenComponents);
-            CommonSwOperations.SelectComponents(_model, components);
+            // Native SolidWorks STL exports broken meshes via selection, so use visibility instead
+            IsolateLinkGeometry(link, componentType, PartExportScope.Visibility,
+                out List<Component2> components, out PartVisibilityScope visibilityScope);
 
             int saveOptions = (int)swSaveAsOptions_e.swSaveAsOptions_Silent |
                 (int)swSaveAsOptions_e.swSaveAsOptions_Copy;
@@ -1123,7 +1467,7 @@ namespace CADRobotExporter.CAD
                     " or warnings " + warnings);
             }
 
-            CommonSwOperations.HideComponents(components);
+            RestoreLinkGeometry(components, visibilityScope);
 
             return CorrectSTLExtension(windowsMeshFilename);
         }
@@ -1196,10 +1540,15 @@ namespace CADRobotExporter.CAD
         protected override void SetLinkSpecificSTLPreferences(string coordinateSystemName, double linearDeviation, double angularDeviation)
         {
             const double kMMtoMeters = 0.001;
+
+            // SolidWorks silently rejects any value above pi/6 (30 degrees)
+            const double kMaxSTLAngleTolerance = Math.PI / 6.0;
+
             _model.Extension.SetUserPreferenceString((int)swUserPreferenceStringValue_e.swFileSaveAsCoordinateSystem,
                 (int)swUserPreferenceOption_e.swDetailingNoOptionSpecified, coordinateSystemName);
             _app.SetUserPreferenceDoubleValue((int)swUserPreferenceDoubleValue_e.swSTLDeviation, linearDeviation * kMMtoMeters);
-            _app.SetUserPreferenceDoubleValue((int)swUserPreferenceDoubleValue_e.swSTLAngleTolerance, angularDeviation * (180.0 / Math.PI));
+            _app.SetUserPreferenceDoubleValue((int)swUserPreferenceDoubleValue_e.swSTLAngleTolerance,
+                Math.Min(angularDeviation, kMaxSTLAngleTolerance));
         }
 
         public override void SaveSTLExportUserPreferences()
@@ -1256,6 +1605,11 @@ namespace CADRobotExporter.CAD
 
         public override void UnselectAll()
         {
+            if (!IsDocumentValid)
+            {
+                return;
+            }
+
             _model.ClearSelection2(true);
         }
 

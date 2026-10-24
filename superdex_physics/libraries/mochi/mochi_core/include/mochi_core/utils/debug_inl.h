@@ -53,19 +53,17 @@ namespace mochi {
 
 // Assert macro implementation (does not compile out if used directly)
 #if MOCHI_HAS_VA_OPT
-#define MOCHI_ASSERT_IMPL(condition, ...)                                                  \
-  if (condition) {                                                                         \
-  } else                                                                                   \
-    MOCHI_UNLIKELY {                                                                       \
-      MOCHI_ASSERT_ON_FAILURE(__FILE__, __LINE__, #condition __VA_OPT__(, )##__VA_ARGS__); \
-    }
+#define MOCHI_ASSERT_IMPL(condition, ...)                                                \
+  if (condition) {                                                                       \
+  } else MOCHI_UNLIKELY {                                                                \
+    MOCHI_ASSERT_ON_FAILURE(__FILE__, __LINE__, #condition __VA_OPT__(, )##__VA_ARGS__); \
+  }
 #else
-#define MOCHI_ASSERT_IMPL(condition, ...)                                     \
-  if (condition) {                                                            \
-  } else                                                                      \
-    MOCHI_UNLIKELY {                                                          \
-      MOCHI_ASSERT_ON_FAILURE(__FILE__, __LINE__, #condition, ##__VA_ARGS__); \
-    }
+#define MOCHI_ASSERT_IMPL(condition, ...)                                   \
+  if (condition) {                                                          \
+  } else MOCHI_UNLIKELY {                                                   \
+    MOCHI_ASSERT_ON_FAILURE(__FILE__, __LINE__, #condition, ##__VA_ARGS__); \
+  }
 #endif
 
 // These implementation functions are inlined so that MOCHI_ASSERT can be used

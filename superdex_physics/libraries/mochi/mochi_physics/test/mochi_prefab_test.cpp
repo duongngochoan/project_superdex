@@ -14,18 +14,26 @@
  * limitations under the License.
  */
 
+#include <mochi_core/geometry/model_utils.h>
 #include <mochi_core/test/log_suppression.h>
 #include <mochi_core/test/mochi_test_helpers.h>
 #include <mochi_core/utils/defer.h>
 #include <mochi_core/utils/dynamic_array.h>
 #include <mochi_core/utils/file_utils.h>
+#include <mochi_core/utils/nd_array_utils.h>
+#include <mochi_physics/src/mochi_common_components.h>
 #include <mochi_physics/src/mochi_constraint.h>
 #include <mochi_physics/src/mochi_contact_filter.h>
+#include <mochi_physics/src/mochi_discretization_components.h>
 #include <mochi_physics/src/mochi_ecs_utils.h>
 #include <mochi_physics/src/mochi_hdf5.h>
 #include <mochi_physics/src/mochi_scene.h>
+#include <mochi_physics/src/mochi_soft_rom_components.h>
 #include <mochi_physics/utils/mochi_prefab.h>
 
+#include "mochi_physics_test_fixture.h"
+
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
@@ -63,6 +71,57 @@ static Real6 PointPairInertia(real totalMass, Real3 const& r) {
       -totalMass * r[1] * r[2],
       totalMass * (r[0] * r[0] + r[1] * r[1])};
 }
+
+#if MOCHI_LANGUAGE_CPP20
+TEST(Prefab, ConstraintParams_EqualityIncludesDerivedFields) {
+  RigidSphericalJointConstraintParams const params;
+  auto changed = params;
+  ASSERT_EQ(params, changed);
+
+  changed.localPosA = {1_r, 2_r, 3_r};
+  EXPECT_EQ(
+      static_cast<ConstraintParams const&>(params), static_cast<ConstraintParams const&>(changed));
+  EXPECT_NE(params, changed);
+
+  changed = params;
+  changed.stiffness += 1_r;
+  EXPECT_NE(params, changed);
+}
+
+TEST(Prefab, ConstraintPrefab_EqualityIncludesActorNames) {
+  prefab::RigidSphericalJointConstraintPrefab const joint;
+  auto changed = joint;
+  ASSERT_EQ(joint, changed);
+
+  changed.actorNameA = "Different";
+  EXPECT_EQ(
+      static_cast<RigidSphericalJointConstraintParams const&>(joint),
+      static_cast<RigidSphericalJointConstraintParams const&>(changed));
+  EXPECT_NE(joint, changed);
+
+  changed = joint;
+  changed.localPosA = {1_r, 0_r, 0_r};
+  EXPECT_NE(joint, changed);
+}
+
+TEST(Prefab, Scene_EqualityIncludesDerivedActorFields) {
+  prefab::ScenePrefab original;
+  original.actors.rigid.push_back().name = "Actor";
+  auto changed = original;
+  ASSERT_EQ(original, changed);
+
+  changed.actors.rigid[0].translation = {1_r, 2_r, 3_r};
+  EXPECT_EQ(
+      static_cast<RigidActorParams const&>(original.actors.rigid[0]),
+      static_cast<RigidActorParams const&>(changed.actors.rigid[0]));
+  EXPECT_NE(original.actors, changed.actors);
+  EXPECT_NE(original, changed);
+
+  changed = original;
+  changed.actors.rigid[0].name = "Different";
+  EXPECT_NE(original, changed);
+}
+#endif
 
 TEST(Prefab, ArticulatedActor_Serialization) {
   // One articulated actor with non-default settings. Does not attempt to cover every field of the
@@ -136,7 +195,12 @@ TEST(Prefab, ArticulatedActor_Serialization) {
             "contact": {
               "penaltyCoefficient": 4e9
             },
-            "boundaryElementType": "P1Q6"
+            "boundaryElementType": "P1Q6",
+            "boundarySubsampling": {
+              "subsamplingDensity": 0.25,
+              "strategy": "AreaProportional"
+            },
+            "nonCollidingLinks": ["parentLink", "childLink"]
           }
         }
       ]
@@ -185,6 +249,14 @@ TEST(Prefab, ArticulatedActor_Serialization) {
     EXPECT_STREQ("mySkinLayer", art.skin->layer.c_str());
     EXPECT_NEAR_EQ(4e9_r, art.skin->contact.penaltyCoefficient);
     EXPECT_EQ(ActorBoundaryElementType::P1Q6, art.skin->boundaryElementType);
+    ASSERT_TRUE(art.skin->boundarySubsampling.has_value());
+    EXPECT_NEAR_EQ(0.25_r, art.skin->boundarySubsampling->subsamplingDensity);
+    EXPECT_EQ(
+        BoundarySubsamplingStrategy::AreaProportional, art.skin->boundarySubsampling->strategy);
+    ASSERT_TRUE(art.skin->nonCollidingLinks.has_value());
+    ASSERT_EQ(2, static_cast<int>(art.skin->nonCollidingLinks->size()));
+    EXPECT_STREQ("parentLink", (*art.skin->nonCollidingLinks)[0].c_str());
+    EXPECT_STREQ("childLink", (*art.skin->nonCollidingLinks)[1].c_str());
   };
 
   // Load one articulated actor from JSON.
@@ -1394,6 +1466,7 @@ TEST(Prefab, SoftActor_Serialization) {
           "hasGravity": false,
           "hasInertia": false,
           "hasStress": false,
+          "useContactSkin": true,
           "boundaryElementType": "P1Q6"
         }
       ]
@@ -1439,6 +1512,7 @@ TEST(Prefab, SoftActor_Serialization) {
     EXPECT_FALSE(soft.hasGravity);
     EXPECT_FALSE(soft.hasInertia);
     EXPECT_FALSE(soft.hasStress);
+    EXPECT_TRUE(soft.useContactSkin);
     EXPECT_EQ(ActorBoundaryElementType::P1Q6, soft.boundaryElementType);
   };
 
@@ -1517,6 +1591,125 @@ TEST_IF(MOCHI_INTERNAL, Prefab, SoftActor_AddToScene) {
   EXPECT_EQ(actorHandle, result.actors[0]->GetHandle());
 }
 
+TEST_IF(MOCHI_ENABLE_ROM_ACTORS, Prefab, ExperimentalAddToScene_AppliesRomToAllSoftActors) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("my scene");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  auto tempDir = CreateTempDirectory("experimental_rom_prefab_test", ExpectOK{});
+  prefab::ScenePrefab childPrefab;
+  childPrefab.actors.soft.push_back().shapeFile = "cube/cube_mesh.mochi.json";
+  auto const childPath = tempDir.Path() / "child.mochi_scene";
+  prefab::SaveToJsonFile(childPrefab, childPath.string(), ExpectOK{});
+
+  prefab::ScenePrefab parentPrefab;
+  parentPrefab.actors.soft.push_back().shapeFile = "cube/cube_mesh.mochi.json";
+  parentPrefab.prefabs.push_back().path = childPath.string();
+  auto const parentPath = tempDir.Path() / "parent.mochi_scene";
+  prefab::SaveToJsonFile(parentPrefab, parentPath.string(), ExpectOK{});
+
+  experimental::RomParams const romParams{
+      .source = "polynomial_crom_order_1",
+      .romProjectionStrategy = experimental::RomProjectionStrategy::ElementLevelProjection};
+  auto const result = experimental::AddToScene(
+      parentPath.string(),
+      test::GetAssetsDir(),
+      scene,
+      prefab::PrefabParams{},
+      romParams,
+      test::ExpectOK{});
+
+  ASSERT_EQ(2, isize(result.actors));
+  auto const& reg = static_cast<SceneImpl*>(scene)->GetRegistry();
+  for (auto const* actor : result.actors) {
+    auto const entity = GetEntityUnchecked(actor->GetHandle());
+    ASSERT_TRUE(reg.all_of<TagRomActor>(entity));
+    ASSERT_TRUE(reg.all_of<CRomProjectionStrategy>(entity));
+    EXPECT_EQ(
+        experimental::RomProjectionStrategy::ElementLevelProjection,
+        reg.get<CRomProjectionStrategy>(entity).value);
+  }
+}
+
+TEST_IF(MOCHI_ENABLE_ROM_ACTORS, Prefab, ExperimentalAddToScene_RejectsNodeDisplacements) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+  auto suppress = test::SuppressLogError();
+
+  prefab::ScenePrefab scenePrefab;
+  auto& soft = scenePrefab.actors.soft.push_back();
+  soft.shapeFile = "cube/cube_mesh.mochi.json";
+  soft.nodeDisplacements = DynamicArray<real>{0.1_r, 0_r, 0_r};
+  auto tempDir = CreateTempDirectory("rom_prefab_displacements_test", ExpectOK{});
+  auto const prefabPath = tempDir.Path() / "rom.mochi_scene";
+  prefab::SaveToJsonFile(scenePrefab, prefabPath.string(), ExpectOK{});
+
+  experimental::RomParams const romParams{.source = "polynomial_crom_order_1"};
+  Error error;
+  auto const result = experimental::AddToScene(
+      prefabPath.string(), test::GetAssetsDir(), scene, prefab::PrefabParams{}, romParams, error);
+
+  EXPECT_STREQ(
+      "SoftActorPrefab::nodeDisplacements is not supported with ROM.", error.GetDescription());
+  EXPECT_TRUE(result.actors.empty());
+  EXPECT_EQ(0, scene->GetNumActors());
+}
+
+TEST_IF(MOCHI_ENABLE_ROM_ACTORS, Prefab, ExperimentalAddToScene_AppliesRomToNestedSoftActors) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("my scene");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  prefab::ScenePrefab scenePrefab;
+  auto& actor = scenePrefab.actors.softSkinned.push_back();
+  actor.skeletonParams.name = "RomSkeleton";
+  actor.skeletonParams.joints.push_back().type = ArticulatedJointType::Free;
+
+  auto& link = actor.skeletonParams.links.push_back();
+  link.name = "Root";
+  link.parentLink = -1;
+  link.shapeFile = "cube/cube_mesh.mochi.json";
+  link.colliderType = ColliderType::None;
+
+  auto& soft = actor.softParams.push_back();
+  soft.name = "Soft";
+  soft.shapeFile = "cube/cube_mesh.mochi.json";
+  soft.colliderType = ColliderType::None;
+  soft.hasGravity = false;
+  soft.hasInertia = true;
+  actor.softAttachLinks.push_back("Root");
+
+  auto tempDir = CreateTempDirectory("experimental_nested_rom_prefab_test", ExpectOK{});
+  auto const prefabPath = tempDir.Path() / "nested_rom.mochi_scene";
+  prefab::SaveToJsonFile(scenePrefab, prefabPath.string(), ExpectOK{});
+
+  experimental::RomParams const romParams{
+      .source = "polynomial_crom_order_1",
+      .romProjectionStrategy = experimental::RomProjectionStrategy::ActorLevelProjection};
+  auto const result = experimental::AddToScene(
+      prefabPath.string(),
+      test::GetAssetsDir(),
+      scene,
+      prefab::PrefabParams{},
+      romParams,
+      test::ExpectOK{});
+
+  ASSERT_EQ(1, isize(result.actors));
+  auto const nestedSoftActors = result.actors[0]->GetNestedSoftActors(test::ExpectOK{});
+  ASSERT_EQ(1, isize(nestedSoftActors));
+  auto const& reg = static_cast<SceneImpl*>(scene)->GetRegistry();
+  auto const entity = GetEntityUnchecked(nestedSoftActors[0]);
+  ASSERT_TRUE(reg.all_of<TagRomActor>(entity));
+  ASSERT_TRUE(reg.all_of<CRomProjectionStrategy>(entity));
+  EXPECT_EQ(
+      experimental::RomProjectionStrategy::ActorLevelProjection,
+      reg.get<CRomProjectionStrategy>(entity).value);
+}
+
 TEST_IF(MOCHI_HDF5_AND_INTERNAL, Prefab, SoftSkinnedActor_AddToScene) {
   auto* context = mochi::CreateContext(0);
   MOCHI_DEFER(mochi::DestroyContext(context));
@@ -1585,12 +1778,12 @@ TEST(Prefab, Serialization_SceneParams) {
           "dResidualAssemblyPeriod": 2,
           "maxIter": 6,
           "maxElapsedTimeSeconds": 3.14,
+          "convergenceMode": "Global",
           "absTol": 6.78e-05,
           "relTol": 6.66e-05,
           "relStepTol": 0.555,
           "stopIfNoImprovement": true,
           "psdProjMode": "IfFailRetry",
-          "gradientDescentFallback": true,
           "explosionControl": false,
           "absDivTol": 3450000000,
           "relDivTol": 44400,
@@ -1612,7 +1805,8 @@ TEST(Prefab, Serialization_SceneParams) {
           "relDivTol": 12300000000,
           "maxIter": 911,
           "restartSize": 2345,
-          "abortIfNotSpd": true
+          "abortIfNotSpd": true,
+          "verbosity": "Error"
         },
         "integrationMethod": "BDF2",
         "experimentalEval": {
@@ -1621,9 +1815,12 @@ TEST(Prefab, Serialization_SceneParams) {
           "implicitNormalForceForDissipation": true,
           "fittedSaturationHessian": {
             "contactFriction": false,
-            "jointFriction": false,
+            "jointFriction": true,
             "constraintSaturation": false
-          }
+          },
+          "frictionModel": "CinfRegularized",
+          "consistencyResNorm": true,
+          "consistencyResNormStep": 4.44e-05
         }
       }
     },
@@ -1674,10 +1871,16 @@ TEST(Prefab, Serialization_SceneParams) {
     // Solver Params:
     ASSERT_TRUE(scene.solver.has_value());
     auto const& solver = *scene.solver;
-    EXPECT_EQ(SaturationHessianParams::All(false), solver.experimentalEval.fittedSaturationHessian);
+    EXPECT_EQ(
+        (SaturationHessianParams{
+            .contactFriction = false, .jointFriction = true, .constraintSaturation = false}),
+        solver.experimentalEval.fittedSaturationHessian);
     EXPECT_EQ(true, solver.experimentalEval.implicitNormalForceForDissipation);
     EXPECT_EQ(false, solver.experimentalEval.fadeFriction);
     EXPECT_EQ(true, solver.experimentalEval.explicitNormals);
+    EXPECT_EQ(CoulombFrictionModel::CinfRegularized, solver.experimentalEval.frictionModel);
+    EXPECT_EQ(true, solver.experimentalEval.consistencyResNorm);
+    EXPECT_NEAR_EQ(4.44e-5_r, solver.experimentalEval.consistencyResNormStep);
     EXPECT_EQ(IntegrationMethod::BDF2, solver.integrationMethod);
     EXPECT_EQ(LinearSolverType::ParallelCG, solver.linearSolver.solverType);
     EXPECT_EQ(PreconditionerType::BlockJacobi, solver.linearSolver.preconditionerType);
@@ -1687,11 +1890,14 @@ TEST(Prefab, Serialization_SceneParams) {
     EXPECT_NEAR_EQ(12300000000_r, solver.linearSolver.relDivTol);
     EXPECT_NEAR_EQ(3.32e-6_r, solver.linearSolver.relTol);
     EXPECT_EQ(2345, solver.linearSolver.restartSize);
+    EXPECT_TRUE(solver.linearSolver.abortIfNotSpd);
+    EXPECT_EQ(VerbosityLevel::Error, solver.linearSolver.verbosity);
     EXPECT_EQ(NonLinearSolverType::BFGS, solver.nonLinearSolver.solverType);
     EXPECT_EQ(
         LinearToleranceStrategy::EisenstatWalker1, solver.nonLinearSolver.linearToleranceStrategy);
     EXPECT_EQ(6, solver.nonLinearSolver.maxIter);
     EXPECT_NEAR_EQ(3.14, solver.nonLinearSolver.maxElapsedTimeSeconds);
+    EXPECT_EQ(NonLinearSolverConvergenceMode::Global, solver.nonLinearSolver.convergenceMode);
     EXPECT_NEAR_EQ(6.66e-5_r, solver.nonLinearSolver.relTol);
     EXPECT_NEAR_EQ(44400_r, solver.nonLinearSolver.relDivTol);
     EXPECT_NEAR_EQ(0.555_r, solver.nonLinearSolver.relStepTol);
@@ -1705,7 +1911,6 @@ TEST(Prefab, Serialization_SceneParams) {
     EXPECT_EQ(LineSearchType::Simple, solver.nonLinearSolver.lineSearchType);
     EXPECT_EQ(2, solver.nonLinearSolver.dResidualAssemblyPeriod);
     EXPECT_FALSE(solver.nonLinearSolver.explosionControl);
-    EXPECT_TRUE(solver.nonLinearSolver.gradientDescentFallback);
     EXPECT_TRUE(solver.nonLinearSolver.stopIfNoImprovement);
     EXPECT_EQ(VerbosityLevel::Verbose, solver.nonLinearSolver.verbosity);
     EXPECT_EQ(PsdProjectionMode::IfFailRetry, solver.nonLinearSolver.psdProjMode);
@@ -1972,8 +2177,76 @@ TEST(Prefab, LoadNestedPrefabs_ReloadsOnPathChange) {
   EXPECT_STREQ("ActorFromB", scenePrefab.prefabs[0].prefab->actors.rigid[0].name.c_str());
 }
 
-// Loads nested prefabs and asserts the load fails with the cyclic-reference error. Cycle detection
-// legitimately logs to LogChannel::Error, so it is suppressed for the duration.
+TEST(Prefab, LoadNestedPrefabs_PreservesPopulatedPathlessReference) {
+  auto tempDir = CreateTempDirectory("pathless_nested_test", ExpectOK{});
+  WriteFile(
+      tempDir.Path() / "grandchild.mochi_scene",
+      R"({"actors": {"rigid": [{"name": "Grandchild"}]}})",
+      ExpectOK{});
+
+  auto child = std::make_shared<prefab::ScenePrefab>();
+  child->prefabs.push_back().path = "grandchild.mochi_scene";
+  prefab::ScenePrefab root;
+  root.prefabs.push_back().prefab = child;
+
+  prefab::LoadNestedPrefabs(root, tempDir.Path().string(), ExpectOK{});
+
+  EXPECT_EQ(child, root.prefabs[0].prefab);
+  ASSERT_NE(nullptr, child->prefabs[0].prefab);
+  ASSERT_EQ(1, child->prefabs[0].prefab->actors.rigid.size());
+  EXPECT_STREQ("Grandchild", child->prefabs[0].prefab->actors.rigid[0].name.c_str());
+}
+
+TEST(Prefab, LoadNestedPrefabs_RejectsUnpopulatedPathlessReference) {
+  prefab::ScenePrefab root;
+  auto& reference = root.prefabs.push_back();
+
+  Error error;
+  {
+    auto suppressError = test::SuppressLogError();
+    prefab::LoadNestedPrefabs(root, test::GetAssetsDir(), error);
+  }
+
+  EXPECT_NOT_OK(error);
+  EXPECT_NE(error.ToString().find("nested prefab reference"), std::string::npos);
+  EXPECT_EQ(nullptr, reference.prefab);
+}
+
+TEST(Prefab, LoadNestedPrefabs_FailedReloadPreservesExistingReference) {
+  auto tempDir = CreateTempDirectory("failed_nested_reload_test", ExpectOK{});
+  auto existing = std::make_shared<prefab::ScenePrefab>();
+  existing->actors.rigid.push_back().name = "Existing";
+
+  prefab::ScenePrefab root;
+  auto& reference = root.prefabs.push_back();
+  reference.path = "missing.mochi_scene";
+  reference.prefab = existing;
+
+  Error missingReplacementError;
+  {
+    auto suppressError = test::SuppressLogError();
+    prefab::LoadNestedPrefabs(root, tempDir.Path().string(), missingReplacementError);
+  }
+  EXPECT_NOT_OK(missingReplacementError);
+  EXPECT_EQ(existing, reference.prefab);
+
+  // The replacement itself loads, but its missing child prevents publication of the replacement.
+  WriteFile(
+      tempDir.Path() / "replacement.mochi_scene",
+      R"({"prefabs": [{"path": "missing.mochi_scene"}]})",
+      ExpectOK{});
+  reference.path = "replacement.mochi_scene";
+  Error missingDescendantError;
+  {
+    auto suppressError = test::SuppressLogError();
+    prefab::LoadNestedPrefabs(root, tempDir.Path().string(), missingDescendantError);
+  }
+  EXPECT_NOT_OK(missingDescendantError);
+  EXPECT_EQ(existing, reference.prefab);
+  ASSERT_EQ(1, reference.prefab->actors.rigid.size());
+  EXPECT_STREQ("Existing", reference.prefab->actors.rigid[0].name.c_str());
+}
+
 static void ExpectPrefabCycleError(Error const& error) {
   EXPECT_NOT_OK(error);
   EXPECT_NE(
@@ -2065,20 +2338,28 @@ TEST(Prefab, LoadNestedPrefabs_DetectsMutualCycle) {
 TEST(Prefab, EnsureFullyLoaded_InMemoryNestedTreeIsNotACycle) {
   auto* context = mochi::CreateContext(0);
   MOCHI_DEFER(mochi::DestroyContext(context));
+  auto tempDir = CreateTempDirectory("in_memory_nested_tree_test", ExpectOK{});
+  WriteFile(tempDir.Path() / "loaded.mochi_scene", R"({})", ExpectOK{});
 
   // Depth-2 tree of in-memory (pathless) prefabs. Their resolved paths all collapse to rootPath, so
   // a cycle guard keyed on the resolved path would falsely reject the inner reference; gating on
   // the reference's own (empty) path treats these as non-file references and skips path-based cycle
   // tracking.
   // Runs through EnsureFullyLoaded (skipLoaded=true), the path where that false positive would
-  // surface.
+  // surface. It also verifies that both pathless handles are retained while their file-backed
+  // descendant is loaded.
   auto grandchild = std::make_shared<prefab::ScenePrefab>();
+  grandchild->prefabs.push_back().path = "loaded.mochi_scene";
   auto child = std::make_shared<prefab::ScenePrefab>();
   child->prefabs.push_back().prefab = grandchild;
   prefab::ScenePrefab root;
   root.prefabs.push_back().prefab = child;
 
-  prefab::EnsureFullyLoaded(root, test::GetAssetsDir(), context, test::ExpectOK{});
+  prefab::EnsureFullyLoaded(root, tempDir.Path().string(), context, test::ExpectOK{});
+
+  EXPECT_EQ(child, root.prefabs[0].prefab);
+  EXPECT_EQ(grandchild, child->prefabs[0].prefab);
+  EXPECT_NE(nullptr, grandchild->prefabs[0].prefab);
 }
 
 TEST(Prefab, SharedInMemoryNestedPrefabIsNotACycle) {
@@ -2104,6 +2385,15 @@ TEST(Prefab, PathlessInMemoryNestedCycle_DetectedByPublicTraversals) {
   MOCHI_DEFER(mochi::DestroyContext(context));
   auto* scene = context->CreateScene("my scene");
   MOCHI_DEFER(context->DestroyScene(scene));
+
+  {
+    auto scenePrefab = MakePathlessSelfCyclePrefab();
+    MOCHI_DEFER(scenePrefab->prefabs.clear());
+    Error error;
+    auto suppressError = test::SuppressLogError();
+    prefab::LoadNestedPrefabs(*scenePrefab, test::GetAssetsDir(), error);
+    ExpectPrefabCycleError(error);
+  }
 
   {
     auto scenePrefab = MakePathlessSelfCyclePrefab();
@@ -4036,7 +4326,7 @@ TEST_IF(MOCHI_INTERNAL, Prefab, AddToSceneResult_NestedPrefabs) {
   {
     auto& nested = topPrefab.prefabs.push_back();
     nested.name = "child";
-    nested.path = "in_memory";
+    // Procedural child with no file backing; leave nested.path empty.
     nested.prefab = childPrefab;
   }
 
@@ -4629,12 +4919,12 @@ TEST(Prefab, ValidateScale) {
     prefab::AddToScene(scenePrefab, scene, {}, test::ExpectNotOK{});
   }
 
-  // SoftActorPrefab::scale: Components must be strictly positive and finite.
+  // SoftActorPrefab::scale: Components must be non-zero and finite.
   {
     prefab::ScenePrefab scenePrefab;
     auto& soft = scenePrefab.actors.soft.push_back();
     soft.name = "s";
-    soft.scale = Real3{-1_r, -1_r, -1_r};
+    soft.scale = Real3{0_r, 1_r, 1_r};
     prefab::AddToScene(scenePrefab, scene, {}, test::ExpectNotOK{});
 
     soft.scale = Real3{std::numeric_limits<real>::min(), 1_r, 1_r};
@@ -5126,4 +5416,511 @@ TEST(Prefab, LoadShapes_EmptyShapeFileReturnsError) {
   auto suppress = test::SuppressLogError();
   prefab::LoadShapes(scenePrefab, test::GetAssetsDir(), context, test::ExpectNotOK{});
   EXPECT_FALSE(scenePrefab.actors.rigid[0].shape.IsValid());
+}
+
+TEST(Prefab, ContactPairParamsOverride_SerializationPreservesSparseFields) {
+  auto const verify = [](prefab::ScenePrefab const& scenePrefab) {
+    ASSERT_TRUE(scenePrefab.contactPairParamsOverrides.has_value());
+    ASSERT_EQ(2, isize(*scenePrefab.contactPairParamsOverrides));
+
+    auto const& pair = (*scenePrefab.contactPairParamsOverrides)[0];
+    ASSERT_EQ(2, isize(pair.actors));
+    EXPECT_STREQ("ActorA", pair.actors[0].c_str());
+    EXPECT_STREQ("ActorB", pair.actors[1].c_str());
+    EXPECT_EQ(std::optional<real>{12_r}, pair.paramsOverride.penaltyCoefficient);
+    EXPECT_EQ(std::optional<real>{0_r}, pair.paramsOverride.coulombFrictionCoefficient);
+    EXPECT_FALSE(pair.paramsOverride.frictionFalloffVel.has_value());
+    EXPECT_FALSE(pair.paramsOverride.viscousFrictionCoefficient.has_value());
+    EXPECT_FALSE(pair.paramsOverride.normalViscousDampingCoefficient.has_value());
+
+    auto const& self = (*scenePrefab.contactPairParamsOverrides)[1];
+    ASSERT_EQ(2, isize(self.actors));
+    EXPECT_STREQ("Self", self.actors[0].c_str());
+    EXPECT_STREQ("Self", self.actors[1].c_str());
+    EXPECT_EQ(std::optional<real>{0_r}, self.paramsOverride.frictionFalloffVel);
+    EXPECT_FALSE(self.paramsOverride.penaltyCoefficient.has_value());
+  };
+
+  auto scenePrefab = prefab::ShallowLoadFromJsonString(
+      R"({
+        "contactPairParamsOverrides": [
+          {
+            "actors": ["ActorA", "ActorB"],
+            "paramsOverride": {
+              "penaltyCoefficient": 12,
+              "coulombFrictionCoefficient": 0
+            }
+          },
+          {
+            "actors": ["Self", "Self"],
+            "paramsOverride": {"frictionFalloffVel": 0}
+          }
+        ]
+      })",
+      test::ExpectOK{});
+  verify(scenePrefab);
+
+  auto const json = prefab::SaveToJsonString(scenePrefab, test::ExpectOK{});
+  EXPECT_NE(std::string::npos, json.find("\"coulombFrictionCoefficient\": 0"));
+  verify(prefab::ShallowLoadFromJsonString(json, test::ExpectOK{}));
+}
+
+TEST_IF(
+    MOCHI_INTERNAL,
+    Prefab,
+    ContactPairParamsOverride_AppliesNestedPrefabPathsAndLastEntryWins) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  auto child = std::make_shared<prefab::ScenePrefab>();
+  child->actors.rigid.push_back(MakeRigidBox("A"));
+  child->actors.rigid.push_back(MakeRigidBox("B"));
+  auto& childOverrides = child->contactPairParamsOverrides.emplace();
+  auto& childEntry = childOverrides.push_back();
+  childEntry.actors = {"A", "B"};
+  childEntry.paramsOverride.penaltyCoefficient = 3_r;
+  auto& childSelf = childOverrides.push_back();
+  childSelf.actors = {"A", "A"};
+  childSelf.paramsOverride.normalViscousDampingCoefficient = 4_r;
+
+  prefab::ScenePrefab scenePrefab;
+  scenePrefab.actors.rigid.push_back(MakeRigidBox("Self"));
+  auto& childRef = scenePrefab.prefabs.push_back();
+  childRef.name = "child";
+  childRef.prefab = child;
+  childRef.scale = 2_r;
+
+  auto& overrides = scenePrefab.contactPairParamsOverrides.emplace();
+  auto& firstReplacement = overrides.push_back();
+  firstReplacement.actors = {"child/A", "child/B"};
+  firstReplacement.paramsOverride.penaltyCoefficient = 6_r;
+  auto& lastReplacement = overrides.push_back();
+  lastReplacement.actors = {"child/B", "child/A"};
+  lastReplacement.paramsOverride.viscousFrictionCoefficient = 0.25_r;
+  auto& self = overrides.push_back();
+  self.actors = {"Self", "Self"};
+  self.paramsOverride.frictionFalloffVel = 0_r;
+
+  prefab::LoadShapes(scenePrefab, test::GetAssetsDir(), context, test::ExpectOK{});
+  prefab::AddToScene(scenePrefab, scene, {}, test::ExpectOK{});
+
+  auto const actorA = FindActorByName(scene, "child/A");
+  auto const actorB = FindActorByName(scene, "child/B");
+  auto const selfActor = FindActorByName(scene, "Self");
+  auto const pairOverride = scene->GetContactPairParamsOverride(actorB, actorA, test::ExpectOK{});
+  EXPECT_FALSE(pairOverride.penaltyCoefficient.has_value());
+  EXPECT_EQ(std::optional<real>{0.25_r}, pairOverride.viscousFrictionCoefficient);
+  auto const childSelfOverride =
+      scene->GetContactPairParamsOverride(actorA, actorA, test::ExpectOK{});
+  EXPECT_EQ(std::optional<real>{4_r}, childSelfOverride.normalViscousDampingCoefficient);
+  auto const selfOverride =
+      scene->GetContactPairParamsOverride(selfActor, selfActor, test::ExpectOK{});
+  EXPECT_EQ(std::optional<real>{0_r}, selfOverride.frictionFalloffVel);
+}
+
+TEST_IF(MOCHI_INTERNAL, Prefab, ContactPairParamsOverride_RejectsInvalidActorNames) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+
+  auto makeEntry = [](prefab::ScenePrefab& scenePrefab, char const* actorA, char const* actorB) {
+    auto& entry = scenePrefab.contactPairParamsOverrides.emplace().push_back();
+    entry.actors = {actorA, actorB};
+    entry.paramsOverride.penaltyCoefficient = 1_r;
+  };
+
+  {
+    auto* scene = context->CreateScene("missing");
+    MOCHI_DEFER(context->DestroyScene(scene));
+    prefab::ScenePrefab scenePrefab;
+    scenePrefab.actors.rigid.push_back(MakeRigidBox("Cube"));
+    makeEntry(scenePrefab, "Cube", "Missing");
+    prefab::LoadShapes(scenePrefab, test::GetAssetsDir(), context, test::ExpectOK{});
+    auto suppress = test::SuppressLogError();
+    prefab::AddToScene(scenePrefab, scene, {}, test::ExpectNotOK{});
+  }
+
+  {
+    auto* scene = context->CreateScene("ambiguous");
+    MOCHI_DEFER(context->DestroyScene(scene));
+    prefab::ScenePrefab scenePrefab;
+    scenePrefab.actors.rigid.push_back(MakeRigidBox("Cube"));
+    scenePrefab.actors.rigid.push_back(MakeRigidBox("Cube"));
+    makeEntry(scenePrefab, "Cube", "Cube");
+    prefab::LoadShapes(scenePrefab, test::GetAssetsDir(), context, test::ExpectOK{});
+    ExpectAmbiguousActorNameError(scenePrefab, scene);
+  }
+
+  for (int numActors : {0, 1, 3}) {
+    auto* scene = context->CreateScene("wrong-size");
+    MOCHI_DEFER(context->DestroyScene(scene));
+    prefab::ScenePrefab scenePrefab;
+    auto& entry = scenePrefab.contactPairParamsOverrides.emplace().push_back();
+    entry.paramsOverride.penaltyCoefficient = 1_r;
+    for (int i = 0; i < numActors; ++i) {
+      auto const actorName = "Actor" + std::to_string(i);
+      scenePrefab.actors.rigid.push_back(MakeRigidBox(actorName));
+      entry.actors.push_back(DynamicString(actorName));
+    }
+    prefab::LoadShapes(scenePrefab, test::GetAssetsDir(), context, test::ExpectOK{});
+
+    Error error;
+    prefab::AddToScene(scenePrefab, scene, {}, error);
+    EXPECT_STREQ(
+        "ContactPairParamsOverrideEntry must have exactly 2 actors.", error.GetDescription());
+  }
+}
+
+// Shape-less articulated chain covering every DoF kind: a Free root (3 translational then 3
+// rotational DoFs), then Revolute (1), Prismatic (1), and Spherical (3) joints.
+[[nodiscard]] static prefab::ArticulatedActorPrefab MakeMixedJointChain(
+    std::optional<DynamicArray<real>> jointPose) {
+  prefab::ArticulatedActorPrefab art;
+  art.name = "Chain";
+  ArticulatedJointType const jointTypes[] = {
+      ArticulatedJointType::Free,
+      ArticulatedJointType::Revolute,
+      ArticulatedJointType::Prismatic,
+      ArticulatedJointType::Spherical};
+  for (int i = 0; i < isize(jointTypes); ++i) {
+    auto& joint = art.joints.push_back();
+    joint.type = jointTypes[i];
+    joint.axis = Real3{0_r, 0_r, 1_r};
+    auto& link = art.links.push_back();
+    link.name = "link" + std::to_string(i);
+    link.parentLink = i - 1;
+  }
+  art.jointPose = std::move(jointPose);
+  return art;
+}
+
+// A pose for MakeMixedJointChain, laid out as described there.
+[[nodiscard]] static DynamicArray<real> MakeMixedChainPose() {
+  return {0.1_r, -0.2_r, 0.3_r, 0.2_r, -0.1_r, 0.3_r, 0.4_r, 0.05_r, -0.3_r, 0.2_r, 0.1_r};
+}
+
+// Soft-skinned actor with procedural shapes: a Free root link carrying one nested soft actor whose
+// shape has the skinning and constrained nodes nested soft actors require.
+[[nodiscard]] static prefab::SoftSkinnedActorPrefab MakeSoftSkinnedActor(Context* context) {
+  prefab::SoftSkinnedActorPrefab actor;
+  actor.skeletonParams.name = "Skeleton";
+  actor.skeletonParams.joints.push_back().type = ArticulatedJointType::Free;
+  auto& link = actor.skeletonParams.links.push_back();
+  link.name = "Root";
+  link.parentLink = -1;
+  link.shape = test::CreateUnitCubeTetMeshShape(context);
+  link.colliderType = ColliderType::None;
+  auto& soft = actor.softParams.push_back();
+  soft.name = "Soft";
+  soft.shape = test::CreateUnitCubeTetSoftShape(context);
+  soft.hasGravity = false;
+  return actor;
+}
+
+// Standalone soft actor with a preset unit-cube shape, which is not baked by the prefab.
+[[nodiscard]] static prefab::SoftActorPrefab MakeUnitCubeSoft(Context* context) {
+  prefab::SoftActorPrefab soft;
+  soft.name = "Soft";
+  soft.shape = test::CreateUnitCubeTetMeshShape(context);
+  return soft;
+}
+
+// Number of displacement values of the soft actors of MakeUnitCubeSoft and MakeSoftSkinnedActor.
+[[nodiscard]] static int GetNumUnitCubeDisplacements() {
+  return 3 * isize(test::CreateMinimalTetMeshUnitCube().first);
+}
+
+[[nodiscard]] static DynamicArray<real> MakeTestDisplacements(int size) {
+  DynamicArray<real> displacements(size);
+  for (int i = 0; i < size; ++i) {
+    displacements[i] = 0.01_r * StaticCast<real>((i % 7) - 3);
+  }
+  return displacements;
+}
+
+[[nodiscard]] static DynamicArray<real> Scaled(Span<real const> values, real alpha) {
+  DynamicArray<real> scaled(isize(values));
+  std::ranges::transform(values, scaled.begin(), [alpha](real x) { return alpha * x; });
+  return scaled;
+}
+
+[[nodiscard]] static DynamicArray<real> GetArticulatedPose(Actor const* actor) {
+  DynamicArray<real> pose(actor->GetNumDofs());
+  actor->GetArticulatedPose(pose, test::ExpectOK{});
+  return pose;
+}
+
+// Elastic (pre-skinning) displacements of a soft actor. For standalone soft actors, this matches
+// Actor::GetDisplacements.
+[[nodiscard]] static Span<real const> GetElasticDisplacements(Scene* scene, ActorHandle handle) {
+  auto const& reg = assert_cast<SceneImpl*>(scene)->GetRegistry();
+  return MakeConstSpan(
+      reg.get<CDisplacementSlice<real, TimeStep::Current> const>(GetEntityUnchecked(handle)).value);
+}
+
+// Flattened local rest positions of a soft actor's simulation nodes.
+[[nodiscard]] static Span<real const> GetRestPositions(Scene* scene, ActorHandle handle) {
+  auto const& reg = assert_cast<SceneImpl*>(scene)->GetRegistry();
+  return Flatten(
+      reg.get<CTetrahedralMesh const>(GetEntityUnchecked(handle)).mesh->GetNodeCoordinates());
+}
+
+TEST(Prefab, InitialState_Serialization) {
+  prefab::ScenePrefab scenePrefab;
+  auto& soft = scenePrefab.actors.soft.push_back();
+  soft.nodeDisplacements = DynamicArray<real>{0.5_r, -0.25_r, 1_r, 0_r, 2_r, -4_r};
+  auto& art = scenePrefab.actors.articulated.push_back();
+  art.jointPose = DynamicArray<real>{0.125_r, -1.5_r, 3_r};
+
+  auto const json = prefab::SaveToJsonString(scenePrefab, test::ExpectOK{});
+  auto const loaded = prefab::ShallowLoadFromJsonString(json, test::ExpectOK{});
+  ASSERT_EQ(1, isize(loaded.actors.soft));
+  EXPECT_EQ(soft.nodeDisplacements, loaded.actors.soft[0].nodeDisplacements);
+  ASSERT_EQ(1, isize(loaded.actors.articulated));
+  EXPECT_EQ(art, loaded.actors.articulated[0]);
+}
+
+TEST(Prefab, ArticulatedActor_JointPose) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  auto const pose = MakeMixedChainPose();
+  DynamicArray<real> const velocities = {
+      0.5_r, -0.4_r, 0.3_r, -0.2_r, 0.1_r, 0.6_r, -0.7_r, 0.8_r, -0.9_r, 0.2_r, -0.3_r};
+  prefab::ScenePrefab scenePrefab;
+  auto& art = scenePrefab.actors.articulated.push_back();
+  art = MakeMixedJointChain(pose);
+  art.jointVelocities = velocities;
+  auto const result = prefab::AddToScene(scenePrefab, scene, test::ExpectOK{});
+
+  Actor const* actor = result.actors[0];
+  ASSERT_EQ(isize(pose), actor->GetNumDofs());
+  EXPECT_TRUE(test::NearEqualSpan(pose, GetArticulatedPose(actor), 1e-5_r));
+  // Setting the pose after creation keeps the authored joint velocities.
+  DynamicArray<real> actualVelocities(actor->GetNumDofs());
+  actor->GetArticulatedJointVelocities(actualVelocities, test::ExpectOK{});
+  EXPECT_TRUE(test::NearEqualSpan(velocities, actualVelocities, 1e-5_r));
+}
+
+TEST(Prefab, SoftActor_Displacements) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  auto const displacements = MakeTestDisplacements(GetNumUnitCubeDisplacements());
+  prefab::ScenePrefab scenePrefab;
+  auto& soft = scenePrefab.actors.soft.push_back();
+  soft = MakeUnitCubeSoft(context);
+  soft.nodeDisplacements = displacements;
+  auto const result = prefab::AddToScene(scenePrefab, scene, test::ExpectOK{});
+
+  EXPECT_SPAN_EQ(displacements, result.actors[0]->GetDisplacements(test::ExpectOK{}));
+}
+
+// Nested prefab scale reaches the skeleton pose, while nested soft displacements of a preset shape
+// handle stay unchanged, like its unbaked geometry.
+TEST(Prefab, SoftSkinnedActor_Displacements) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  real const nestedScale = 2_r;
+  real const skeletonScale = 1.5_r;
+  DynamicArray<real> const skeletonPose = {0.1_r, -0.2_r, 0.3_r, 0.2_r, -0.1_r, 0.3_r};
+  auto const softDisplacements = MakeTestDisplacements(GetNumUnitCubeDisplacements());
+  auto inner = std::make_shared<prefab::ScenePrefab>();
+  auto& actor = inner->actors.softSkinned.push_back();
+  actor = MakeSoftSkinnedActor(context);
+  actor.skeletonParams.scale = skeletonScale;
+  actor.skeletonParams.jointPose = skeletonPose;
+  actor.softParams[0].scale = Real3{3_r, 3_r, 3_r};
+  actor.softParams[0].nodeDisplacements = softDisplacements;
+  prefab::ScenePrefab scenePrefab;
+  auto& nestedRef = scenePrefab.prefabs.push_back();
+  nestedRef.scale = nestedScale;
+  nestedRef.prefab = inner;
+  auto const result = prefab::AddToScene(scenePrefab, scene, test::ExpectOK{});
+
+  DynamicArray<real> expectedPose = skeletonPose;
+  for (int i : {0, 1, 2}) {
+    expectedPose[i] *= skeletonScale * nestedScale;
+  }
+  Actor const* skeleton = result.actors[0];
+  EXPECT_TRUE(test::NearEqualSpan(expectedPose, GetArticulatedPose(skeleton), 1e-5_r));
+  auto const nestedSofts = skeleton->GetNestedSoftActors(test::ExpectOK{});
+  ASSERT_EQ(1, isize(nestedSofts));
+  EXPECT_SPAN_EQ(softDisplacements, GetElasticDisplacements(scene, nestedSofts[0]));
+}
+
+TEST(Prefab, InitialState_EmptyIsIgnored) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+
+  prefab::ScenePrefab scenePrefab;
+  auto& soft = scenePrefab.actors.soft.push_back();
+  soft = MakeUnitCubeSoft(context);
+  soft.nodeDisplacements.emplace();
+  scenePrefab.actors.articulated.push_back(MakeMixedJointChain(DynamicArray<real>{}));
+  auto const result = prefab::AddToScene(scenePrefab, scene, test::ExpectOK{});
+
+  auto const displacements = result.Filter(ActorType::Soft)[0]->GetDisplacements(test::ExpectOK{});
+  EXPECT_SPAN_EQ(DynamicArray<real>(isize(displacements)), displacements);
+  Actor const* chain = result.Filter(ActorType::Articulated)[0];
+  EXPECT_SPAN_EQ(DynamicArray<real>(chain->GetNumDofs()), GetArticulatedPose(chain));
+}
+
+// One wrong-size case per call site. Non-finite values are rejected by the actor setters.
+TEST(Prefab, InitialState_Invalid) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto suppress = test::SuppressLogError();
+
+  auto expectError = [&](prefab::ActorLists actors, char const* expectedError) {
+    auto* scene = context->CreateScene("test");
+    MOCHI_DEFER(context->DestroyScene(scene));
+    prefab::ScenePrefab scenePrefab;
+    scenePrefab.actors = std::move(actors);
+    Error error;
+    prefab::AddToScene(scenePrefab, scene, error);
+    EXPECT_STREQ(expectedError, error.GetDescription());
+  };
+  char const* const kNodeError =
+      "SoftActorPrefab::nodeDisplacements must have 3 values per simulation node.";
+  char const* const kJointError = "ArticulatedActorPrefab::jointPose must have one value per DoF.";
+  auto const wrongNodeDisplacements = MakeTestDisplacements(GetNumUnitCubeDisplacements() + 3);
+  DynamicArray<real> const wrongJointPose = {0.1_r, 0.2_r};
+
+  auto soft = MakeUnitCubeSoft(context);
+  soft.nodeDisplacements = wrongNodeDisplacements;
+  expectError({.soft = {soft}}, kNodeError);
+
+  expectError({.articulated = {MakeMixedJointChain(wrongJointPose)}}, kJointError);
+
+  auto nestedSoft = MakeSoftSkinnedActor(context);
+  nestedSoft.softParams[0].nodeDisplacements = wrongNodeDisplacements;
+  expectError({.softSkinned = {nestedSoft}}, kNodeError);
+
+  auto skeleton = MakeSoftSkinnedActor(context);
+  skeleton.skeletonParams.jointPose = wrongJointPose;
+  expectError({.softSkinned = {skeleton}}, kJointError);
+}
+
+TEST(Prefab, InitialState_TransformLikeGeometry) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto tempDir = CreateTempDirectory("prefab_displacements_scale_test", test::ExpectOK{});
+
+  // A unit-cube shape file, so the soft actor's shape is baked by the prefab.
+  auto [coordinates, connectivity] = test::CreateMinimalTetMeshUnitCube();
+  ModelData cubeModel;
+  auto& mesh = cubeModel.mesh.emplace();
+  mesh.nodesPerElement = 4;
+  mesh.coordinates = Flatten(MakeSpan(coordinates));
+  mesh.connectivity = Flatten(MakeSpan(connectivity));
+  auto const shapePath = tempDir.Path() / "cube.mochi.json";
+  model::SaveToFile(cubeModel, shapePath.string(), FileFormat::JSON, test::ExpectOK{});
+
+  // Effective prefab scale is PrefabParams::scale * PrefabReference::scale = 3 * 2 = 6.
+  real const prefabScale = 3_r;
+  real const nestedScale = 2_r;
+  real const articulatedScale = 1.5_r;
+  // Displacements authored as alpha * (model-space rest positions).
+  real const alpha = 0.1_r;
+
+  prefab::ScenePrefab childPrefab;
+  auto& soft = childPrefab.actors.soft.push_back();
+  soft.name = "Soft";
+  soft.shapeFile = shapePath.string();
+  soft.useRecentering = false;
+  // A 90 degree rotation about z with non-uniform scale makes the bake order observable.
+  soft.shapeRotation = Quaternion::FromAxisAngle(Real3{0_r, 0_r, 1_r}, kPI / 2_r);
+  soft.scale = Real3{0.5_r, 1_r, 2_r};
+  soft.nodeDisplacements = Scaled(mesh.coordinates, alpha);
+  auto const pose = MakeMixedChainPose();
+  auto& art = childPrefab.actors.articulated.push_back();
+  art = MakeMixedJointChain(pose);
+  art.scale = articulatedScale;
+
+  auto const childPath = tempDir.Path() / "child.mochi_scene";
+  prefab::SaveToJsonFile(childPrefab, childPath.string(), test::ExpectOK{});
+  prefab::ScenePrefab parentPrefab;
+  auto& nestedRef = parentPrefab.prefabs.push_back();
+  nestedRef.path = childPath.string();
+  nestedRef.scale = nestedScale;
+  auto const parentPath = tempDir.Path() / "parent.mochi_scene";
+  prefab::SaveToJsonFile(parentPrefab, parentPath.string(), test::ExpectOK{});
+
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+  prefab::PrefabParams params;
+  params.scale = prefabScale;
+  auto const result = prefab::AddToScene(
+      parentPath.string(), test::GetAssetsDir(), scene, params, test::ExpectOK{});
+
+  // Soft: displacements authored as alpha * (model rest) must become alpha * (baked rest).
+  auto const softs = result.Filter(ActorType::Soft);
+  ASSERT_EQ(1, isize(softs));
+  EXPECT_TRUE(
+      test::NearEqualSpan(
+          Scaled(GetRestPositions(scene, softs[0]->GetHandle()), alpha),
+          softs[0]->GetDisplacements(test::ExpectOK{}),
+          1e-5_r));
+
+  // Articulated: only the free-joint translation (0-2) and prismatic (7) DoFs are distances.
+  real const effectiveScale = prefabScale * nestedScale;
+  DynamicArray<real> expectedPose = pose;
+  for (int i : {0, 1, 2, 7}) {
+    expectedPose[i] *= articulatedScale * effectiveScale;
+  }
+  auto const articulated = result.Filter(ActorType::Articulated);
+  ASSERT_EQ(1, isize(articulated));
+  EXPECT_TRUE(test::NearEqualSpan(expectedPose, GetArticulatedPose(articulated[0]), 1e-5_r));
+}
+
+TEST(Prefab, Displacements_NegativeScaleMirrorsGeometry) {
+  auto* context = mochi::CreateContext(0);
+  MOCHI_DEFER(mochi::DestroyContext(context));
+  auto* scene = context->CreateScene("test");
+  MOCHI_DEFER(context->DestroyScene(scene));
+  auto tempDir = CreateTempDirectory("prefab_displacements_mirror_test", test::ExpectOK{});
+
+  auto [coordinates, connectivity] = test::CreateMinimalTetMeshUnitCube();
+  ModelData cubeModel;
+  auto& mesh = cubeModel.mesh.emplace();
+  mesh.nodesPerElement = 4;
+  mesh.coordinates = Flatten(MakeSpan(coordinates));
+  mesh.connectivity = Flatten(MakeSpan(connectivity));
+  auto const shapePath = tempDir.Path() / "cube.mochi.json";
+  model::SaveToFile(cubeModel, shapePath.string(), FileFormat::JSON, test::ExpectOK{});
+
+  auto const displacements = MakeTestDisplacements(isize(mesh.coordinates));
+  prefab::ScenePrefab scenePrefab;
+  auto& soft = scenePrefab.actors.soft.push_back();
+  soft.name = "Soft";
+  soft.shapeFile = shapePath.string();
+  soft.useRecentering = false;
+  soft.scale = Real3{-1_r, 1_r, 1_r};
+  soft.nodeDisplacements = displacements;
+  auto const prefabPath = tempDir.Path() / "mirrored.mochi_scene";
+  prefab::SaveToJsonFile(scenePrefab, prefabPath.string(), test::ExpectOK{});
+
+  auto const result =
+      prefab::AddToScene(prefabPath.string(), test::GetAssetsDir(), scene, {}, test::ExpectOK{});
+
+  ASSERT_EQ(1, isize(result.actors));
+  DynamicArray<real> expectedPositions = mesh.coordinates;
+  DynamicArray<real> expectedDisplacements = displacements;
+  for (int i = 0; i < isize(expectedPositions); i += 3) {
+    expectedPositions[i] = -expectedPositions[i];
+    expectedDisplacements[i] = -expectedDisplacements[i];
+  }
+  EXPECT_SPAN_EQ(expectedPositions, GetRestPositions(scene, result.actors[0]->GetHandle()));
+  EXPECT_SPAN_EQ(expectedDisplacements, result.actors[0]->GetDisplacements(test::ExpectOK{}));
 }

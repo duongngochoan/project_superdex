@@ -37,6 +37,31 @@ using namespace mochi::dbg;
 
 static constexpr double kCommandTimeout = 3.0; // seconds
 
+uint64_t StepProfileHistory::GetBeginSequence() const {
+  return empty() ? 0 : front().sequence;
+}
+
+uint64_t StepProfileHistory::GetEndSequence() const {
+  return empty() ? 0 : back().sequence + 1;
+}
+
+void StepProfileHistory::Append(DynamicArray<protocol::StepProfileData> const& profiles) {
+  for (auto const& profile : profiles) {
+    _profiles.push_back(profile);
+  }
+}
+
+void StepProfileHistory::Trim(int maxSize) {
+  int const excess = isize(_profiles) - maxSize;
+  if (excess > 0) {
+    _profiles.erase(_profiles.begin(), _profiles.begin() + excess);
+  }
+}
+
+void StepProfileHistory::Clear() {
+  _profiles.clear();
+}
+
 void DebugClient::SetPrintFunction(LogFn fn) {
   MOCHI_ASSERT(
       _socket.GetStatus() == net::SocketStatus::None,
@@ -141,6 +166,9 @@ void DebugClient::ResetConnectionState() {
       state.syncData = {};
       state.syncData.counter = ++state.syncCounter; // Indicates it was changed
     }
+    state.sleepParams.reset();
+    state.profileHistory.Clear();
+    state.serverNumWorkerThreads = 0;
 
     // Keep settings: it is a user preference that persists across connections.
   });
@@ -237,6 +265,18 @@ static int FindSceneIndex(Span<SceneInfo const> scenes, std::string_view name) {
   return -1;
 }
 
+static protocol::DbgDrawFeatures ReconcileDebugDrawFeatures(
+    protocol::DbgDrawFeatures newState,
+    protocol::DbgDrawFeatures const& oldState) {
+  newState.masterEnabled = oldState.masterEnabled;
+  for (auto& newFeature : newState.features) {
+    auto const* oldFeature =
+        std::ranges::find(oldState.features, newFeature.name, &protocol::DbgDrawFeature::name);
+    newFeature.enabled = oldFeature != oldState.features.end() ? oldFeature->enabled : false;
+  }
+  return newState;
+}
+
 // Set an error if the command path is not valid
 void DebugClient::ValidatePath(Span<std::string const> path, Error& error) {
   MOCHI_ERROR_RETURN(error);
@@ -269,6 +309,9 @@ void DebugClient::ValidatePath(Span<std::string const> path, Error& error) {
 }
 
 void DebugClient::InitProtocol() {
+  _socket.Register<protocol::DebugDrawReply>(
+      [this](auto&& msg) { OnDebugDrawReply(std::forward<decltype(msg)>(msg)); });
+  _socket.Register<protocol::DebugDrawRequest>();
   _socket.Register<protocol::LogMessage>(
       [this](auto&& msg) { OnLogMessage(std::forward<decltype(msg)>(msg)); });
   _socket.Register<protocol::PingReply>();
@@ -281,6 +324,9 @@ void DebugClient::InitProtocol() {
   _socket.Register<protocol::SceneSyncReply>(
       [this](auto&& msg) { OnSceneSyncReply(std::forward<decltype(msg)>(msg)); });
   _socket.Register<protocol::SceneSyncRequest>();
+  _socket.Register<protocol::SleepParamsReply>(
+      [this](auto&& msg) { OnSleepParamsReply(std::forward<decltype(msg)>(msg)); });
+  _socket.Register<protocol::SleepParamsRequest>();
   _socket.Register<protocol::WelcomeMessage>(
       [this](auto&& msg) { OnWelcomeMessage(std::forward<decltype(msg)>(msg)); });
 
@@ -299,6 +345,8 @@ void DebugClient::OnWelcomeMessage(protocol::WelcomeMessage&& msg) {
 
   DynamicArray<protocol::SceneStepRequest> stepRequestsToSend;
   DynamicArray<protocol::SceneSyncRequest> syncRequestsToSend;
+  DynamicArray<protocol::DebugDrawRequest> debugDrawRequestsToSend;
+  DynamicArray<protocol::SleepParamsRequest> sleepRequestsToSend;
   bool const isFirstWelcome = _state.Mutate([&](auto& state) {
     // The server sends exactly one WelcomeMessage per connection. It includes information about
     // current scenes, so the client can join in progress. After this point, scenes are tracked
@@ -310,6 +358,8 @@ void DebugClient::OnWelcomeMessage(protocol::WelcomeMessage&& msg) {
     MOCHI_ASSERT_VERBOSE(
         state.scenes.empty(), "We should not track scenes until the WelcomeMessage arrives.");
     state.coordinateSpace = msg.coordinateSpace;
+    state.serverNumWorkerThreads = msg.numWorkerThreads;
+    state.debugDraw = ReconcileDebugDrawFeatures(std::move(msg.debugDraw), state.debugDraw);
     state.scenes.reserve(scenes.handles.size());
     if (state.stepMode != StepMode::Pause) {
       stepRequestsToSend.reserve(scenes.handles.size());
@@ -332,7 +382,12 @@ void DebugClient::OnWelcomeMessage(protocol::WelcomeMessage&& msg) {
     }
 
     // Maybe auto-select a scene.
-    SetSelectedScene(state, FindAutoSelectableScene(state.scenes), syncRequestsToSend);
+    SetSelectedScene(
+        state,
+        FindAutoSelectableScene(state.scenes),
+        syncRequestsToSend,
+        debugDrawRequestsToSend,
+        sleepRequestsToSend);
 
     return true;
   });
@@ -356,7 +411,13 @@ void DebugClient::OnWelcomeMessage(protocol::WelcomeMessage&& msg) {
   for (auto const& req : stepRequestsToSend) {
     Send(req);
   }
+  for (auto const& req : debugDrawRequestsToSend) {
+    Send(req);
+  }
   for (auto const& req : syncRequestsToSend) {
+    Send(req);
+  }
+  for (auto const& req : sleepRequestsToSend) {
     Send(req);
   }
 
@@ -366,6 +427,8 @@ void DebugClient::OnWelcomeMessage(protocol::WelcomeMessage&& msg) {
 void DebugClient::OnSceneAddRemove(protocol::SceneAddRemove&& msg) {
   std::optional<protocol::SceneStepRequest> stepRequestToSend;
   DynamicArray<protocol::SceneSyncRequest> syncRequestsToSend;
+  DynamicArray<protocol::DebugDrawRequest> debugDrawRequestsToSend;
+  DynamicArray<protocol::SleepParamsRequest> sleepRequestsToSend;
   _state.Mutate([&](auto& state) {
     // Ignore deltas until the WelcomeMessage arrives. Pre-welcome deltas are already
     // reflected in the snapshot (which the server takes, in lock order, after them).
@@ -399,7 +462,8 @@ void DebugClient::OnSceneAddRemove(protocol::SceneAddRemove&& msg) {
       // then select it now.
       if (!state.selectedScene.IsValid() && !hadSelectableScene &&
           IsAutoSelectableScene(state.scenes.back())) {
-        SetSelectedScene(state, msg.scene, syncRequestsToSend);
+        SetSelectedScene(
+            state, msg.scene, syncRequestsToSend, debugDrawRequestsToSend, sleepRequestsToSend);
       }
     } else {
       if (sceneIndex >= 0) {
@@ -411,14 +475,25 @@ void DebugClient::OnSceneAddRemove(protocol::SceneAddRemove&& msg) {
 
       // Deselect the scene and maybe select another one.
       if (msg.scene == state.selectedScene) {
-        SetSelectedScene(state, FindAutoSelectableScene(state.scenes), syncRequestsToSend);
+        SetSelectedScene(
+            state,
+            FindAutoSelectableScene(state.scenes),
+            syncRequestsToSend,
+            debugDrawRequestsToSend,
+            sleepRequestsToSend);
       }
     }
   });
   if (stepRequestToSend) {
     Send(*stepRequestToSend);
   }
+  for (auto const& req : debugDrawRequestsToSend) {
+    Send(req);
+  }
   for (auto const& req : syncRequestsToSend) {
+    Send(req);
+  }
+  for (auto const& req : sleepRequestsToSend) {
     Send(req);
   }
 }
@@ -547,6 +622,11 @@ void DebugClient::OnSceneSyncReply(protocol::SceneSyncReply&& reply) {
       state.syncData.debugDraw = std::move(*reply.debugDraw);
       hasDataChanged = true;
     }
+
+    if (state.settings.sync.syncPerformance && reply.performance) {
+      state.profileHistory.Append(*reply.performance);
+      state.profileHistory.Trim(state.settings.maxProfileHistory);
+    }
     if (hasDataChanged) {
       state.syncData.counter = ++state.syncCounter;
     }
@@ -554,11 +634,21 @@ void DebugClient::OnSceneSyncReply(protocol::SceneSyncReply&& reply) {
 }
 
 void DebugClient::SelectScene(SceneHandle handle) {
-  DynamicArray<protocol::SceneSyncRequest> toSend;
-  _state.Mutate([&](auto& state) { SetSelectedScene(state, handle, toSend); });
+  DynamicArray<protocol::SceneSyncRequest> syncToSend;
+  DynamicArray<protocol::DebugDrawRequest> debugDrawToSend;
+  DynamicArray<protocol::SleepParamsRequest> sleepToSend;
+  _state.Mutate([&](auto& state) {
+    SetSelectedScene(state, handle, syncToSend, debugDrawToSend, sleepToSend);
+  });
 
   // Send requests after releasing the _state lock.
-  for (auto const& req : toSend) {
+  for (auto const& req : debugDrawToSend) {
+    Send(req);
+  }
+  for (auto const& req : syncToSend) {
+    Send(req);
+  }
+  for (auto const& req : sleepToSend) {
     Send(req);
   }
 }
@@ -569,6 +659,14 @@ SceneHandle DebugClient::GetSelectedScene() const {
 
 CoordinateSpace DebugClient::GetCoordinateSpace() const {
   return _state.Read(&State::coordinateSpace);
+}
+
+void DebugClient::ClearProfileHistory() {
+  _state.Mutate([](auto& state) { state.profileHistory.Clear(); });
+}
+
+int DebugClient::GetServerNumWorkerThreads() const {
+  return _state.Read(&State::serverNumWorkerThreads);
 }
 
 void DebugClient::SetSceneSyncParams(SceneSyncParams const& params) {
@@ -638,6 +736,8 @@ void DebugClient::SetSettings(DebugClientSettings const& settings) {
     auto sync = state.settings.sync;
     state.settings = settings;
     state.settings.sync = sync;
+    state.settings.maxProfileHistory = Max(0, settings.maxProfileHistory);
+    state.profileHistory.Trim(state.settings.maxProfileHistory);
   });
 }
 
@@ -650,6 +750,7 @@ protocol::SceneSyncRequest DebugClient::MakeSyncRequest(State const& state) {
   req.syncDebugDraw = state.settings.sync.syncDebugDraw;
   req.syncMeshes = state.settings.sync.syncActors && state.settings.sync.syncMeshes;
   req.useVisualMesh = state.settings.sync.useVisualMesh;
+  req.syncPerformance = state.settings.sync.syncPerformance;
   return req;
 }
 
@@ -676,7 +777,9 @@ SceneHandle DebugClient::FindAutoSelectableScene(Span<SceneInfo const> scenes) {
 void DebugClient::SetSelectedScene(
     State& state,
     SceneHandle handle,
-    DynamicArray<protocol::SceneSyncRequest>& outRequests) {
+    DynamicArray<protocol::SceneSyncRequest>& outSyncRequests,
+    DynamicArray<protocol::DebugDrawRequest>& outDebugDrawRequests,
+    DynamicArray<protocol::SleepParamsRequest>& outSleepRequests) {
   SceneHandle newSelection;
   if (FindSceneIndex(state.scenes, handle) >= 0) {
     newSelection = handle;
@@ -696,19 +799,40 @@ void DebugClient::SetSelectedScene(
       protocol::SceneSyncRequest req;
       req.scene = prevSelection;
       req.enableAutoSync = false;
-      outRequests.emplace_back(std::move(req));
+      outSyncRequests.emplace_back(std::move(req));
     }
 
     // Start syncing the new scene (if any)
     if (newSelection.IsValid()) {
-      outRequests.emplace_back(MakeSyncRequest(state));
+      outSyncRequests.emplace_back(MakeSyncRequest(state));
     }
   }
 
+  // Debug draw follows the selection: stop the previous scene and apply the client's complete
+  // state to the new one, including an all-disabled state.
+  if (prevSceneIndex >= 0) {
+    protocol::DebugDrawRequest req;
+    req.scene = prevSelection;
+    req.featureEnable.resize(state.debugDraw.features.size(), false);
+    outDebugDrawRequests.emplace_back(std::move(req));
+  }
+  if (newSelection.IsValid()) {
+    outDebugDrawRequests.emplace_back(MakeDebugDrawRequest(state));
+  }
+
   state.meshCache.clear();
+  state.profileHistory.Clear();
   state.syncData = {};
   state.syncData.scene = newSelection;
   state.syncData.counter = ++state.syncCounter;
+
+  // Read the sleep params of the new scene. They may differ between scenes.
+  state.sleepParams.reset();
+  if (newSelection.IsValid()) {
+    protocol::SleepParamsRequest req;
+    req.scene = newSelection;
+    outSleepRequests.emplace_back(std::move(req));
+  }
 }
 
 void DebugClient::GetSceneSyncData(std::function<void(SceneSyncData const& data)> const& fn) const {
@@ -776,6 +900,114 @@ void DebugClient::RestoreSceneState() {
   if (msg) {
     Send(*msg);
   }
+}
+
+DynamicArray<protocol::DbgDrawFeature> DebugClient::GetDebugDrawFeatures() const {
+  return _state.Read([](auto const& state) { return state.debugDraw.features; });
+}
+
+bool DebugClient::IsDebugDrawEnabled() const {
+  return _state.Read([](auto const& state) { return state.debugDraw.masterEnabled; });
+}
+
+protocol::DebugDrawRequest DebugClient::MakeDebugDrawRequest(State const& state) {
+  protocol::DebugDrawRequest req;
+  req.scene = state.selectedScene;
+  req.masterEnable = state.debugDraw.masterEnabled;
+  req.featureEnable.reserve(state.debugDraw.features.size());
+  for (auto const& feature : state.debugDraw.features) {
+    req.featureEnable.push_back(feature.enabled);
+  }
+  return req;
+}
+
+void DebugClient::EnableDebugDraw(bool enable) {
+  std::optional<protocol::DebugDrawRequest> toSend;
+  _state.Mutate([&](auto& state) {
+    if (state.debugDraw.masterEnabled == enable) {
+      return; // No change
+    }
+    state.debugDraw.masterEnabled = enable;
+    if (state.selectedScene.IsValid()) {
+      toSend = MakeDebugDrawRequest(state);
+    }
+  });
+
+  // Send after releasing the _state lock
+  if (toSend) {
+    Send(*toSend);
+  }
+}
+
+void DebugClient::EnableDebugDrawFeature(std::string_view featureName, bool enable) {
+  std::optional<protocol::DebugDrawRequest> toSend;
+  _state.Mutate([&](auto& state) {
+    for (auto& feature : state.debugDraw.features) {
+      if (feature.name == featureName) {
+        bool const enableMaster = enable && !state.debugDraw.masterEnabled;
+        if ((feature.enabled == enable) && !enableMaster) {
+          return; // No change
+        }
+        feature.enabled = enable;
+        if (enableMaster) {
+          state.debugDraw.masterEnabled = true;
+        }
+        if (state.selectedScene.IsValid()) {
+          toSend = MakeDebugDrawRequest(state);
+        }
+        break;
+      }
+    }
+  });
+
+  // Send after releasing the _state lock
+  if (toSend) {
+    Send(*toSend);
+  }
+}
+
+void DebugClient::OnDebugDrawReply(protocol::DebugDrawReply&& reply) {
+  if (!reply.error.empty()) {
+    Print(Format("Debug draw request failed: %s", reply.error.c_str()), LogChannel::Warning);
+  }
+}
+
+std::optional<experimental::SleepParams> DebugClient::GetSleepParams() const {
+  return _state.Read(&State::sleepParams);
+}
+
+void DebugClient::SetSleepParams(experimental::SleepParams const& params) {
+  std::optional<protocol::SleepParamsRequest> toSend;
+  _state.Mutate([&](auto& state) {
+    if (!state.sleepParams) {
+      return; // Not received from the server yet
+    }
+    if (*state.sleepParams == params) {
+      return; // No change
+    }
+    state.sleepParams = params;
+    toSend.emplace();
+    toSend->scene = state.selectedScene;
+    toSend->params = params;
+  });
+
+  // Send after releasing the _state lock
+  if (toSend) {
+    Send(*toSend);
+  }
+}
+
+void DebugClient::OnSleepParamsReply(protocol::SleepParamsReply&& reply) {
+  if (!reply.error.empty()) {
+    Print(Format("Sleep params request failed: %s", reply.error.c_str()), LogChannel::Warning);
+  }
+  _state.Mutate([&](auto& state) {
+    // Only the first reply after selecting a scene is used. After that, the client's copy is
+    // authoritative, so later replies cannot make the UI jump back to an older value.
+    if (reply.scene == state.selectedScene && !state.sleepParams) {
+      state.sleepParams = reply.params;
+    }
+  });
 }
 
 void DebugClient::OnLogMessage(protocol::LogMessage&& msg) {

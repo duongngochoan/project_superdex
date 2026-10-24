@@ -29,6 +29,8 @@
 
 #include <chrono>
 #include <memory>
+#include <string>
+#include <string_view>
 
 namespace mochi_renderer {
 class SceneObject;
@@ -118,6 +120,9 @@ class MochiAsyncScene {
   std::function<void(mochi::Scene* scene)> destroyPhysicsActors;
   std::function<mochi::CallbackHandle(mochi::AsyncScene* asyncScene)> registerPreStepCallback;
   std::function<mochi::CallbackHandle(mochi::AsyncScene* asyncScene)> registerPostStepCallback;
+  // Called on the calling (UI) thread before createPhysicsActors is queued to the physics thread,
+  // so editor state can be snapshotted for it.
+  std::function<void()> onStartPhysics;
   std::function<void()> onStopPhysics;
 
   ~MochiAsyncScene();
@@ -137,6 +142,16 @@ class MochiAsyncScene {
   // Sets the fixed-step duration (seconds) and applies it live if a scene is simulating.
   void SetFixedTimeStepSeconds(double seconds);
 
+  // Writes the live scene to <outputDir>/<exportName>/<exportName>.mochi_scene (plus its generated
+  // mesh assets) via mochi::prefab::ExportScene, excluding the studio ground plane. The export runs
+  // on the simulation thread and blocks until it completes. Errors if not simulating.
+  //
+  // Not a full snapshot: rigid transforms and deformable node positions come from the running
+  // simulation, but ExportScene does not emit an articulated actor's current joint pose or
+  // velocities, so bots reload in their rest pose. Constraints, controllers, shell and rod actors
+  // are not exported at all.
+  void ExportPrefab(std::string_view exportName, std::string_view outputDir, mochi::Error& error);
+
   // Debug
   void EnableDebugDraw(bool enable);
   void ToggleDebugDraw();
@@ -153,6 +168,9 @@ class MochiAsyncScene {
   void
   ShowPhysicsSettingsWindow(char const* name, bool* open, AssetSceneOverrides assetOverrides = {});
   void ShowPlayToolbarOverViewport();
+  // Draws an "Export Simulation Prefab" main-menu item, enabled only while simulating. Prompts for
+  // an output directory and exports under @p exportName.
+  void ShowExportSimulationPrefabMenuItem(std::string_view exportName);
 
   // Keyboard shortcuts mirroring the play toolbar
   void HandleHotkeys();
@@ -177,6 +195,9 @@ class MochiAsyncScene {
   mochi::CallbackHandle _debugDrawCb = {};
   PhysicsSettings _settings;
   float _groundPlaneHeight = 0.0f;
+  // The studio-added ground plane, tracked so it can be excluded from prefab exports. Only ever
+  // touched from the simulation thread (inside queued commands). Invalid when none was added.
+  mochi::ActorHandle _groundPlaneActor;
   std::shared_ptr<RealTimePacer> _pacer;
 };
 

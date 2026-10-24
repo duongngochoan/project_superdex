@@ -43,12 +43,12 @@ void GetSolutions(
  */
 void SetSolutions(
     entt::registry& reg,
-    Span<entt::entity const> entities,
+    CIslandDescendants const& descendants,
     ColumnVectorView<real const> solution);
 } // namespace mochi
 
 namespace mochi::solver {
-MOCHI_API void SetTimeIntegratorState(
+void SetTimeIntegratorState(
     entt::registry& reg,
     Span<entt::entity const> actors,
     TimeIntegratorParams const& params,
@@ -69,9 +69,9 @@ void PreStageLocalPipeline(
     CIslandDescendants const& descendants,
     SnleProblem<real>& problem);
 
-MOCHI_API void PostStageLocalPipeline(entt::registry& reg, CIslandDescendants const& descendants);
+void PostStageLocalPipeline(entt::registry& reg, CIslandDescendants const& descendants);
 
-MOCHI_API TimeIntegratorParams CreateIslandTimeIntegrationParams(
+TimeIntegratorParams CreateIslandTimeIntegrationParams(
     entt::registry const& reg,
     CIslandDescendants const& descendants,
     IntegrationMethod const& targetMethod);
@@ -161,11 +161,13 @@ void PostNewIncrementLocalPipeline(
     ColumnVectorView<real> outSolution);
 
 /*
- * Subpipeline to update Jacobians necessary for contact Jacobians. Called from
- * UpdateDerivedStateBeforeAssembly().
+ * Subpipeline to update the Jacobians of actors, which signal actorJacobianSem. Called from
+ * UpdateDerivedStateBeforeAssembly(). As a special case, the Jacobians of soft skinned actors
+ * signal softSkinnedJacobianSem instead, because they are not needed by contact.
  */
-MOCHI_API void UpdateJacobiansSubpipeline(
-    TaskSemaphore& sem,
+void UpdateJacobiansSubpipeline(
+    TaskSemaphore& actorJacobianSem,
+    TaskSemaphore& softSkinnedJacobianSem,
     entt::registry& reg,
     GradTarget gradTarget,
     CIslandDescendants const& descendants);

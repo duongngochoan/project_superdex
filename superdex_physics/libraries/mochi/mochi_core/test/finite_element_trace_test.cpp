@@ -39,11 +39,7 @@ TEST(TetrahedralFiniteElementTrace, QuadraturePointEvaluate) {
   std::vector<VolumeElement> femVolElements;
   femVolElements.reserve(tetMesh.GetNumElements());
   for (int i = 0; i < tetMesh.GetNumElements(); ++i) {
-    femVolElements.emplace_back(
-        i,
-        tetMesh.GetNodeCoordinates(),
-        tetMesh.GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature1);
+    femVolElements.emplace_back(i, tetMesh.GetNodeCoordinates(), tetMesh.GetElementConnectivity());
   }
 
   // Boundary discretization
@@ -55,10 +51,7 @@ TEST(TetrahedralFiniteElementTrace, QuadraturePointEvaluate) {
   for (auto const& bdface : tetMesh.GetBoundaryFaces()) {
     // For traction work, collisions, etc.
     femBoundaryLocalToGlobal.push_back(bdface.element);
-    femBoundaryElements.emplace_back(
-        femVolElements[bdface.element],
-        bdface.faceNum,
-        tetrahedral::kTetrahedralTraceQuadrature6[bdface.faceNum]);
+    femBoundaryElements.emplace_back(femVolElements[bdface.element], bdface.faceNum);
   }
 
   // For each boundary element

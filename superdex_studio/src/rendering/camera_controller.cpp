@@ -423,6 +423,23 @@ void CameraController::LerpOrbitTo(
   }
 }
 
+void CameraController::LookAt(filament::math::double3 eye, filament::math::double3 target) {
+  _lerpingPos = false;
+  _lerpingYawPitch = false;
+  _lerpingOrbit = false;
+  _lerpingOrthoHeight = false;
+  filament::math::double3 const offset = eye - target;
+  _orbitPos = target;
+  _orbitDist = length(offset);
+  if (_orbitDist > 0.0) {
+    _yaw = std::atan2(offset.x, offset.z);
+    _pitch = -std::asin(std::clamp(offset.y / _orbitDist, -1.0, 1.0));
+  }
+  _cameraRotation = BuildRotation(_yaw, _pitch);
+  _cameraPosition = eye;
+  _scene->CameraSetTransform(_cameraPosition, _cameraRotation);
+}
+
 void CameraController::SetOrbitPosition(filament::math::double3 orbitPosition) {
   _orbitPos = orbitPosition;
 }

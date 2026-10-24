@@ -16,11 +16,20 @@
 
 #pragma once
 
+#include <mochi_physics/mochi_physics_experimental.h>
+
 namespace mochi::dbg {
 
 struct UiState;
 
-// Properties panel: rendering settings (origin, meshes, lights, materials).
+struct IslandsPropertiesState {
+  // Sliders change the value every frame, but it is only sent to the server on release. While a
+  // widget is active, the UI shows this buffer instead of the client's value.
+  experimental::SleepParams edit;
+  bool editing = false;
+};
+
+// Properties panel: rendering settings (origin, meshes, lights, materials) and island sleeping.
 void BuildPropertiesPanel(UiState& state);
 
 } // namespace mochi::dbg

@@ -127,8 +127,14 @@ void ObservationCamera::SetTransform(
   }
 }
 
-void ObservationCamera::LookAt(filament::math::double3 eye, filament::math::double3 target) {
-  _camera->lookAt(eye, target, {0, 0, 1});
+void ObservationCamera::LookAt(
+    filament::math::double3 eye,
+    filament::math::double3 target,
+    filament::math::double3 up) {
+  // FlipProjectionXY rotates the rendered image 180 degrees to cancel the Vulkan
+  // readPixels quirk, so the camera has to be rolled 180 degrees the other way in scene
+  // space for `up` to come out pointing up in the final image.
+  _camera->lookAt(eye, target, -up);
   _localPosition = eye;
   _localRotation = _camera->getModelMatrix().toQuaternion();
 }

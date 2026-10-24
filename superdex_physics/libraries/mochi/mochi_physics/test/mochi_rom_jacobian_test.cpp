@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <limits>
 #include <numeric>
 #include <type_traits>
 #include <utility>
@@ -115,8 +116,9 @@ TEST_F(SoftRomJacobianMatch, SoftRomJacobianMatch) {
     // Get contact Jacobians
     ContactJac jacSoft;
     ContactJac jacRom;
-    dmapSoft.GetJac(collResult.sampleIndices, Span(&jacSoft, 1));
-    dmapRom.GetJac(collResult.sampleIndices, Span(&jacRom, 1));
+    ContactJac scratch;
+    dmapSoft.GetJac(collResult.sampleIndices, Span(&jacSoft, 1), scratch);
+    dmapRom.GetJac(collResult.sampleIndices, Span(&jacRom, 1), scratch);
 
     // Jacobians of the ROM actor should be of size numDofs.
     EXPECT_EQ(jacRom.nDoFsState, numDofs);
@@ -151,25 +153,40 @@ TEST(AddRigidContactJacobians, MatchesFiniteDifferenceWithLocalRotation) {
   TransformRT const localXf(
       Quaternion::FromRotationVector(Real3{0.4_r, 0.1_r, -0.2_r}), Real3{0.1_r, 0.2_r, -0.1_r});
   Real3 const x{0.5_r, -0.3_r, 0.7_r};
+  TransformRT const worldFromColliding(
+      Quaternion::FromRotationVector(Real3{-0.3_r, 0.6_r, 0.1_r}), Real3{-2_r, 0.5_r, 1_r});
+  Real3 const positionsInColliding[] = {
+      {}, Invert(worldFromColliding).TransformPoint(WorldPoint(rootXf, localXf, x))};
+  Real3 const softJacSentinel{9_r, 8_r, 7_r};
 
-  entt::registry reg;
-  entt::entity const e = reg.create();
-  reg.emplace<TagRomActor>(e);
-  reg.emplace<CRootTransform>(e, rootXf);
-  reg.emplace<CRigidState<TimeStep::Current>>(e, localXf);
+  // Translating both actors by worldOffset must not change the Jacobian.
+  auto const addJacobians = [&](Real3 const& worldOffset, ContactDetectionResult& contact) {
+    TransformRT const shift(worldOffset);
+    entt::registry reg;
+    entt::entity const e = reg.create();
+    reg.emplace<TagRomActor>(e);
+    reg.emplace<CRootTransform>(e, shift * rootXf);
+    reg.emplace<CRigidState<TimeStep::Current>>(e, localXf);
+
+    // Decoys the helper must ignore: posColliding (a reference position, as from a mapped SDF
+    // query) and sample 0.
+    contact.ndofs = 1;
+    contact.sampleIndices.resize(1);
+    contact.sampleIndices[0] = 1;
+    contact.posColliding.resize(1);
+    contact.posColliding[0] = 0.8_r * x;
+    contact.jacWorldFromDofs.resize(1);
+    contact.jacWorldFromDofs[0].jac[0] = ToSimd(softJacSentinel);
+
+    rom::AddRigidContactJacobians(
+        reg, e, MakeConstSpan(positionsInColliding), shift * worldFromColliding, contact);
+  };
 
   ContactDetectionResult contact;
-  contact.ndofs = 1;
-  contact.sampleIndices.resize(1);
-  contact.sampleIndices[0] = 0;
-  contact.posColliding.resize(1);
-  contact.posColliding[0] = WorldPoint(rootXf, localXf, x);
-  contact.jacWorldFromDofs.resize(1);
-
-  Real3 const softJacSentinel{9_r, 8_r, 7_r};
-  contact.jacWorldFromDofs[0].jac[0] = ToSimd(softJacSentinel);
-
-  rom::AddRigidContactJacobians(reg, e, contact);
+  addJacobians({}, contact);
+  ContactDetectionResult farContact;
+  // About 230 km from the origin; the translated transforms stay exactly representable.
+  addJacobians(Real3{131072_r, -131072_r, 131072_r}, farContact);
 
   ASSERT_EQ(contact.ndofs, RigidSize::kDAll + 1);
   auto const& jacDofs = contact.jacWorldFromDofs[0];
@@ -182,6 +199,7 @@ TEST(AddRigidContactJacobians, MatchesFiniteDifferenceWithLocalRotation) {
   real constexpr kEps = MOCHI_USE_DOUBLE_PRECISION ? 1e-5_r : 1e-3_r;
   real constexpr kTol = MOCHI_USE_DOUBLE_PRECISION ? 1e-6_r : 1e-2_r;
   real constexpr kInvTwoEps = 1_r / (2_r * kEps);
+  real constexpr kFarTol = 1000_r * std::numeric_limits<real>::epsilon();
   for (int dof = 0; dof < RigidSize::kDAll; ++dof) {
     TransformRT localP = localXf;
     TransformRT localM = localXf;
@@ -190,5 +208,7 @@ TEST(AddRigidContactJacobians, MatchesFiniteDifferenceWithLocalRotation) {
 
     Real3 const fd = (WorldPoint(rootXf, localP, x) - WorldPoint(rootXf, localM, x)) * kInvTwoEps;
     EXPECT_NEAR_TOL(ToReal3(jacDofs.jac[dof]), fd, kTol) << "rigid DoF " << dof;
+    EXPECT_NEAR_TOL(
+        ToReal3(farContact.jacWorldFromDofs[0].jac[dof]), ToReal3(jacDofs.jac[dof]), kFarTol);
   }
 }

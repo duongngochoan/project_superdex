@@ -480,7 +480,8 @@ struct BatchLayout {
   NdArray<int, kBS> elementIndices;
   BatchRodVector<kBS> disp;
   NdArray<BatchReal<kBS>, kNumRodFields> predTarget;
-  // Stiffness-damping inputs (zero factor => disabled, matching the kernel defaults).
+  // Stiffness-damping inputs (zero factor => disabled, matching the kernel defaults). The gravity
+  // energy also reads stageStartDisp.
   real stiffnessDampingFactor = 0_r;
   BatchRodVector<kBS> stageStartDisp = {};
   DynamicArray<Real3> stageStartFrameAxes;
@@ -827,6 +828,7 @@ static NdArray<RodResult, kBS> RunRodGravity(BatchLayout<kBS> const& layout, Out
         bool const wrote = RodGravity<kBS>(
             MakeConstSpan(layout.nodalMasses),
             layout.disp,
+            layout.stageStartDisp,
             layout.elementIndices,
             MakeConstSpan(layout.l2gFlat),
             e,
@@ -1268,7 +1270,8 @@ TEST(Rod, OutputModes) {
   });
 }
 
-// Rest state: zero displacement => zero elastic (axial + bend/twist) energy.
+// Rest state: zero displacement => zero elastic (axial + bend/twist) energy. Stage-start
+// displacement => zero gravity energy.
 TEST(Rod, RestState) {
   RunSupportedFemShellRodBatchSizes([&]<int kBS>() {
     NdArray<RodStencil, kBS> stencils;
@@ -1280,8 +1283,15 @@ TEST(Rod, RestState) {
     auto const axial = RunRodAxialStress(layout, e, false);
     auto const bend = RunRodBendTwistStress(layout, e);
     for (int b = 0; b < kBS; ++b) {
+      stencils[b] = MakeStencil(static_cast<unsigned int>(5 + b), Deformation::Random, 3);
+    }
+    auto atStageStart = BuildIndependent<kBS>(stencils);
+    atStageStart.stageStartDisp = atStageStart.disp;
+    auto const gravity = RunRodGravity(atStageStart, e);
+    for (int b = 0; b < kBS; ++b) {
       EXPECT_NEAR(0.0, axial[b].energy, 1e-9);
       EXPECT_NEAR(0.0, bend[b].energy, 1e-9);
+      EXPECT_EQ(0.0, gravity[b].energy);
     }
   });
 }

@@ -229,6 +229,15 @@ void AttachDisplacementControlActuator(
     int transmissionIndex,
     experimental::DisplacementControlActuatorParams const& params,
     Error& error) {
+  MOCHI_ERROR_IF(
+      params.stiffness < 0_r || !IsFinite(params.stiffness),
+      error,
+      "Actuator stiffness must be non-negative and finite");
+  MOCHI_ERROR_IF(
+      params.damping < 0_r || !IsFinite(params.damping),
+      error,
+      "Actuator damping must be non-negative and finite");
+  MOCHI_ERROR_RETURN(error);
   AttachTransmissionActuatorImpl(
       reg,
       e,

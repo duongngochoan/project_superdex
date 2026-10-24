@@ -136,7 +136,7 @@ class MOCHI_API ComponentBase {
   /* @brief Set this component's instance name. Called by RoboticsContext at creation time. Copies
    * @p name into an owned, null-terminated string (the view need not outlive the call). */
   void SetName(std::string_view name) {
-    _name = DynamicString(std::string(name).c_str());
+    _name = DynamicString(std::string(name));
   }
 
   /* Stale-safe identity of the associated actor and its owning scene, plus the owning context used

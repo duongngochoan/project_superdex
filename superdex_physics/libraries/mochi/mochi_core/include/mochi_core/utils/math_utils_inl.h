@@ -19,6 +19,8 @@
 // Reverse include for intellisense
 #include "math_utils.h"
 
+#include <mochi_core/mochi_platform.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -285,7 +287,7 @@ MOCHI_FORCE_INLINE constexpr NdArray<T, N> Min(NdArray<T, N> const& a, T min) {
 template <typename T, size_t N>
 MOCHI_FORCE_INLINE constexpr NdArray<T, N>
 Clamp(NdArray<T, N> const& a, NdArray<T, N> const& min, NdArray<T, N> const& max) {
-  NdArray<T, N> output = {};
+  NdArray<T, N> output MOCHI_CONSTEXPR_NO_INIT; // Required to avoid memset calls (e.g. on MSVC).
   for (int i = 0; i < N; ++i) {
     output[i] = Clamp(a[i], min[i], max[i]);
   }

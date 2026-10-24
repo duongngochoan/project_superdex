@@ -17,7 +17,6 @@
 #pragma once
 
 #include "mochi_common_components.h"
-#include "mochi_contact.h"
 #include "mochi_ecs.h"
 #include "mochi_rom_jacobian.h"
 #include "mochi_soft_rom_affine_helpers.h"

@@ -29,6 +29,7 @@
 #include <iterator>
 #include <numeric>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 using namespace mochi;
@@ -225,11 +226,7 @@ static std::vector<VolumeElement> CreateVolumeElements(TetrahedralMesh const& me
   std::vector<VolumeElement> femElementsVolume;
   femElementsVolume.reserve(mesh.GetNumElements());
   for (int i = 0; i < mesh.GetNumElements(); ++i) {
-    femElementsVolume.emplace_back(
-        i,
-        mesh.GetNodeCoordinates(),
-        mesh.GetElementConnectivity(),
-        tetrahedral::kTetrahedralQuadrature1);
+    femElementsVolume.emplace_back(i, mesh.GetNodeCoordinates(), mesh.GetElementConnectivity());
   }
   return femElementsVolume;
 }
@@ -251,10 +248,7 @@ static std::vector<BoundaryElement> CreateBoundaryElements(
   std::vector<BoundaryElement> femElementsBoundary;
   femElementsBoundary.reserve(mesh.GetNumBoundaryFaces());
   for (auto const& bdface : mesh.GetBoundaryFaces()) {
-    femElementsBoundary.emplace_back(
-        femElementsVolume[bdface.element],
-        bdface.faceNum,
-        tetrahedral::kTetrahedralTraceQuadrature3[bdface.faceNum]);
+    femElementsBoundary.emplace_back(femElementsVolume[bdface.element], bdface.faceNum);
   }
   return femElementsBoundary;
 }
@@ -306,25 +300,6 @@ static SkinningData CreateSkinning(int size) {
     real weight = (1_r / size) * i;
     result.weights.emplace_back(weight);
     result.weights.emplace_back(1_r - weight);
-  }
-  return result;
-}
-
-static DSkinningTransform CreateSkinningTransform(SkinningData const& skinningData) {
-  SkinningWeightsByBone weights{
-      skinningData.indices, skinningData.weights, skinningData.weightsPerNode, kBones};
-  return DSkinningTransform{weights};
-}
-
-static std::array<VMatrix3x3r, kBones> CreateSkeletonRotations(
-    ColumnVectorView<real const, kArticulatedSize> articulatedState,
-    DSkinningTransform const& skinningTransform) {
-  std::array<VMatrix3x3r, kBones> result{};
-  auto skeletonPose = ArticulatedToSkeleton(articulatedState);
-  for (int i = 0; i < result.size(); i++) {
-    auto preTransform =
-        Rodrigues(skinningTransform.GetBonePreTransform(i).GetRotation().VToRotationVector());
-    result[i] = Dot3x3(VGetRotationMatrix(skeletonPose[i]), preTransform);
   }
   return result;
 }
@@ -419,10 +394,8 @@ static std::vector<Real3> CreatePointsAfterBlending(
   return result;
 }
 
-static RowMatrix<real> CreateSkinningJacobian(
-    DSkinningTransform const& skinningTransform,
-    ColumnVectorView<real const, kArticulatedSize> articulatedStateIn,
-    Span<Real3 const> points) {
+static Matrix<real> CreateArticulatedJacobian(
+    ColumnVectorView<real const, kArticulatedSize> articulatedStateIn) {
   Matrix<real> articulatedJacobian(kBones * RigidSize::kDAll, articulatedStateIn.Rows());
   for (int i = 0; i < articulatedStateIn.Rows(); i++) {
     ColumnVector<real, kArticulatedSize> articulatedState = articulatedStateIn;
@@ -440,13 +413,20 @@ static RowMatrix<real> CreateSkinningJacobian(
     }
     articulatedJacobian.Col(i) = (1_r / (2_r * kEps)) * SkeletonToVector(skeletonStateDiff);
   }
+  return articulatedJacobian;
+}
 
-  SparseMatrix<real> jacobianBones = skinningTransform.CreateDBones();
-  auto skeletonState = ArticulatedToSkeleton(articulatedStateIn);
-  skinningTransform.DTransformDBones(
-      MakeConstSpan(skeletonState), AsConstView(Flatten(points)), jacobianBones);
-  auto result = jacobianBones * articulatedJacobian;
-  return result;
+// Split the articulated Jacobian into the Jacobians of the bones wrt the articulated DoFs they
+// depend on: the free joint (first rigid-size DoFs) for bone 0, and all DoFs for bone 1.
+static std::array<RowMatrix<real, RigidSize::kDAll>, kBones> CreateBoneJacobians(
+    Matrix<real> const& articulatedJacobian) {
+  RowMatrix<real, RigidSize::kDAll> bone0Jacobian(RigidSize::kDAll, RigidSize::kDAll);
+  bone0Jacobian = articulatedJacobian.TopRows<RigidSize::kDAll>(RigidSize::kDAll)
+                      .LeftCols<RigidSize::kDAll>(RigidSize::kDAll);
+  RowMatrix<real, RigidSize::kDAll> bone1Jacobian(RigidSize::kDAll, kArticulatedSize);
+  bone1Jacobian =
+      articulatedJacobian.MiddleRows<RigidSize::kDAll>(RigidSize::kDAll, RigidSize::kDAll);
+  return {std::move(bone0Jacobian), std::move(bone1Jacobian)};
 }
 
 // Create a single to-collider matrix as the transpose of a rigid transform
@@ -494,10 +474,19 @@ class DMapTest : public testing::Test {
 
   ColumnVector<real, kArticulatedSize> const kArticulatedState{CreateVectorState(kArticulatedSize)};
   std::vector<int> const kArticulatedDofs{CreateArticulatedDofs(kArticulatedSize)};
+  std::array<int, RigidSize::kDAll> const kBone0Dofs{0, 1, 2, 3, 4, 5};
+  // Offsets of the bone DoFs in the articulation DoFs that the bone Jacobians map to.
+  std::array<int, kBones> const kBoneInternalDofOffsets{6, 18};
+  std::array<RowMatrix<real, RigidSize::kDAll>, kBones> const kBoneJacobians{
+      CreateBoneJacobians(CreateArticulatedJacobian(kArticulatedState))};
   SkinningData const kSkinning{CreateSkinning(isize(kPoints))};
-  DSkinningTransform const kSkinningTransform{CreateSkinningTransform(kSkinning)};
-  std::array<VMatrix3x3r, kBones> const kSkeletonRotations{
-      CreateSkeletonRotations(kArticulatedState, kSkinningTransform)};
+  DSkinningTransform const kSkinningTransform{
+      kSkinning.indices,
+      kSkinning.weights,
+      kSkinning.weightsPerNode,
+      DynamicArray<TransformRT>(kBones)};
+  // Active bones in reverse order, to test that slices follow the order of active bone ids.
+  std::array<int, kBones> const kActiveBoneIds{1, 0};
 
   ColumnVector<real> const kSoftState{CreateVectorState(kSoftSize)};
   std::vector<Real3> const kPointsAfterSoft{CreatePointsAfterSoft(kSoftState, kPoints)};
@@ -527,30 +516,87 @@ class DMapTest : public testing::Test {
       MakeSingletonConstSpan(kToRigidCollider),
       MakeConstSpan(kToSoftCollider)};
 
-  // Main function for finite-difference consistency testing
+  // Frames of all bones of a skinning transform, indexed by bone id.
+  std::array<SkinningBoneFrame, kBones> CreateSkinningBones(
+      DSkinningTransform const& skinningTransform) const {
+    auto const skeletonState = ArticulatedToSkeleton(kArticulatedState);
+    auto makeBoneData = [&](int boneId) {
+      TransformRT const worldFromReference =
+          skeletonState[boneId] * skinningTransform.GetBonePreTransform(boneId);
+      return SkinningBoneFrame{
+          ToVMatrix3x3Transpose(worldFromReference.GetRotation()),
+          worldFromReference.VGetTranslation() - skeletonState[boneId].VGetTranslation()};
+    };
+    return {makeBoneData(0), makeBoneData(1)};
+  }
+
+  // Express the rigid slices of the bones in 'activeBoneIds', starting at 'firstSlice', wrt the
+  // articulated DoFs, as contact setup does.
+  void SetBoneJacAux(Span<ContactJac> jacs, int firstSlice, Span<int const> activeBoneIds) const {
+    for (int slice = 0; slice < isize(activeBoneIds); ++slice) {
+      int const boneId = activeBoneIds[slice];
+      Span<int const> const dofs =
+          boneId == 0 ? MakeConstSpan(kBone0Dofs) : MakeConstSpan(kArticulatedDofs);
+      jacs[firstSlice + slice].SetJacAux(
+          kBoneJacobians[boneId], 0, dofs, kBoneInternalDofOffsets[boneId]);
+    }
+  }
+
+  // Map that evaluates a map with rigid slices of skinning bones or articulated links, and then
+  // sets the auxiliary Jacobians of the slices of the bones in 'boneIds'.
+  template <typename D>
+  struct BoneJacAuxMap {
+    DMapTest const& test;
+    D const& dmap;
+    int firstSlice = {};
+    Span<int const> boneIds;
+
+    void GetJac(Span<int const> inds, Span<ContactJac> jacs, ContactJac& scratch) const {
+      dmap.GetJac(inds, jacs, scratch);
+      test.SetBoneJacAux(jacs, firstSlice, boneIds);
+    }
+  };
+
+  template <typename D>
+  BoneJacAuxMap<D> WithBoneJacAux(D const& dmap, int firstSlice, Span<int const> boneIds) const {
+    return {*this, dmap, firstSlice, boneIds};
+  }
+
+  template <typename D>
+  BoneJacAuxMap<D> WithBoneJacAux(D const& dmap, int firstSlice) const {
+    return WithBoneJacAux(dmap, firstSlice, kActiveBoneIds);
+  }
+
+  // Main function for finite-difference consistency testing. Jacobian slice 'slice' differentiates
+  // the state 'sliceStates[slice]'. Slices of the same state are summed, after applying their
+  // auxiliary Jacobian if present.
   using AddEpsFunc = std::function<void(int, real, Span<Real3 const>, Span<Real3>)>;
-  template <int kNumSlices, typename D>
-  void TestConsistency(
+  template <int kNumSlices, int kNumStates, typename D>
+  void TestConsistencyByState(
       D const& dmap,
-      std::array<int const, kNumSlices> const& dstateSizes,
+      std::array<int, kNumSlices> const& sliceStates,
+      std::array<int const, kNumStates> const& dstateSizes,
       Span<int const> inds,
-      std::array<AddEpsFunc const, kNumSlices> const& addEpsAndMap,
+      std::array<AddEpsFunc const, kNumStates> const& addEpsAndMap,
       Span<VMatrix3x3r const> toCollider,
       real tol = kTol) {
-    // Evaluate the Jacobian
+    // Evaluate the Jacobian twice, so that the tested evaluation recycles slices and scratch as in
+    // contact assembly.
     std::array<ContactJac, kNumSlices> jacs;
-    dmap.GetJac(inds, jacs);
+    ContactJac scratch;
+    dmap.GetJac(inds, jacs, scratch);
+    dmap.GetJac(inds, jacs, scratch);
 
-    // Test per state slice
-    for (int slice = 0; slice < kNumSlices; slice++) {
+    // Test per state
+    for (int state = 0; state < kNumStates; state++) {
       // Evaluate the Jacobian through finite differences
       std::vector<Real3> resultp(kOutput);
       std::vector<Real3> resultm(kOutput);
-      std::vector<Matrix<real, 3>> jacFD(kOutput, Matrix<real, 3>(3, dstateSizes[slice]));
-      for (int i = 0; i < dstateSizes[slice]; i++) {
-        addEpsAndMap[slice](i, kEps, kPoints, resultp);
+      std::vector<Matrix<real, 3>> jacFD(kOutput, Matrix<real, 3>(3, dstateSizes[state]));
+      for (int i = 0; i < dstateSizes[state]; i++) {
+        addEpsAndMap[state](i, kEps, kPoints, resultp);
         TransformToCollider(toCollider, resultp);
-        addEpsAndMap[slice](i, -kEps, kPoints, resultm);
+        addEpsAndMap[state](i, -kEps, kPoints, resultm);
         TransformToCollider(toCollider, resultm);
         for (int j = 0; j < kOutput; j++) {
           auto valp = AsView(resultp[j]);
@@ -562,34 +608,59 @@ class DMapTest : public testing::Test {
 
       // Test per output point
       for (int i = 0; i < kInds.size(); i++) {
-        // Get the analytical Jacobian and compress columns based on indices
-        auto jacA = jacs[slice].Jac(i);
-        auto indsA = jacs[slice].Inds(i);
-        std::unordered_set<int> testInds(indsA.begin(), indsA.end());
-        auto jacACompressed = Matrix<real, 3>::Zero(3, isize(testInds));
-        for (int j = 0; j < indsA.size(); j++) {
-          auto dst = static_cast<int>(std::distance(testInds.begin(), testInds.find(indsA[j])));
-          jacACompressed.Col(dst) += jacA.Col(j);
+        // Assemble the analytical Jacobian of the state from its slices, and gather its columns
+        Matrix<real, 3> jacA = Matrix<real, 3>::Zero(3, dstateSizes[state]);
+        std::unordered_set<int> testInds;
+        for (int slice = 0; slice < kNumSlices; slice++) {
+          auto const& jac = jacs[slice];
+          if (sliceStates[slice] != state || jac.nContacts == 0) {
+            continue;
+          }
+          Matrix<real> const contribution = jac.JacAux().empty()
+              ? Matrix<real>(jac.Jac(i))
+              : Matrix<real>(jac.Jac(i) * jac.JacAux());
+          auto const indsA = jac.Inds(i);
+          for (int j = 0; j < indsA.size(); j++) {
+            jacA.Col(indsA[j]) += contribution.Col(j);
+            testInds.insert(indsA[j]);
+          }
         }
 
-        // Get the finite-difference Jacobian and select colums based on indices
-        auto jacBFull = jacFD.at(i);
+        // Select the columns of both Jacobians
+        Matrix<real, 3> jacASelect(3, isize(testInds));
         Matrix<real, 3> jacBSelect(3, isize(testInds));
-        for (auto ind = testInds.begin(); ind != testInds.end(); ind++) {
-          auto dst = static_cast<int>(std::distance(testInds.begin(), ind));
-          jacBSelect.Col(dst) = jacBFull.Col(*ind);
+        int dst = 0;
+        for (int ind : testInds) {
+          jacASelect.Col(dst) = jacA.Col(ind);
+          jacBSelect.Col(dst) = jacFD.at(i).Col(ind);
+          ++dst;
         }
 
         // Test
-        real normA = jacACompressed.Norm();
+        real normA = jacASelect.Norm();
         real normB = jacBSelect.Norm();
-        Matrix<real> diff = jacACompressed - jacBSelect;
+        Matrix<real> diff = jacASelect - jacBSelect;
         real normDiff = diff.Norm();
         if (std::max(normA, normB) > 1e-9_r) {
           EXPECT_NEAR(normDiff / std::max(normA, normB), 0_r, tol);
         }
       }
     }
+  }
+
+  // Consistency testing with one Jacobian slice per state
+  template <int kNumSlices, typename D>
+  void TestConsistency(
+      D const& dmap,
+      std::array<int const, kNumSlices> const& dstateSizes,
+      Span<int const> inds,
+      std::array<AddEpsFunc const, kNumSlices> const& addEpsAndMap,
+      Span<VMatrix3x3r const> toCollider,
+      real tol = kTol) {
+    std::array<int, kNumSlices> sliceStates{};
+    std::iota(sliceStates.begin(), sliceStates.end(), 0);
+    TestConsistencyByState<kNumSlices, kNumSlices>(
+        dmap, sliceStates, dstateSizes, inds, addEpsAndMap, toCollider, tol);
   }
 };
 
@@ -629,6 +700,59 @@ TEST_F(DMapTest, RigidColliding) {
     DMapRTInput dtransform(0, kRigidState, kRigidTransform, 0, kPoints, toCollider);
     DMap<DMapRTInput> dmap(&dtransform);
     TestConsistency<1>(dmap, {RigidSize::kDAll}, kInds, {addEpsAndMap}, toCollider);
+  }
+}
+
+// Articulated links, with each bone of the test articulation as a link. The rigid slice of the link
+// is expressed wrt the articulated DoFs through its auxiliary Jacobian.
+TEST_F(DMapTest, LinkCollider) {
+  auto const skeletonState = ArticulatedToSkeleton(kArticulatedState);
+  for (int boneId = 0; boneId < kBones; ++boneId) {
+    auto addEpsAndMap = [this, boneId](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
+      ColumnVector<real, kArticulatedSize> state = kArticulatedState;
+      AddEpsArticulated(i, eps, state);
+      std::vector<Real3> afterLink(points.size());
+      ApplyRigid(ArticulatedToSkeleton(state)[boneId], points, afterLink);
+      SelectOutput(afterLink, kInds, out, true);
+    };
+
+    TransformRT const& linkState = skeletonState[boneId];
+    VMatrix3x3r const toLinkCollider = CreateToRigidCollider(linkState);
+    auto detectionResultAfterLink = CreateDetectionResultAfterRigid(kPoints, kInds);
+    DMapRTOutput dtransform(0, linkState, {}, 0);
+    DMap<DMapRTOutput> dmap(&dtransform);
+    dtransform.SetData(&detectionResultAfterLink);
+    std::vector<int> inds(detectionResultAfterLink.posColliding.size());
+    std::iota(inds.begin(), inds.end(), 0);
+    std::array<int, 1> const linkIds{boneId};
+    TestConsistency<1>(
+        WithBoneJacAux(dmap, 0, linkIds),
+        {kArticulatedSize},
+        inds,
+        {addEpsAndMap},
+        MakeSingletonConstSpan(toLinkCollider));
+  }
+}
+
+TEST_F(DMapTest, LinkColliding) {
+  auto const skeletonState = ArticulatedToSkeleton(kArticulatedState);
+  for (int boneId = 0; boneId < kBones; ++boneId) {
+    auto addEpsAndMap = [this, boneId](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
+      ColumnVector<real, kArticulatedSize> state = kArticulatedState;
+      AddEpsArticulated(i, eps, state);
+      std::vector<Real3> afterLink(points.size());
+      ApplyRigid(ArticulatedToSkeleton(state)[boneId], points, afterLink);
+      SelectOutput(afterLink, kInds, out);
+    };
+
+    TransformRT const& linkState = skeletonState[boneId];
+    std::array<int, 1> const linkIds{boneId};
+    for (auto toCollider : kToCollider) {
+      DMapRTInput dtransform(0, linkState, linkState, 0, kPoints, toCollider);
+      DMap<DMapRTInput> dmap(&dtransform);
+      TestConsistency<1>(
+          WithBoneJacAux(dmap, 0, linkIds), {kArticulatedSize}, kInds, {addEpsAndMap}, toCollider);
+    }
   }
 }
 
@@ -704,49 +828,67 @@ TEST_F(DMapTest, QuadratureTransformRom) {
   }
 }
 
-TEST_F(DMapTest, Skinning) {
-  auto addEpsAndMap = [this](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
+TEST_F(DMapTest, QuadratureSkinning) {
+  // Skinning with repeated bones, zero weights and non-identity pre-transforms
+  SkinningData skinning;
+  skinning.weightsPerNode = 4;
+  for (int vertex = 0; vertex < kPoints.size(); ++vertex) {
+    real const bone0Weight = static_cast<real>(vertex) / kPoints.size();
+    skinning.indices.emplace_back(0);
+    skinning.indices.emplace_back(1);
+    skinning.indices.emplace_back(0);
+    skinning.indices.emplace_back(1);
+    skinning.weights.emplace_back(0.25_r * bone0Weight);
+    skinning.weights.emplace_back(1_r - bone0Weight);
+    skinning.weights.emplace_back(0.75_r * bone0Weight);
+    skinning.weights.emplace_back(0_r);
+  }
+
+  DynamicArray<TransformRT> preTransforms(kBones);
+  preTransforms[0] = TransformRT{
+      Quaternion::FromRotationVector(Real3{0.2_r, -0.1_r, 0.3_r}), Real3{0.4_r, -0.2_r, 0.1_r}};
+  preTransforms[1] = TransformRT{
+      Quaternion::FromRotationVector(Real3{-0.3_r, 0.4_r, 0.1_r}), Real3{-0.1_r, 0.3_r, 0.2_r}};
+  DSkinningTransform skinningTransform{
+      skinning.indices, skinning.weights, skinning.weightsPerNode, std::move(preTransforms)};
+
+  auto addEpsAndMap = [&](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
     ColumnVector<real, kArticulatedSize> state = kArticulatedState;
     AddEpsArticulated(i, eps, state);
     std::vector<Real3> afterSkinning(points.size());
-    ApplySkinning(state, kSkinningTransform, points, afterSkinning);
-    SelectOutput(afterSkinning, kInds, out);
+    ApplySkinning(state, skinningTransform, points, afterSkinning);
+    std::vector<Real3> afterQuadrature(3 * kFemElements.size());
+    ApplyQuadrature(kFemElements, afterSkinning, afterQuadrature);
+    SelectOutput(afterQuadrature, kInds, out);
   };
 
-  auto skinningJacobian = CreateSkinningJacobian(kSkinningTransform, kArticulatedState, kPoints);
-  DMapSkinNoInput dskinning(0, skinningJacobian, kArticulatedDofs, 0);
-  DMap<DMapSkinNoInput> dmap(&dskinning);
-  TestConsistency<1>(dmap, {kArticulatedSize}, kInds, {addEpsAndMap}, {});
-}
+  auto const bones = CreateSkinningBones(skinningTransform);
+  for (auto toCollider : kToCollider) {
+    DMapSkinning dskinning(0, skinningTransform, kPoints, bones, kActiveBoneIds, 0);
+    DQuad dquad(kFemElements, toCollider);
+    DMap<DQuad, DMapSkinning> dmap(&dquad, &dskinning);
+    TestConsistencyByState<kBones, 1>(
+        WithBoneJacAux(dmap, 0), {0, 0}, {kArticulatedSize}, kInds, {addEpsAndMap}, toCollider);
 
-TEST_F(DMapTest, SkinningRom) {
-  auto addEpsAndMapRom = [this](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
-    ColumnVector<real> state = kRomState;
-    AddEpsEuclidean(i, eps, state);
-    std::vector<Real3> afterRom(points.size());
-    ApplyRom(state, kBasis, points, afterRom);
-    std::vector<Real3> afterSkinning(points.size());
-    ApplySkinning(kArticulatedState, kSkinningTransform, afterRom, afterSkinning);
-    SelectOutput(afterSkinning, kInds, out);
-  };
-
-  auto addEpsAndMapSkeleton = [this](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
-    ColumnVector<real, kArticulatedSize> state = kArticulatedState;
-    AddEpsArticulated(i, eps, state);
-    std::vector<Real3> afterRom(points.size());
-    ApplyRom(kRomState, kBasis, points, afterRom);
-    std::vector<Real3> afterSkinning(points.size());
-    ApplySkinning(state, kSkinningTransform, afterRom, afterSkinning);
-    SelectOutput(afterSkinning, kInds, out);
-  };
-
-  auto skinningJacRom =
-      CreateSkinningJacobian(kSkinningTransform, kArticulatedState, kPointsAfterRom);
-  DMapRom drom(0, kRomJacobian, 0);
-  DMapSkinInput dskinning(1, skinningJacRom, kArticulatedDofs, 0, kSkinning, kSkeletonRotations);
-  DMap<DMapSkinInput, DMapRom> dmap(&dskinning, &drom);
-  TestConsistency<2>(
-      dmap, {kRomSize, kArticulatedSize}, kInds, {addEpsAndMapRom, addEpsAndMapSkeleton}, {});
+    // An omitted bone leaves the slices of the other bones unchanged. The slices are wrt the rigid
+    // bone transforms, and their DoF indices are offset.
+    constexpr int kDofOffset = 11;
+    std::array<int, 1> const bone1Only{1};
+    DMapSkinning bone1OnlyMapImpl(0, skinningTransform, kPoints, bones, bone1Only, kDofOffset);
+    DMap<DQuad, DMapSkinning> bone1OnlyMap(&dquad, &bone1OnlyMapImpl);
+    std::array<ContactJac, 1> bone1OnlySlice;
+    ContactJac scratch;
+    bone1OnlyMap.GetJac(kInds, bone1OnlySlice, scratch);
+    std::array<ContactJac, kBones> allSlices;
+    dmap.GetJac(kInds, allSlices, scratch);
+    std::array<int, RigidSize::kDAll> const expectedBone1Dofs{11, 12, 13, 14, 15, 16};
+    EXPECT_SPAN_EQ(bone1OnlySlice[0].Inds(0), MakeConstSpan(expectedBone1Dofs));
+    EXPECT_TRUE(bone1OnlySlice[0].JacAux().empty());
+    for (int contact = 0; contact < kInds.size(); ++contact) {
+      EXPECT_TRUE(
+          test::NearEqualMatrices(bone1OnlySlice[0].Jac(contact), allSlices[0].Jac(contact)));
+    }
+  }
 }
 
 TEST_F(DMapTest, QuadratureSkinningRom) {
@@ -774,15 +916,15 @@ TEST_F(DMapTest, QuadratureSkinningRom) {
     SelectOutput(afterQuadrature, kInds, out);
   };
 
-  auto skinningJacRom =
-      CreateSkinningJacobian(kSkinningTransform, kArticulatedState, kPointsAfterRom);
+  auto const bones = CreateSkinningBones(kSkinningTransform);
   for (auto toCollider : kToCollider) {
     DMapRom drom(0, kRomJacobian, 0);
-    DMapSkinInput dskinning(1, skinningJacRom, kArticulatedDofs, 0, kSkinning, kSkeletonRotations);
+    DMapSkinning dskinning(1, kSkinningTransform, kPointsAfterRom, bones, kActiveBoneIds, 0);
     DQuad dquad(kFemElements, toCollider);
-    DMap<DQuad, DMapSkinInput, DMapRom> dmap(&dquad, &dskinning, &drom);
-    TestConsistency<2>(
-        dmap,
+    DMap<DQuad, DMapSkinning, DMapRom> dmap(&dquad, &dskinning, &drom);
+    TestConsistencyByState<1 + kBones, 2>(
+        WithBoneJacAux(dmap, 1),
+        {0, 1, 1},
         {kRomSize, kArticulatedSize},
         kInds,
         {addEpsAndMapRom, addEpsAndMapSkeleton},
@@ -862,36 +1004,6 @@ TEST_F(DMapTest, QuadratureTransformSoft) {
   }
 }
 
-TEST_F(DMapTest, SkinningSoft) {
-  auto addEpsAndMapSoft = [this](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
-    ColumnVector<real> state = kSoftState;
-    AddEpsEuclidean(i, eps, state);
-    std::vector<Real3> afterSoft(points.size());
-    ApplySoft(state, points, afterSoft);
-    std::vector<Real3> afterSkinning(afterSoft.size());
-    ApplySkinning(kArticulatedState, kSkinningTransform, afterSoft, afterSkinning);
-    SelectOutput(afterSkinning, kInds, out);
-  };
-
-  auto addEpsAndMapSkeleton = [this](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
-    ColumnVector<real, kArticulatedSize> state = kArticulatedState;
-    AddEpsArticulated(i, eps, state);
-    std::vector<Real3> afterSoft(points.size());
-    ApplySoft(kSoftState, points, afterSoft);
-    std::vector<Real3> afterSkinning(afterSoft.size());
-    ApplySkinning(state, kSkinningTransform, afterSoft, afterSkinning);
-    SelectOutput(afterSkinning, kInds, out);
-  };
-
-  auto skinningJacSoft =
-      CreateSkinningJacobian(kSkinningTransform, kArticulatedState, kPointsAfterSoft);
-  DMapSoft dsoft(0, 0);
-  DMapSkinInput dskinning(1, skinningJacSoft, kArticulatedDofs, 0, kSkinning, kSkeletonRotations);
-  DMap<DMapSkinInput, DMapSoft> dmap(&dskinning, &dsoft);
-  TestConsistency<2>(
-      dmap, {kSoftSize, kArticulatedSize}, kInds, {addEpsAndMapSoft, addEpsAndMapSkeleton}, {});
-}
-
 TEST_F(DMapTest, QuadratureSkinningSoft) {
   auto addEpsAndMapSoft = [this](int i, real eps, Span<Real3 const> points, Span<Real3> out) {
     ColumnVector<real> state = kSoftState;
@@ -917,15 +1029,15 @@ TEST_F(DMapTest, QuadratureSkinningSoft) {
     SelectOutput(afterQuadrature, kInds, out);
   };
 
-  auto skinningJacSoft =
-      CreateSkinningJacobian(kSkinningTransform, kArticulatedState, kPointsAfterSoft);
+  auto const bones = CreateSkinningBones(kSkinningTransform);
   for (auto toCollider : kToCollider) {
     DMapSoft dsoft(0, 0);
-    DMapSkinInput dskinning(1, skinningJacSoft, kArticulatedDofs, 0, kSkinning, kSkeletonRotations);
+    DMapSkinning dskinning(1, kSkinningTransform, kPointsAfterSoft, bones, kActiveBoneIds, 0);
     DQuad dquad(kFemElements, toCollider);
-    DMap<DQuad, DMapSkinInput, DMapSoft> dmap(&dquad, &dskinning, &dsoft);
-    TestConsistency<2>(
-        dmap,
+    DMap<DQuad, DMapSkinning, DMapSoft> dmap(&dquad, &dskinning, &dsoft);
+    TestConsistencyByState<1 + kBones, 2>(
+        WithBoneJacAux(dmap, 1),
+        {0, 1, 1},
         {kSoftSize, kArticulatedSize},
         kInds,
         {addEpsAndMapSoft, addEpsAndMapSkeleton},
@@ -997,22 +1109,22 @@ TEST_F(DMapTest, QuadratureSkinningBlendingSoft) {
   };
 
   auto pointsAfterBlendingSoft = CreatePointsAfterBlending(kBlending, kPoints, kPointsAfterSoft);
-  auto skinningJacBlendingSoft =
-      CreateSkinningJacobian(kSkinningTransform, kArticulatedState, pointsAfterBlendingSoft);
+  auto const bones = CreateSkinningBones(kSkinningTransform);
   for (auto toCollider : kToCollider) {
     DMapSoft dsoft(0, 0);
     DMapBlending dblending(kBlending);
-    DMapSkinInput dskinning(
-        1, skinningJacBlendingSoft, kArticulatedDofs, 0, kSkinning, kSkeletonRotations);
+    DMapSkinning dskinning(
+        1, kSkinningTransform, pointsAfterBlendingSoft, bones, kActiveBoneIds, 0);
     DQuad dquad(kFemElements, toCollider);
-    DMap<DQuad, DMapSkinInput, DMapBlending, DMapSoft> dmap(&dquad, &dskinning, &dblending, &dsoft);
-    TestConsistency<2>(
-        dmap,
+    DMap<DQuad, DMapSkinning, DMapBlending, DMapSoft> dmap(&dquad, &dskinning, &dblending, &dsoft);
+    TestConsistencyByState<1 + kBones, 2>(
+        WithBoneJacAux(dmap, 1),
+        {0, 1, 1},
         {kSoftSize, kArticulatedSize},
         kInds,
         {addEpsAndMapSoft, addEpsAndMapSkeleton},
         toCollider,
-        1.1e-2_r);
+        1.5e-2_r);
   }
 }
 
@@ -1046,17 +1158,16 @@ TEST_F(DMapTest, QuadratureSkinningBlendingRom) {
   };
 
   auto pointsAfterBlendingRom = CreatePointsAfterBlending(kBlending, kPoints, kPointsAfterRom);
-  auto skinningJacBlendingRom =
-      CreateSkinningJacobian(kSkinningTransform, kArticulatedState, pointsAfterBlendingRom);
+  auto const bones = CreateSkinningBones(kSkinningTransform);
   for (auto toCollider : kToCollider) {
     DMapRom drom(0, kRomJacobian, 0);
     DMapBlending dblending(kBlending);
-    DMapSkinInput dskinning(
-        1, skinningJacBlendingRom, kArticulatedDofs, 0, kSkinning, kSkeletonRotations);
+    DMapSkinning dskinning(1, kSkinningTransform, pointsAfterBlendingRom, bones, kActiveBoneIds, 0);
     DQuad dquad(kFemElements, toCollider);
-    DMap<DQuad, DMapSkinInput, DMapBlending, DMapRom> dmap(&dquad, &dskinning, &dblending, &drom);
-    TestConsistency<2>(
-        dmap,
+    DMap<DQuad, DMapSkinning, DMapBlending, DMapRom> dmap(&dquad, &dskinning, &dblending, &drom);
+    TestConsistencyByState<1 + kBones, 2>(
+        WithBoneJacAux(dmap, 1),
+        {0, 1, 1},
         {kRomSize, kArticulatedSize},
         kInds,
         {addEpsAndMapRom, addEpsAndMapSkeleton},
@@ -1154,7 +1265,7 @@ TEST_F(DMapTest, SparseSkinning) {
 
   // Test composition DMap<DMapQuad<TriElement>, DMapSparseSkinning>.
   // This exercises the non-shared-DoF code path in DMapQuad::PropagateJacobianSlice,
-  // which is the production path for rod visual mesh contact.
+  // which is the production path for rod surface contact.
   auto addEpsAndMapQuad = [&](int i, real eps, Span<Real3 const> /*points*/, Span<Real3> out) {
     std::array<real, kNumDofs> perturbedState = state;
     perturbedState[i] += eps;

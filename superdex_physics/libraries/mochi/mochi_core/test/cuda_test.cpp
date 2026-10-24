@@ -45,6 +45,7 @@
 #include <cmath>
 #include <iterator>
 #include <limits>
+#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -423,6 +424,39 @@ static void TestBlockSparseMatrixVectorProduct() {
   }
 }
 
+template <typename Scalar>
+static void TestConvertCsrToBsr() {
+  constexpr int kBlockSize = 3;
+  int device = 0;
+  MOCHI_CUDA_CHECK(cudaGetDevice(&device));
+  int maxThreadsPerBlock = 0;
+  MOCHI_CUDA_CHECK(
+      cudaDeviceGetAttribute(&maxThreadsPerBlock, cudaDevAttrMaxThreadsPerBlock, device));
+  //--- Convert a block row with more columns than a CUDA block has threads. In a single block row,
+  //--- column-major blocks are laid out like the column-major block row.
+  int const numCols = (maxThreadsPerBlock / kBlockSize + 1) * kBlockSize;
+  DynamicArray<Scalar> bsrValues(kBlockSize * numCols);
+  std::iota(bsrValues.begin(), bsrValues.end(), Scalar(1));
+  krylov::CudaBsrMatrix<Scalar, kBlockSize> gpuWide(
+      ToBlockSparseMatrix<kBlockSize>(MatrixView<Scalar>{bsrValues.data(), kBlockSize, numCols}));
+  EXPECT_SPAN_EQ(ColumnVector<Scalar>(gpuWide.Values()).GetSpan(), bsrValues);
+  //--- Convert a block with more rows than a CUDA block has threads. A single row-major block is
+  //--- laid out like its CSR values.
+  int const bigBlockSize = maxThreadsPerBlock + 1;
+  DynamicArray<Scalar> bigBlock(bigBlockSize * bigBlockSize);
+  std::iota(bigBlock.begin(), bigBlock.end(), Scalar(1));
+  CudaVector<int> gpuBigRowPtr(AsConstView(DynamicArray<int>({0, 1})));
+  CudaVector<Scalar> gpuBigCsr(AsConstView(bigBlock));
+  CudaVector<Scalar> gpuBigBsr(isize(bigBlock));
+  krylov::details::ConvertCsrToBsr<Scalar, krylov::Direction::RowMajor>(
+      bigBlockSize, 1, bigBlockSize, gpuBigRowPtr.data(), gpuBigCsr.data(), gpuBigBsr.data());
+  EXPECT_SPAN_EQ(ColumnVector<Scalar>(gpuBigBsr).GetSpan(), bigBlock);
+  //--- Convert a matrix without blocks.
+  krylov::CudaBsrMatrix<Scalar, kBlockSize> gpuEmpty(
+      BlockSparseMatrix<Scalar, kBlockSize>(1, {0, 0}, {}, {}));
+  EXPECT_EQ(cudaGetLastError(), cudaSuccess);
+}
+
 TEST(CudaAlgebra, CopyHost2Host) {
   {
     Matrix<
@@ -680,6 +714,11 @@ TEST(CudaAlgebra, BlockSparseMatrixVectorProduct) {
   TestBlockSparseMatrixVectorProduct<double, 3>();
   TestBlockSparseMatrixVectorProduct<double, 4>();
   TestBlockSparseMatrixVectorProduct<double, 5>();
+}
+
+TEST(CudaAlgebra, ConvertCsrToBsr) {
+  TestConvertCsrToBsr<float>();
+  TestConvertCsrToBsr<double>();
 }
 
 //////

@@ -214,20 +214,22 @@ namespace CADRobotExporter.SW
 
             logger.Information("Linking superdex_mesh_cli Save As... menu");
 
-            SwApp.AddFileSaveAsItem2(addInID, "OCC_FileSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocPART);
-            SwApp.AddFileSaveAsItem2(addInID, "OCC_FileSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocASSEMBLY);
+            SwApp.AddFileSaveAsItem2(addInID, "SuperDexMeshSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocPART);
+            SwApp.AddFileSaveAsItem2(addInID, "SuperDexMeshSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocASSEMBLY);
 
             return true;
         }
 
-        public void OCC_FileSave(string sFileName)
+        public void SuperDexMeshSave(string sFileName)
         {
             // Example sFileName:
-            // C:\Users\bar\Documents\foo robot\bar baz.OCC bar bazOCC w
+            // C:\Users\bar\Documents\foo robot\bar baz.MSH bar bazMSH w
 
             MeshSaveForm form = new MeshSaveForm((SldWorks)SwApp, sFileName);
+            Utilities.WpfWindowOwner.OwnTo(form, new IntPtr(((Frame)SwApp.Frame()).GetHWnd()));
 
             form.Show();
+            form.Activate();
         }
 
         public bool CompareIDs(int[] storedIDs, int[] addinIDs)
@@ -263,8 +265,8 @@ namespace CADRobotExporter.SW
             RemoveCommandMgr();
             DetachEventHandlers();
 
-            SwApp.RemoveFileSaveAsItem2(addInID, "OCC_FileSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocPART);
-            SwApp.RemoveFileSaveAsItem2(addInID, "OCC_FileSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocASSEMBLY);
+            SwApp.RemoveFileSaveAsItem2(addInID, "SuperDexMeshSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocPART);
+            SwApp.RemoveFileSaveAsItem2(addInID, "SuperDexMeshSave", "superdex_mesh_cli file (*.glb/*.obj/*.stl)", "msh", (int)swDocumentTypes_e.swDocASSEMBLY);
 
             Marshal.ReleaseComObject(iCmdMgr);
             iCmdMgr = null;
@@ -320,7 +322,7 @@ namespace CADRobotExporter.SW
 
             cmdGroup.MainIconList = icons;
             cmdGroup.IconList = icons;
-            cmdGroup.ShowInDocumentType = (int)swDocTemplateTypes_e.swDocTemplateTypeASSEMBLY;
+            cmdGroup.ShowInDocumentType = (int)swDocTemplateTypes_e.swDocTemplateTypeASSEMBLY | (int)swDocTemplateTypes_e.swDocTemplateTypePART;
 
             int menuToolbarOption = (int)(swCommandItemType_e.swMenuItem | swCommandItemType_e.swToolbarItem);
             cmdIdxCreateURDF = cmdGroup.AddCommandItem2(
@@ -389,8 +391,16 @@ namespace CADRobotExporter.SW
 
             bool cmdMgrResult = cmdGroup.Activate();
 
+            // The ribbon tab has to be registered per document type.
+            CreateRoboticsCommandTab(cmdGroup, (int)swDocumentTypes_e.swDocASSEMBLY, getDataResult, ignorePrevious);
+            CreateRoboticsCommandTab(cmdGroup, (int)swDocumentTypes_e.swDocPART, getDataResult, ignorePrevious);
+        }
+
+        private void CreateRoboticsCommandTab(
+            ICommandGroup cmdGroup, int documentType, bool getDataResult, bool ignorePrevious)
+        {
             CommandTab cmdTab;
-            cmdTab = iCmdMgr.GetCommandTab((int)swDocumentTypes_e.swDocASSEMBLY, "Robotics");
+            cmdTab = iCmdMgr.GetCommandTab(documentType, "Robotics");
 
             if (cmdTab != null & !getDataResult | ignorePrevious)
             {
@@ -400,7 +410,7 @@ namespace CADRobotExporter.SW
 
             if (cmdTab == null)
             {
-                cmdTab = iCmdMgr.AddCommandTab((int)swDocumentTypes_e.swDocASSEMBLY, "Robotics");
+                cmdTab = iCmdMgr.AddCommandTab(documentType, "Robotics");
 
                 // Main buttons
                 CommandTabBox MainCmdTabBox = cmdTab.AddCommandTabBox();
@@ -414,7 +424,7 @@ namespace CADRobotExporter.SW
                 MainCmdIDs.Add(cmdGroup.get_CommandID(cmdIdxEditURDF));
                 textTypes.Add((int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextBelow);
 
-                cmdMgrResult = MainCmdTabBox.AddCommands(MainCmdIDs.ToArray(), textTypes.ToArray());
+                bool cmdMgrResult = MainCmdTabBox.AddCommands(MainCmdIDs.ToArray(), textTypes.ToArray());
 
                 // Utility buttons
                 CommandTabBox ExtraCmdTabBox = cmdTab.AddCommandTabBox();
@@ -429,6 +439,9 @@ namespace CADRobotExporter.SW
                 textTypes1.Add((int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextHorizontal);
 
                 ExtraCmdIDs.Add(cmdGroup.get_CommandID(cmdIdxDuplicateConfiguration));
+                textTypes1.Add((int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextHorizontal);
+
+                ExtraCmdIDs.Add(cmdGroup.get_CommandID(cmdIdxImportURDF));
                 textTypes1.Add((int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextHorizontal);
 
                 cmdMgrResult = ExtraCmdTabBox.AddCommands(ExtraCmdIDs.ToArray(), textTypes1.ToArray());
@@ -633,17 +646,19 @@ namespace CADRobotExporter.SW
                 return;
             }
 
-            if (activeDoc.GetType() != (int)swDocumentTypes_e.swDocASSEMBLY)
+            var docType = activeDoc.GetType();
+            if (docType != (int)swDocumentTypes_e.swDocASSEMBLY && docType != (int)swDocumentTypes_e.swDocPART)
             {
-                MessageBox.Show("URDF import is only supported for assembly documents.", "Import URDF", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("URDF import is only supported for assembly or part documents.", "Import URDF", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
-            using (var form = new RobotImportForm((SldWorks)SwApp))
-            {
-                if (form.ShowDialog() != DialogResult.OK)
-                    return;
+            var form = new RobotImportForm((SldWorks)SwApp);
+            Utilities.WpfWindowOwner.OwnTo(form, new IntPtr(((Frame)SwApp.Frame()).GetHWnd()));
+            if (form.ShowDialog() != true)
+                return;
 
+            {
                 string urdfPath = form.UrdfFilePath;
 
                 try
@@ -715,8 +730,8 @@ namespace CADRobotExporter.SW
                     System.Windows.MessageBoxOptions.DefaultDesktopOnly);
                 if (AssemblyExportForm.Instance != null)
                 {
-                    AssemblyExportForm.Instance.WindowState = FormWindowState.Normal;
-                    AssemblyExportForm.Instance.Focus();
+                    AssemblyExportForm.Instance.WindowState = System.Windows.WindowState.Normal;
+                    AssemblyExportForm.Instance.Activate();
                     return true;
                 }
             }

@@ -19,6 +19,7 @@
 #include <mochi_core/geometry/any_shape.h>
 #include <mochi_core/geometry/geometry_utils.h>
 #include <mochi_core/geometry/grid_sdf_params.h>
+#include <mochi_core/geometry/scalar_field.h>
 #include <mochi_core/geometry/sdf.h>
 #include <mochi_core/geometry/triangular_mesh.h>
 #include <mochi_core/utils/error.h>
@@ -42,6 +43,12 @@ class GridSdf final : public Sdf {
 
   // Creates a GridSdf of the specified triangular mesh. See GridSdfParams.
   explicit GridSdf(
+      std::shared_ptr<TriangularMesh const> const& mesh,
+      GridSdfParams const& params,
+      Error& error);
+
+  // Sets the error that the constructor above would set, without computing the SDF.
+  static void Validate(
       std::shared_ptr<TriangularMesh const> const& mesh,
       GridSdfParams const& params,
       Error& error);
@@ -107,11 +114,12 @@ class GridSdf final : public Sdf {
       std::shared_ptr<TriangularMesh const> const& mesh,
       DenseGrid3D<real>& outDistanceGrid);
 
-  template <class SamplerT>
+  template <GridExtrapolation kExtrapolationType>
   void FindPointContactsImpl(
       Span<Real3 const> points,
       TransformRT const& pointsFromActor,
       ContactDetectionParams const& params,
+      Aabb const& boundsInGridSpace,
       DynamicArray<int>& outIndices,
       DynamicArray<Real3>& outContacts,
       SdfInfo& outSdf) const;

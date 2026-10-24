@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Copyright (c) Meta Platforms, Inc. and affiliates.
  *
  * This source code is licensed under the MIT license found in the
@@ -8,15 +8,24 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using System.Windows.Forms;
+using System.Windows.Threading;
 
 namespace CADRobotExporter.UI
 {
+    /// <summary>
+    /// Owns the progress window and the dedicated STA thread it runs on. The export runs on the
+    /// CAD host's thread and blocks it, so the window needs its own thread and its own dispatcher
+    /// to keep painting and to keep the Cancel button responsive.
+    ///
+    /// Every mutating call marshals onto that thread; only <see cref="IsCancelled"/> is read
+    /// directly, and that is backed by a volatile field.
+    /// </summary>
     public class ProgressIndicatorManager : IDisposable
     {
-        private ProgressIndicatorForm form;
+        private ProgressIndicatorWindow window;
         private Thread uiThread;
-        private readonly ManualResetEvent formReady = new ManualResetEvent(false);
+        private readonly ManualResetEvent windowReady = new ManualResetEvent(false);
+        private volatile bool isClosed;
         private bool isDisposed;
 
         public void Show()
@@ -26,96 +35,113 @@ namespace CADRobotExporter.UI
                 return;
             }
 
-            formReady.Reset();
+            windowReady.Reset();
+            isClosed = false;
 
             uiThread = new Thread(() =>
             {
-                form = new ProgressIndicatorForm();
-                form.HandleCreated += (s, e) => formReady.Set();
-                form.FormClosed += (s, e) => Application.ExitThread();
-                Application.Run(form);
+                window = new ProgressIndicatorWindow();
+
+                // SourceInitialized is the WPF counterpart to HandleCreated: the HWND exists and
+                // the dispatcher is pumping, so it is safe to marshal work in.
+                window.SourceInitialized += (s, e) => windowReady.Set();
+                window.Closed += (s, e) =>
+                {
+                    isClosed = true;
+                    Dispatcher.CurrentDispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
+                };
+
+                window.Show();
+                Dispatcher.Run();
             });
 
             uiThread.SetApartmentState(ApartmentState.STA);
             uiThread.IsBackground = true;
             uiThread.Start();
 
-            // Wait for form to be ready
-            formReady.WaitOne();
+            // Wait for the window to be ready
+            windowReady.WaitOne();
             StartTimer();
         }
 
         public void Close()
         {
-            InvokeOnForm(() => form.Close());
+            InvokeOnWindow(() => window.Close());
         }
 
         public void Reset()
         {
-            InvokeOnForm(() => form.Reset());
+            InvokeOnWindow(() => window.Reset());
         }
 
         public void AddStep(string name, string text)
         {
-            InvokeOnForm(() => form.AddStep(name, text));
+            InvokeOnWindow(() => window.AddStep(name, text));
         }
 
         public void AddSteps(IEnumerable<(string name, string text)> steps)
         {
-            InvokeOnForm(() =>
+            InvokeOnWindow(() =>
             {
                 foreach (var (name, text) in steps)
                 {
-                    form.AddStep(name, text);
+                    window.AddStep(name, text);
                 }
             });
         }
 
         public void AddSubStep(string name, string text)
         {
-            InvokeOnForm(() => form.AddSubStep(name, text));
+            InvokeOnWindow(() => window.AddSubStep(name, text));
         }
 
         public void AddSubSteps(IEnumerable<(string name, string text)> subSteps)
         {
-            InvokeOnForm(() =>
+            InvokeOnWindow(() =>
             {
                 foreach (var (name, text) in subSteps)
                 {
-                    form.AddSubStep(name, text);
+                    window.AddSubStep(name, text);
                 }
             });
         }
 
         public void SetCurrentStep(string name)
         {
-            InvokeOnForm(() => form.SetCurrentStep(name));
+            InvokeOnWindow(() => window.SetCurrentStep(name));
         }
 
         public void SetCurrentSubStep(string name)
         {
-            InvokeOnForm(() => form.SetCurrentSubstep(name));
+            InvokeOnWindow(() => window.SetCurrentSubstep(name));
         }
 
         public void StartTimer()
         {
-            InvokeOnForm(() => form.StartTimer());
+            InvokeOnWindow(() => window.StartTimer());
         }
 
-        private void InvokeOnForm(Action action)
+        private void InvokeOnWindow(Action action)
         {
-            if (form == null || form.IsDisposed || !form.IsHandleCreated)
+            ProgressIndicatorWindow target = window;
+            if (target == null || isClosed)
             {
                 return;
             }
 
-            if (form.InvokeRequired)
+            Dispatcher dispatcher = target.Dispatcher;
+            if (dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
             {
-                form.Invoke(action);
+                return;
+            }
+
+            if (dispatcher.CheckAccess())
+            {
+                action();
             }
             else
             {
-                action();
+                dispatcher.Invoke(action);
             }
         }
 
@@ -123,10 +149,13 @@ namespace CADRobotExporter.UI
         {
             get
             {
-                if (form == null || form.IsDisposed)
-                    return true;  // Treat as cancelled if form is gone
+                ProgressIndicatorWindow target = window;
+                if (target == null || isClosed)
+                {
+                    return true;  // Treat as cancelled if the window is gone
+                }
 
-                return form.IsCancelled;
+                return target.IsCancelled;
             }
         }
 
@@ -138,17 +167,13 @@ namespace CADRobotExporter.UI
 
         protected virtual void Dispose(bool disposing)
         {
-            if (!isDisposed)
+            if (isDisposed)
             {
                 return;
             }
 
-            if (form != null && !form.IsDisposed && form.IsHandleCreated)
-            {
-                form.Invoke(new Action(() => form.Close()));
-            }
-
-            formReady.Dispose();
+            Close();
+            windowReady.Dispose();
 
             isDisposed = true;
         }
