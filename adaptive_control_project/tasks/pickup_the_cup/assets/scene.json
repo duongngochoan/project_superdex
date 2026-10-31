@@ -1,0 +1,40 @@
+{
+  "table_top": 0.22,
+  "table_size": [
+    0.7,
+    1.1,
+    0.03
+  ],
+  "table_center_xy": [
+    0.5,
+    0.0
+  ],
+  "cup_xy": [
+    0.2590971914723176,
+    -0.18120294670117537
+  ],
+  "cup_yaw": 0.8183447723525525,
+  "object_kind": "mesh",
+  "object_mesh": "assets/mug.stl",
+  "object_mass": 0.118,
+  "object_bottom_offset": 0.039003,
+  "object_rotation_xyzw": [
+    0.0,
+    0.0,
+    0.3978501696874292,
+    0.9174504032805718
+  ],
+  "cup_scale": 1.0,
+  "arm_stiffness": 1000.0,
+  "arm_damping": 60.0,
+  "hand_stiffness": 25.0,
+  "hand_damping": 1.0,
+  "dt": 0.005,
+  "gravity": -9.81,
+  "num_threads": 0,
+  "object_translation": [
+    0.2590971914723176,
+    -0.18120294670117537,
+    0.260003
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "kind": "virtual_camera_mounts",
+  "description": "Fixed virtual right-wrist camera for the focused DexYCB mug replay. This is a visualization placement, not a measured sensor calibration. Camera moves rigidly with the wrist; it does not track the object.",
+  "reference_run": "retarget/runs/pickup_the_cup",
+  "reference_state": "Measured q in log.npz; exact robot prefab FK across the full 43.3 s replay. Mug framing near the intended grasp is secondary to hand visibility.",
+  "wrist_eye_distance_m": 0.24999999999999997,
+  "wrist_from_camera": {
+    "wrist_right": [
+      [
+        -0.9508991912560883,
+        -0.030816126641131793,
+        0.3079628133514736,
+        0.0901369076536301
+      ],
+      [
+        -0.2946405795120438,
+        -0.21448598209132502,
+        -0.9312264452812359,
+        -0.2318456546080058
+      ],
+      [
+        0.0947504985386557,
+        -0.976240815488247,
+        0.19487486549454924,
+        -0.02495857203499904
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "fit": {
+    "vertical_fov_deg": 42,
+    "width": 640,
+    "height": 480,
+    "hand_keypoints_visible_fraction_min": 1.0,
+    "note": "Projection bounds cover robot finger joint origins and fingertips. Mesh occlusion is possible; a cup that falls away is not guaranteed to remain in view."
+  }
+}

@@ -1,0 +1,10 @@
+# Large dependencies and generated artifacts
+third_party/
+__pycache__/
+.pytest_cache/
+retarget_pipeline/_native/
+tasks/*/data/raw/
+tasks/pickup_the_cup/data/processed/
+tasks/*/retarget/runs/**/log.npz
+!scripts/build_controllers.py
+tasks/*/videos/.index.lock

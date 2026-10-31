@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "clips": [
+    {
+      "domain": "raw",
+      "camera": "external",
+      "fps": 30.0,
+      "frames": 62,
+      "source_sequences": [
+        "data/processed/dexycb_mug_20200709_151032.npz"
+      ],
+      "timestamps": "videos/raw/external/dexycb_mug_keypoints.timestamps.npz",
+      "source_start_s": 0.0,
+      "source_end_s": 2.033333333333333,
+      "playback": 1.0,
+      "synthetic": false,
+      "label": "Annotation visualization, not source camera footage",
+      "path": "videos/raw/external/dexycb_mug_keypoints.mp4",
+      "kind": "keypoint_preview",
+      "product": "dataset_keypoints"
+    },
+    {
+      "domain": "robot",
+      "camera": "external",
+      "run": "pickup_the_cup",
+      "fps": 30.0,
+      "frames": 1300,
+      "keypoints": "videos/robot/external/pickup_the_cup_arm_hand_constraints.keypoints.npz",
+      "report": "videos/robot/external/pickup_the_cup_arm_hand_constraints.json",
+      "constraint_passed": true,
+      "skeleton": "arm_and_hand",
+      "state": "commanded",
+      "label": "Exact robot FK of constrained q_target; not source annotations or measured tracking",
+      "path": "videos/robot/external/pickup_the_cup_arm_hand_constraints.mp4",
+      "kind": "constrained_keypoint_preview",
+      "product": "constrained_arm_hand_keypoints"
+    },
+    {
+      "domain": "robot",
+      "camera": "external",
+      "run": "pickup_the_cup",
+      "fps": 30.0,
+      "frames": 1300,
+      "camera_poses": "videos/robot/external/pickup_the_cup.camera.npz",
+      "path": "videos/robot/external/pickup_the_cup.mp4",
+      "kind": "simulation_render",
+      "product": "robot_replay"
+    },
+    {
+      "domain": "robot",
+      "camera": "head",
+      "run": "pickup_the_cup",
+      "fps": 30.0,
+      "frames": 1300,
+      "camera_poses": "videos/robot/external/pickup_the_cup_head.camera.npz",
+      "path": "videos/robot/external/pickup_the_cup_head.mp4",
+      "kind": "simulation_render",
+      "product": "robot_replay"
+    },
+    {
+      "domain": "robot",
+      "camera": "wrist_right",
+      "run": "pickup_the_cup",
+      "fps": 30.0,
+      "frames": 1300,
+      "camera_poses": "videos/robot/external/pickup_the_cup_wrist_right.camera.npz",
+      "path": "videos/robot/external/pickup_the_cup_wrist_right.mp4",
+      "kind": "simulation_render",
+      "product": "robot_replay"
+    }
+  ]
+}

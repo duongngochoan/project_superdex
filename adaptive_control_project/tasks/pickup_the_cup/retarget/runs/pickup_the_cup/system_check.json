@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "checked_at_utc": "2026-10-31T15:11:33.127378+00:00",
+  "task": "pickup_the_cup",
+  "sequence": "20200709_151032",
+  "required_runtime_inputs_present": true,
+  "unit_tests": {
+    "passed": 143,
+    "failed": 0
+  },
+  "pipeline_stages_executed": [
+    "convert",
+    "retarget",
+    "arm_hand_preview",
+    "replay",
+    "render"
+  ],
+  "pipeline_exit_code": 1,
+  "execution_status": "completed_with_failed_measured_constraint_checks",
+  "command_constraints_passed": true,
+  "measured_constraints": {
+    "passed": false,
+    "position_passed": true,
+    "velocity_passed": true,
+    "acceleration_passed": false,
+    "effort_passed": false
+  },
+  "configured_mug_up_world": [
+    0.0,
+    0.0,
+    1.0
+  ],
+  "measured_mug_up_after_warmup_world": [
+    -0.01600465856789651,
+    -0.002960392665224528,
+    0.9998675347161708
+  ],
+  "robot_commands_unchanged_from_before_orientation_fix": true,
+  "simulation_duration_s": 43.300000000000004,
+  "controller_samples": 8661,
+  "physical_manipulation_success": null,
+  "object_origin_z_change_m": -0.0002783238887786865,
+  "max_object_origin_z_change_m": 0.0034449994564056396,
+  "video_layout": "all robot views in videos/robot/external; actual camera identity preserved in metadata",
+  "camera_calibration": "assets/cameras.json",
+  "videos": [
+    {
+      "path": "videos/raw/external/dexycb_mug_keypoints.mp4",
+      "product": "dataset_keypoints",
+      "camera": "external",
+      "decoded_frames": 62,
+      "fps": 30.0,
+      "width": 640,
+      "height": 480,
+      "bytes": 113143,
+      "sidecars_valid": true,
+      "sha256": "76ca0cfd6dd18d7224f2ecdb93f7c1edce801bb4b5330f13686c2b219f92ac76"
+    },
+    {
+      "path": "videos/robot/external/pickup_the_cup.mp4",
+      "product": "robot_replay",
+      "camera": "external",
+      "decoded_frames": 1300,
+      "fps": 30.0,
+      "width": 640,
+      "height": 480,
+      "bytes": 1528205,
+      "sidecars_valid": true,
+      "sha256": "51826b7217449f6b7754574ccea0cc1cfd3ecfb9fc3d8230b56e574cb95d8581"
+    },
+    {
+      "path": "videos/robot/external/pickup_the_cup_head.mp4",
+      "product": "robot_replay",
+      "camera": "head",
+      "decoded_frames": 1300,
+      "fps": 30.0,
+      "width": 640,
+      "height": 480,
+      "bytes": 3249853,
+      "sidecars_valid": true,
+      "sha256": "2c8d63a8a145a00acd0ee0acd84d75aa84cd5f62e1307eaf83b1dd73e50654fa"
+    },
+    {
+      "path": "videos/robot/external/pickup_the_cup_wrist_right.mp4",
+      "product": "robot_replay",
+      "camera": "wrist_right",
+      "decoded_frames": 1300,
+      "fps": 30.0,
+      "width": 640,
+      "height": 480,
+      "bytes": 4421850,
+      "sidecars_valid": true,
+      "sha256": "c9cad54e17a4c461a0cae16bc3793e7352d9f3741ca3768f3e67c73b7309c16e"
+    },
+    {
+      "path": "videos/robot/external/pickup_the_cup_arm_hand_constraints.mp4",
+      "product": "constrained_arm_hand_keypoints",
+      "camera": "external",
+      "decoded_frames": 1300,
+      "fps": 30.0,
+      "width": 640,
+      "height": 480,
+      "bytes": 966535,
+      "sidecars_valid": true,
+      "sha256": "521362dd01ef2d32c56386da70b8cec775a19114055e430d9f56d91f8bb27d19"
+    }
+  ],
+  "notes": [
+    "Mug starts rim-up and remains upright through the stationary initialization.",
+    "Head is a fixed virtual head-position view; right-wrist view is rigidly attached to the moving wrist.",
+    "Arm/hand preview shows commanded robot FK, not recorded human arm points or measured tracking.",
+    "Measured joint/effort compliance and physical pickup success are separate from successful video generation."
+  ],
+  "source_sha256": "a463a7e97138e23484bf3dff710321d9ef440aeb35da55f7a8882ac9118b174a",
+  "artifact_sha256": {
+    "scene": "3f1234dedc548e7410efc8e10ef729ffcac332f0865be724a3bb827649e9a0b6",
+    "camera_calibration": "e5aacbbdbc056e6506894d004a61751563c9b8c9c520eec38731532a0f3fca89",
+    "mug_mesh": "fbc5efb2cf42c62cc2324d067b3d7d82b8562733f2af1df22cf9e6303899f138",
+    "trajectory": "09c0e120e7c25763350b2b3b5ff90ba074c5200b777684ee1d6bf636cd19c540",
+    "measured_log": "485e97d66a8aae2576cf8172c577675f12b7d68a47cdb61ca9c0c35cd3bf513d"
+  }
+}

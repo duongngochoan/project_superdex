@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "id": "dexycb_025_mug",
+  "collision_mesh": "mug.stl",
+  "render_mesh": "mug.stl",
+  "units": "metres",
+  "mass_kg": 0.118,
+  "mass_source": "Configured simulation mass inherited from the related native_validation scene; not a mass estimate from images.",
+  "source": "Retained DexYCB models/025_mug/mug.stl, copied byte-for-byte.",
+  "local_up_axis": [0.0, 0.0, 1.0],
+  "local_up_axis_description": "The actual STL opens toward local +Z; scene.json initializes that rim direction along world +Z and places the lowest mesh vertex 1 mm above the tabletop.",
+  "dynamic_body": true,
+  "attachment": "none",
+  "scene": "scene.json"
+}

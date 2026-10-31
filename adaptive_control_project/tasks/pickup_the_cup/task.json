@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "id": "pickup_the_cup",
+  "title": "DexYCB 20200709_151032: right-hand mug replay",
+  "description": "Convert one recorded hand/object annotation sequence, retarget the right hand and arm, simulate a freely dynamic DexYCB mug, and render pickup_the_cup.mp4.",
+  "hands": [
+    "right"
+  ],
+  "runner": "annotations",
+  "default_sequence": "dexycb_mug",
+  "dataset": {
+    "name": "DexYCB",
+    "sequence": "20200709_151032",
+    "sequence_directory": "data/raw/20200709_151032",
+    "calibration_directory": "data/raw/calibration"
+  },
+  "sequences": {
+    "right": "data/processed/dexycb_mug_20200709_151032.npz"
+  },
+  "assets": "assets/asset.json",
+  "scene": "assets/scene.json",
+  "annotation_alignment": "assets/annotation_alignment.json",
+  "control": {
+    "optimizer": "adaptive",
+    "approach_time": 2.5,
+    "hold_time": 2.0,
+    "warmup_time_s": 1.0,
+    "grasp_assist": {
+      "angle_rad": 0.15,
+      "start_time_s": 0.7333333333333333,
+      "ramp_time_s": 0.3
+    }
+  },
+  "constraint_policy": {
+    "arm_velocity": 1.0,
+    "hand_velocity": 1.5,
+    "arm_acceleration": 2.0,
+    "hand_acceleration": 4.0
+  },
+  "cameras": {
+    "raw": {
+      "external": {
+        "directory": "videos/raw/external",
+        "status": "keypoint_preview",
+        "latest_clip": "videos/raw/external/dexycb_mug_keypoints.mp4",
+        "kind": "keypoint_preview",
+        "product": "dataset_keypoints"
+      }
+    },
+    "robot": {
+      "external": {
+        "directory": "videos/robot/external",
+        "status": "diagnostic_simulation_render",
+        "latest_clip": "videos/robot/external/pickup_the_cup.mp4",
+        "kind": "simulation_render",
+        "product": "robot_replay",
+        "run": "pickup_the_cup",
+        "measured_constraints_passed": false
+      },
+      "head": {
+        "directory": "videos/robot/external",
+        "status": "diagnostic_simulation_render",
+        "latest_clip": "videos/robot/external/pickup_the_cup_head.mp4",
+        "kind": "simulation_render",
+        "product": "robot_replay",
+        "run": "pickup_the_cup",
+        "measured_constraints_passed": false
+      },
+      "wrist_right": {
+        "directory": "videos/robot/external",
+        "status": "diagnostic_simulation_render",
+        "latest_clip": "videos/robot/external/pickup_the_cup_wrist_right.mp4",
+        "kind": "simulation_render",
+        "product": "robot_replay",
+        "run": "pickup_the_cup",
+        "measured_constraints_passed": false
+      }
+    }
+  },
+  "generated_video_index": "videos/index.json",
+  "provenance": {
+    "kind": "dataset_annotation_replay",
+    "recorded_rgb_video": false,
+    "note": "Fresh auditable reconstruction from DexYCB 20200709_151032. The historical reference clip is not an input to this workflow."
+  },
+  "robot_video_layout": "external_folder",
+  "default_cameras": [
+    "external",
+    "head",
+    "wrist_right"
+  ],
+  "default_constraint_preview_modes": [
+    "arm_hand"
+  ],
+  "camera_calibration": "assets/cameras.json"
+}
