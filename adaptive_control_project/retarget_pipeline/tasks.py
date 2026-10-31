@@ -105,27 +105,37 @@ def list_tasks(tasks_root: Path = TASKS) -> list[Task]:
     return [load_task(p.parent.name, tasks_root) for p in sorted(tasks_root.glob("*/task.json"))]
 
 
-def robot_video_path(task: Task, run: str, camera: str) -> Path:
-    """Name robot views while keeping their camera identity in video metadata."""
+def video_directory(task: Task, domain: str, camera: str) -> Path:
+    """Resolve the configured output folder without changing camera identity."""
+    if domain not in ("raw", "robot"):
+        raise ValueError(f"Unknown video domain: {domain}")
     if camera not in CAMERA_POSITIONS:
         raise ValueError(f"Unknown camera position: {camera}")
+    if task.manifest.get("video_layout") == "flat":
+        return task.path(f"videos/{domain}")
+    if domain == "robot" and task.manifest.get("robot_video_layout") == "external_folder":
+        return task.path("videos/robot/external")
+    return task.path(f"videos/{domain}/{camera}")
+
+
+def robot_video_path(task: Task, run: str, camera: str) -> Path:
+    """Name robot views while keeping their camera identity in video metadata."""
+    directory = video_directory(task, "robot", camera)
     if not run or Path(run).name != run or run in (".", ".."):
         raise ValueError("Video run must be a single directory name")
-    if task.manifest.get("robot_video_layout") == "external_folder":
+    if (task.manifest.get("video_layout") == "flat"
+            or task.manifest.get("robot_video_layout") == "external_folder"):
         suffix = "" if camera == "external" else f"_{camera}"
-        return task.path(f"videos/robot/external/{run}{suffix}.mp4")
-    return task.path(f"videos/robot/{camera}/{run}.mp4")
+        return task.path(str(directory / f"{run}{suffix}.mp4"))
+    return task.path(str(directory / f"{run}.mp4"))
 
 
 def record_video(task: Task, domain: str, camera: str, path: Path, *, kind: str, **metadata) -> None:
     """Register each clip without overwriting earlier runs or claiming sensor footage."""
-    if camera not in CAMERA_POSITIONS:
-        raise ValueError(f"Unknown camera position: {camera}")
+    directory = video_directory(task, domain, camera)
     product = video_product(domain, kind, skeleton=metadata.get("skeleton"),
                             synthetic=metadata.get("synthetic", False))
     path = path.resolve()
-    directory = (robot_video_path(task, path.stem, camera).parent if domain == "robot"
-                 else task.path(f"videos/{domain}/{camera}"))
     if path.parent != directory or path.suffix != ".mp4":
         raise ValueError("Video must be an MP4 inside the selected task video directory")
     if not path.is_file():

@@ -19,10 +19,11 @@ PRODUCTS = [
 
 
 @pytest.mark.parametrize("domain,kind,skeleton,product", PRODUCTS)
-def test_registration_preserves_distinct_video_products(tmp_path, domain, kind, skeleton, product):
+@pytest.mark.parametrize("layout,folder", [({}, "external"), ({"video_layout": "flat"}, "")])
+def test_registration_preserves_distinct_video_products(tmp_path, domain, kind, skeleton, product, layout, folder):
     assert video_product(domain, kind, skeleton=skeleton) == product
-    task = Task(tmp_path, {"id": "test"})
-    path = tmp_path / "videos" / domain / "external" / "clip.mp4"
+    task = Task(tmp_path, {"id": "test", **layout})
+    path = tmp_path / "videos" / domain / folder / "clip.mp4"
     path.parent.mkdir(parents=True)
     path.touch()
     metadata = {"skeleton": skeleton} if skeleton is not None else {}
@@ -30,7 +31,7 @@ def test_registration_preserves_distinct_video_products(tmp_path, domain, kind, 
     clip = json.loads((tmp_path / "videos/index.json").read_text())["clips"][0]
     assert clip["product"] == product
     assert clip["kind"] == kind
-    assert clip["path"] == f"videos/{domain}/external/clip.mp4"
+    assert clip["path"] == str(path.relative_to(tmp_path))
 
 
 @pytest.mark.parametrize("domain,kind,skeleton,camera", [
@@ -83,8 +84,9 @@ def test_video_cannot_be_registered_under_a_different_camera(tmp_path):
     assert not (tmp_path / "videos/index.json").exists()
 
 
-def test_flat_folder_keeps_actual_camera_identity_in_index(tmp_path):
-    task = Task(tmp_path, {"id": "test", "robot_video_layout": "external_folder"})
+@pytest.mark.parametrize("layout", [{"robot_video_layout": "external_folder"}, {"video_layout": "flat"}])
+def test_shared_folder_keeps_actual_camera_identity_in_index(tmp_path, layout):
+    task = Task(tmp_path, {"id": "test", **layout})
     expected = {}
     for camera in ("external", "head", "wrist_right"):
         path = robot_video_path(task, "pickup_the_cup", camera)
@@ -99,6 +101,22 @@ def test_flat_folder_keeps_actual_camera_identity_in_index(tmp_path):
     clips = json.loads((tmp_path / "videos/index.json").read_text())["clips"]
     assert {clip["camera"]: clip["path"] for clip in clips} == expected
     assert all(clip["product"] == "robot_replay" for clip in clips)
+
+
+@pytest.mark.parametrize("domain,folder,kind", [
+    ("raw", "videos/raw/external", "keypoint_preview"),
+    ("robot", "videos/robot/external", "simulation_render"),
+    ("robot", "videos/raw", "simulation_render"),
+    ("raw", "videos/robot", "keypoint_preview"),
+])
+def test_flat_registration_rejects_camera_subfolders_and_wrong_domain(tmp_path, domain, folder, kind):
+    task = Task(tmp_path, {"id": "test", "video_layout": "flat"})
+    path = tmp_path / folder / "clip.mp4"
+    path.parent.mkdir(parents=True)
+    path.touch()
+    with pytest.raises(ValueError, match="selected task video directory"):
+        record_video(task, domain, "external", path, kind=kind)
+    assert not (tmp_path / "videos/index.json").exists()
 
 
 def test_cup_index_matches_existing_clips_and_sidecars():

@@ -37,3 +37,23 @@ def test_force_display_has_fixed_scale_and_clips_only_colour():
     assert grouped_forces(names, [2*FORCE_SCALE_N], "right")["palm"] == 2*FORCE_SCALE_N
     np.testing.assert_array_equal(force_color(FORCE_SCALE_N), force_color(2*FORCE_SCALE_N))
     assert not np.allclose(force_color(0), force_color(FORCE_SCALE_N))
+
+
+@pytest.mark.parametrize("suffix,group", [
+    ("thumb_middle", "thumb"),
+    ("index_finger_middle", "index"),
+    ("middle_finger_middle", "middle"),
+    ("ring_finger_middle", "ring"),
+    ("pinky_middle", "pinky"),
+    ("ring_finger_pad", "ring"),
+    ("pinky_proximal_abd", "pinky"),
+    ("thumb_nail", "thumb"),
+    ("wrist", "palm"),
+    ("mount", "palm"),
+])
+def test_finger_group_uses_anatomy_before_segment_name(suffix, group):
+    names = [f"right_link_25_{suffix}", f"left_link_25_{suffix}"]
+    groups = grouped_forces(names, [2.75, 100.], "right")
+    assert groups[group] == 2.75
+    assert sum(groups.values()) == 2.75
+    assert all(value == 0. for name, value in groups.items() if name != group)

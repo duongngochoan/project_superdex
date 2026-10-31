@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "checked_at_utc": "2026-10-31T15:11:33.127378+00:00",
+  "checked_at_utc": "2026-10-31T15:44:39.427950+00:00",
   "task": "pickup_the_cup",
   "sequence": "20200709_151032",
   "required_runtime_inputs_present": true,
   "unit_tests": {
-    "passed": 143,
+    "passed": 171,
     "failed": 0
   },
   "pipeline_stages_executed": [
@@ -41,11 +41,11 @@
   "physical_manipulation_success": null,
   "object_origin_z_change_m": -0.0002783238887786865,
   "max_object_origin_z_change_m": 0.0034449994564056396,
-  "video_layout": "all robot views in videos/robot/external; actual camera identity preserved in metadata",
+  "video_layout": "flat: source clips in videos/raw; robot camera/keypoint/tactile clips in videos/robot",
   "camera_calibration": "assets/cameras.json",
   "videos": [
     {
-      "path": "videos/raw/external/dexycb_mug_keypoints.mp4",
+      "path": "videos/raw/dexycb_mug_keypoints.mp4",
       "product": "dataset_keypoints",
       "camera": "external",
       "decoded_frames": 62,
@@ -54,10 +54,11 @@
       "height": 480,
       "bytes": 113143,
       "sidecars_valid": true,
-      "sha256": "76ca0cfd6dd18d7224f2ecdb93f7c1edce801bb4b5330f13686c2b219f92ac76"
+      "sha256": "76ca0cfd6dd18d7224f2ecdb93f7c1edce801bb4b5330f13686c2b219f92ac76",
+      "validation_method": "Byte identity with previously decoded media after path relocation"
     },
     {
-      "path": "videos/robot/external/pickup_the_cup.mp4",
+      "path": "videos/robot/pickup_the_cup.mp4",
       "product": "robot_replay",
       "camera": "external",
       "decoded_frames": 1300,
@@ -66,10 +67,11 @@
       "height": 480,
       "bytes": 1528205,
       "sidecars_valid": true,
-      "sha256": "51826b7217449f6b7754574ccea0cc1cfd3ecfb9fc3d8230b56e574cb95d8581"
+      "sha256": "51826b7217449f6b7754574ccea0cc1cfd3ecfb9fc3d8230b56e574cb95d8581",
+      "validation_method": "Byte identity with previously decoded media after path relocation"
     },
     {
-      "path": "videos/robot/external/pickup_the_cup_head.mp4",
+      "path": "videos/robot/pickup_the_cup_head.mp4",
       "product": "robot_replay",
       "camera": "head",
       "decoded_frames": 1300,
@@ -78,10 +80,11 @@
       "height": 480,
       "bytes": 3249853,
       "sidecars_valid": true,
-      "sha256": "2c8d63a8a145a00acd0ee0acd84d75aa84cd5f62e1307eaf83b1dd73e50654fa"
+      "sha256": "2c8d63a8a145a00acd0ee0acd84d75aa84cd5f62e1307eaf83b1dd73e50654fa",
+      "validation_method": "Byte identity with previously decoded media after path relocation"
     },
     {
-      "path": "videos/robot/external/pickup_the_cup_wrist_right.mp4",
+      "path": "videos/robot/pickup_the_cup_wrist_right.mp4",
       "product": "robot_replay",
       "camera": "wrist_right",
       "decoded_frames": 1300,
@@ -90,10 +93,11 @@
       "height": 480,
       "bytes": 4421850,
       "sidecars_valid": true,
-      "sha256": "c9cad54e17a4c461a0cae16bc3793e7352d9f3741ca3768f3e67c73b7309c16e"
+      "sha256": "c9cad54e17a4c461a0cae16bc3793e7352d9f3741ca3768f3e67c73b7309c16e",
+      "validation_method": "Byte identity with previously decoded media after path relocation"
     },
     {
-      "path": "videos/robot/external/pickup_the_cup_arm_hand_constraints.mp4",
+      "path": "videos/robot/pickup_the_cup_arm_hand_constraints.mp4",
       "product": "constrained_arm_hand_keypoints",
       "camera": "external",
       "decoded_frames": 1300,
@@ -102,14 +106,29 @@
       "height": 480,
       "bytes": 966535,
       "sidecars_valid": true,
-      "sha256": "521362dd01ef2d32c56386da70b8cec775a19114055e430d9f56d91f8bb27d19"
+      "sha256": "521362dd01ef2d32c56386da70b8cec775a19114055e430d9f56d91f8bb27d19",
+      "validation_method": "Byte identity with previously decoded media after path relocation"
+    },
+    {
+      "path": "videos/robot/pickup_the_cup_tactile.mp4",
+      "product": "robot_replay_tactile",
+      "camera": "external",
+      "decoded_frames": 1300,
+      "fps": 30.0,
+      "width": 640,
+      "height": 480,
+      "bytes": 1582783,
+      "sidecars_valid": true,
+      "validation_method": "Full decode, force/panel and timestamp/pose checks",
+      "sha256": "0854ffb2b22fa3ba60ba1b77ee8078f9593799e00732c9b71996cdff485db2ff"
     }
   ],
   "notes": [
     "Mug starts rim-up and remains upright through the stationary initialization.",
     "Head is a fixed virtual head-position view; right-wrist view is rigidly attached to the moving wrist.",
     "Arm/hand preview shows commanded robot FK, not recorded human arm points or measured tracking.",
-    "Measured joint/effort compliance and physical pickup success are separate from successful video generation."
+    "Measured joint/effort compliance and physical pickup success are separate from successful video generation.",
+    "Tactile recording repeats the original measured motion exactly; original moved MP4 and NPZ files are unchanged."
   ],
   "source_sha256": "a463a7e97138e23484bf3dff710321d9ef440aeb35da55f7a8882ac9118b174a",
   "artifact_sha256": {
@@ -118,5 +137,44 @@
     "mug_mesh": "fbc5efb2cf42c62cc2324d067b3d7d82b8562733f2af1df22cf9e6303899f138",
     "trajectory": "09c0e120e7c25763350b2b3b5ff90ba074c5200b777684ee1d6bf636cd19c540",
     "measured_log": "485e97d66a8aae2576cf8172c577675f12b7d68a47cdb61ca9c0c35cd3bf513d"
+  },
+  "verification_kind": "flat_video_layout_and_tactile_extension",
+  "pipeline_stages_executed_for_this_extension": [
+    "saved_trajectory_replay",
+    "live_tactile_render",
+    "force_sidecar_validation"
+  ],
+  "tactile_run": "retarget/runs/pickup_the_cup_tactile",
+  "original_media_preserved_byte_for_byte": true,
+  "measured_state_max_abs_differences": {
+    "t": 0.0,
+    "q_target": 0.0,
+    "q": 0.0,
+    "q_vel": 0.0,
+    "effort_nm": 0.0,
+    "cup_pos": 0.0,
+    "object_quat": 0.0
+  },
+  "tactile": {
+    "signals": "videos/robot/pickup_the_cup_tactile.tactile.npz",
+    "channels": 74,
+    "links_per_hand": {
+      "left": 37,
+      "right": 37
+    },
+    "description": "Simulated object-hand full contact-force magnitude sums per link [N], including normal and tangential components",
+    "force_color_max_n": 5.0,
+    "numeric_values_clipped": false,
+    "right_contact_frames": 81,
+    "right_contact_intervals_s": [
+      [
+        18.835,
+        21.5,
+        81
+      ]
+    ],
+    "right_peak_total_n": 24.68521693156214,
+    "right_peak_time_s": 19.235,
+    "maximum_link_force_n": 13.565923295503383
   }
 }

@@ -38,15 +38,18 @@ def test_default_rebuild_uses_fresh_raw_inputs_and_the_requested_filename(monkey
     assert s.replay.call_args.kwargs['annotation_only'] is True
 
 
-def test_task_defaults_render_three_views_in_external_folder(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize('layout,directory', [
+    ({'robot_video_layout': 'external_folder'}, 'videos/robot/external'),
+    ({'video_layout': 'flat'}, 'videos/robot'),
+])
+def test_task_defaults_render_three_views_in_configured_folder(monkeypatch, tmp_path, capsys, layout, directory):
     s = stubs(monkeypatch, tmp_path)
-    s.task.manifest.update(robot_video_layout='external_folder',
-                           default_cameras=['external', 'head', 'wrist_right'])
+    s.task.manifest.update(layout, default_cameras=['external', 'head', 'wrist_right'])
     run_task.main(['--stage', 'replay'])
     assert s.replay.call_args.kwargs['cameras'] == ['external', 'head', 'wrist_right']
     output = capsys.readouterr().out
     for name in ('pickup_the_cup.mp4', 'pickup_the_cup_head.mp4', 'pickup_the_cup_wrist_right.mp4'):
-        assert str(s.task.root / 'videos/robot/external' / name) in output
+        assert str(s.task.root / directory / name) in output
 
 
 def test_explicit_camera_selection_overrides_task_defaults(monkeypatch, tmp_path):
@@ -115,6 +118,30 @@ def test_saved_replay_previews_and_overlays_use_one_trajectory(monkeypatch, tmp_
     output = capsys.readouterr().out
     assert str(s.task.root / 'videos/robot/external/pickup_the_cup.mp4') in output
     assert str(s.task.root / 'videos/robot/head/pickup_the_cup.mp4') in output
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_tactile_dashboard_is_built_after_replay_even_for_saved_diagnostic_failure(monkeypatch, tmp_path, failed):
+    s = stubs(monkeypatch, tmp_path)
+    s.task.manifest['default_cameras'] = ['external', 'head', 'wrist_right']
+    dashboard = Mock(side_effect=lambda *a, **k: s.events.append('dashboard') or tmp_path / 'tactile.mp4')
+    monkeypatch.setitem(sys.modules, 'adaptive_control_project.retarget_pipeline.tactile_video',
+                        SimpleNamespace(render_tactile_dashboard=dashboard))
+    if failed:
+        s.trajectory.parent.mkdir(parents=True)
+        (s.trajectory.parent / 'metrics.json').write_text(json.dumps({'constraints_passed': False, 'replay': {}}))
+        def measured_failure(*args, **kwargs):
+            s.events.append('replay')
+            raise ValueError('measured replay violates robot constraints')
+        s.replay.side_effect = measured_failure
+        with pytest.raises(SystemExit, match='measured robot constraints failed'):
+            run_task.main(['--stage', 'replay', '--tactile'])
+    else:
+        run_task.main(['--stage', 'replay', '--tactile'])
+    assert s.events == ['replay', 'dashboard']
+    assert dashboard.call_args.kwargs == {'source_run': 'pickup_the_cup', 'tactile_run': 'pickup_the_cup',
+                                         'source_log_path': s.trajectory.parent / 'log.npz',
+                                         'force_log_path': s.trajectory.parent / 'log.npz'}
 
 
 @pytest.mark.parametrize('flags', [['--no-video', '--human-keypoints'], ['--no-video', '--tactile'],

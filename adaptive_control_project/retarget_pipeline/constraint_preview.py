@@ -15,7 +15,7 @@ import numpy as np
 
 from .arm_ik import ArmChain
 from .constraints import audit_trajectory, limits_from_prefab
-from .tasks import Task, record_video
+from .tasks import Task, record_video, robot_video_path
 
 FINGERS = ("thumb", "index_finger", "middle_finger", "ring_finger", "pinky")
 FINGER_COLORS = ("#b55aa6", "#2574b6", "#279579", "#d39b26", "#d36242")
@@ -100,7 +100,7 @@ def _render(task, run, mode, times, q, points, hands, fps, width, height, proven
 
     hand_only = mode == "hand"
     suffix = "hand_constraints" if hand_only else "arm_hand_constraints"
-    output = task.root / "videos/robot/external" / f"{run}_{suffix}.mp4"
+    output = robot_video_path(task, f"{run}_{suffix}", "external")
     output.parent.mkdir(parents=True, exist_ok=True)
     figure = plt.figure(figsize=(width / 100, height / 100), dpi=100)
     figure.patch.set_facecolor("#f7f9fb")

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from adaptive_control_project.retarget_pipeline.data_convert import MEDIAPIPE_CHAINS, load_sequence
-from adaptive_control_project.retarget_pipeline.tasks import CUP_TASK_ID, load_task, record_video, validate_sequence
+from adaptive_control_project.retarget_pipeline.tasks import CUP_TASK_ID, load_task, record_video, validate_sequence, video_directory
 
 def resample_preview(sequences: dict[str, dict], fps: float | None, max_frames: int | None):
     """Interpolate on the source clock, preserving duration at a requested FPS."""
@@ -72,7 +72,7 @@ def main() -> None:
     matplotlib.use("Agg")
     from matplotlib import pyplot as plt
 
-    output = task.root / "videos/raw/external" / f"{name}_keypoints.mp4"
+    output = video_directory(task, "raw", "external") / f"{name}_keypoints.mp4"
     output.parent.mkdir(parents=True, exist_ok=True)
     dpi = 100
     figure = plt.figure(figsize=(args.width / dpi, args.height / dpi), dpi=dpi)

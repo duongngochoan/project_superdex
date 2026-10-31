@@ -1393,8 +1393,8 @@
       1.0
     ]
   ],
-  "video": "videos/robot/external/pickup_the_cup_arm_hand_constraints.mp4",
-  "sidecar": "videos/robot/external/pickup_the_cup_arm_hand_constraints.keypoints.npz",
+  "video": "videos/robot/pickup_the_cup_arm_hand_constraints.mp4",
+  "sidecar": "videos/robot/pickup_the_cup_arm_hand_constraints.keypoints.npz",
   "frames": 1300,
   "fps": 30.0,
   "view": "world_frame_arm_and_hand"

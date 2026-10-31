@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pytest
 
-from adaptive_control_project.retarget_pipeline.tasks import Task, list_tasks, load_task, robot_video_path, validate_sequence
+from adaptive_control_project.retarget_pipeline.tasks import Task, list_tasks, load_task, robot_video_path, validate_sequence, video_directory
 
 
 def sequence(side="right"):
@@ -51,11 +51,15 @@ def test_cup_manifest_has_valid_canonical_input():
     assert set(task.load_sequences()) == set(task.hands)
 
 
-def test_robot_views_share_external_folder_with_distinct_filenames(tmp_path):
-    task = Task(tmp_path, {"id": "test", "robot_video_layout": "external_folder"})
+@pytest.mark.parametrize("layout,directory", [
+    ({"robot_video_layout": "external_folder"}, "videos/robot/external"),
+    ({"video_layout": "flat"}, "videos/robot"),
+])
+def test_shared_robot_folder_uses_distinct_camera_filenames(tmp_path, layout, directory):
+    task = Task(tmp_path, {"id": "test", **layout})
     paths = [robot_video_path(task, "pickup_the_cup", camera)
              for camera in ("external", "head", "wrist_right")]
-    assert {path.parent for path in paths} == {tmp_path / "videos/robot/external"}
+    assert {path.parent for path in paths} == {tmp_path / directory}
     assert {path.name for path in paths} == {
         "pickup_the_cup.mp4", "pickup_the_cup_head.mp4", "pickup_the_cup_wrist_right.mp4"
     }
@@ -65,6 +69,24 @@ def test_robot_views_share_external_folder_with_distinct_filenames(tmp_path):
 def test_robot_video_path_preserves_per_camera_layout_without_manifest_setting(tmp_path):
     task = Task(tmp_path, {"id": "test"})
     assert robot_video_path(task, "clip", "head") == tmp_path / "videos/robot/head/clip.mp4"
+
+
+@pytest.mark.parametrize("domain", ["raw", "robot"])
+def test_flat_video_layout_takes_precedence_over_legacy_folders(tmp_path, domain):
+    task = Task(tmp_path, {"id": "test", "video_layout": "flat", "robot_video_layout": "external_folder"})
+    for camera in ("external", "head", "wrist_left", "wrist_right"):
+        assert video_directory(task, domain, camera) == tmp_path / "videos" / domain
+
+
+def test_video_directory_rejects_invalid_domain_and_symlink_escape(tmp_path):
+    root = tmp_path / "task"
+    (root / "videos").mkdir(parents=True)
+    (root / "videos/robot").symlink_to(tmp_path, target_is_directory=True)
+    task = Task(root, {"id": "test", "video_layout": "flat"})
+    with pytest.raises(ValueError, match="domain"):
+        video_directory(task, "../other", "external")
+    with pytest.raises(ValueError, match="escapes"):
+        robot_video_path(task, "clip", "external")
 
 
 @pytest.mark.parametrize("run,camera", [("../escape", "head"), ("", "head"), ("clip", "unknown")])

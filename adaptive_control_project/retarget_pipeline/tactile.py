@@ -30,9 +30,14 @@ def sample_tactile(scene, names):
 
 def grouped_forces(names, values, side):
     groups = dict.fromkeys(FINGERS, 0.)
+    prefix = f"{side}_link_"
     for name, value in zip(names, values):
-        if name.startswith(f"{side}_link_"):
-            group = next((finger for finger in FINGERS[1:] if finger in name), "palm")
+        if name.startswith(prefix):
+            # The anatomical name follows the numeric link index. A segment
+            # named "middle" also occurs on the ring and pinky fingers.
+            anatomy = name[len(prefix):].partition("_")[2]
+            finger = anatomy.partition("_")[0]
+            group = finger if finger in FINGERS[1:] else "palm"
             groups[group] += float(value)
     return groups
 

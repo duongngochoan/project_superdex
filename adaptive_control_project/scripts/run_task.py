@@ -95,6 +95,11 @@ def main(argv=None):
         if not args.no_video:
             for camera in cameras:
                 print(f"[3/3 video] {robot_video_path(task, out.name, camera)}", flush=True)
+            if args.tactile and {"external", "wrist_right"} <= set(cameras):
+                from adaptive_control_project.retarget_pipeline.tactile_video import render_tactile_dashboard
+                path = render_tactile_dashboard(task, source_run=out.name, tactile_run=out.name,
+                                                source_log_path=out / "log.npz", force_log_path=out / "log.npz")
+                print(f"[tactile dashboard] {path}", flush=True)
         if failed:
             raise SystemExit("Video/log saved as diagnostics; measured robot constraints failed. Inspect metrics.json.")
 

@@ -50,8 +50,12 @@ def test_failed_capture_cannot_register_mismatched_video_sidecars(monkeypatch):
     recorder.renderer.close.assert_called_once()
 
 
-def test_flat_camera_outputs_and_overlays_use_separate_encoders(monkeypatch, tmp_path):
-    task = Task(tmp_path, {"id": "test", "hands": ["right"], "robot_video_layout": "external_folder"})
+@pytest.mark.parametrize("layout,directory", [
+    ({"robot_video_layout": "external_folder"}, "videos/robot/external"),
+    ({"video_layout": "flat"}, "videos/robot"),
+])
+def test_shared_camera_outputs_and_overlays_use_separate_encoders(monkeypatch, tmp_path, layout, directory):
+    task = Task(tmp_path, {"id": "test", "hands": ["right"], **layout})
     scene = SimpleNamespace(
         prefab=SimpleNamespace(links=[]), table_box=([1, 1, .1], [0, 0, 0]), static_props=[],
         cfg=SimpleNamespace(object_kind="mesh", object_mesh="unused.stl", object_color=[255, 255, 255, 255]),
@@ -68,7 +72,7 @@ def test_flat_camera_outputs_and_overlays_use_separate_encoders(monkeypatch, tmp
     try:
         paths = [Path(call.args[0]) for call in writer.call_args_list]
         assert len(paths) == len(set(paths)) == 9
-        assert {path.parent for path in paths} == {tmp_path / "videos/robot/external"}
+        assert {path.parent for path in paths} == {tmp_path / directory}
         for camera, path in recorder.paths.items():
             assert recorder.tactile_paths[camera].stem == f"{path.stem}_tactile"
             assert recorder.human_paths[camera].stem == f"{path.stem}_human_keypoints"

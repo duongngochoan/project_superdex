@@ -1,8 +1,10 @@
 # DexYCB 20200709_151032: a detailed guide from raw data to robot video
 
-This project currently studies **one right-hand mug demonstration: DexYCB sequence 20200709_151032**. The main output is [pickup_the_cup.mp4](../videos/robot/external/pickup_the_cup.mp4), a rendered SuperDex simulation of an OpenArm v2.0 arm and Wuji Hand 2.
+This project currently studies **one right-hand mug demonstration: DexYCB sequence 20200709_151032**. The main output is [pickup_the_cup.mp4](../videos/robot/pickup_the_cup.mp4), a rendered SuperDex simulation of an OpenArm v2.0 arm and Wuji Hand 2.
 
-The mug starts upright. The default run also creates head-position and moving right-wrist views, plus a video showing the commanded right-arm and hand keypoints. All four videos are saved directly in `videos/robot/external/`; their differences and sidecars are explained in [section 12](#12-rendering-and-video-sidecars).
+The mug starts upright. The default run also creates head-position and moving right-wrist views, plus a video showing the commanded right-arm and hand keypoints. All four videos are saved directly in `videos/robot/`; their differences and sidecars are explained in [section 12](#12-rendering-and-video-sidecars).
+
+The additional [pickup_the_cup_tactile.mp4](../videos/robot/pickup_the_cup_tactile.mp4) dashboard shows hand-object contact forces from the simulation in a large wrist view, with external context, readable palm/finger totals, and a force-history plot. The command, signal meaning, complete sidecar schemas, and inspection example are in [Simulated contact-force display](#simulated-contact-force-display). This uses no recorded tactile sensor input.
 
 The input already contains annotated **3D hand points and object poses**. The project does not recover 3D poses from photographs, train a vision model, or turn a source RGB video directly into robot control.
 
@@ -63,10 +65,10 @@ Then run the complete focused pipeline:
 
 The default stage is "all": **convert raw labels → retarget robot commands → create the commanded arm-and-hand preview → simulate and render three views**. It writes these videos in one directory:
 
-    adaptive_control_project/tasks/pickup_the_cup/videos/robot/external/pickup_the_cup.mp4
-    adaptive_control_project/tasks/pickup_the_cup/videos/robot/external/pickup_the_cup_head.mp4
-    adaptive_control_project/tasks/pickup_the_cup/videos/robot/external/pickup_the_cup_wrist_right.mp4
-    adaptive_control_project/tasks/pickup_the_cup/videos/robot/external/pickup_the_cup_arm_hand_constraints.mp4
+    adaptive_control_project/tasks/pickup_the_cup/videos/robot/pickup_the_cup.mp4
+    adaptive_control_project/tasks/pickup_the_cup/videos/robot/pickup_the_cup_head.mp4
+    adaptive_control_project/tasks/pickup_the_cup/videos/robot/pickup_the_cup_wrist_right.mp4
+    adaptive_control_project/tasks/pickup_the_cup/videos/robot/pickup_the_cup_arm_hand_constraints.mp4
 
 The default command overwrites that run's generated outputs. It also regenerates the trajectory's embedded scene settings, which is necessary to replace an older upside-down mug initialization. Source annotations and requested robot joint motion are unaffected by the upright initialization correction.
 
@@ -76,7 +78,7 @@ The source-keypoint preview is a separate optional command:
 
 It writes:
 
-    adaptive_control_project/tasks/pickup_the_cup/videos/raw/external/dexycb_mug_keypoints.mp4
+    adaptive_control_project/tasks/pickup_the_cup/videos/raw/dexycb_mug_keypoints.mp4
 
 The EGL setting selects headless OpenGL. LIBGL_ALWAYS_SOFTWARE selects software rendering, which can take several minutes even though the simulated motion is much shorter. MPLCONFIGDIR gives Matplotlib a writable cache location; it does not alter the motion.
 
@@ -129,12 +131,19 @@ The task directory is [pickup_the_cup/](../). Its relevant structure is:
         joint_limits.json
         run_meta.json
         system_check.json
+      retarget/runs/pickup_the_cup_tactile/
+        trajectory.npz
+        log.npz
+        metrics.json
+        constraints.json
+        joint_limits.json
+        run_meta.json
       videos/
         index.json
-        raw/external/
+        raw/
           dexycb_mug_keypoints.mp4
           dexycb_mug_keypoints.timestamps.npz
-        robot/external/
+        robot/
           pickup_the_cup.mp4
           pickup_the_cup.camera.npz
           pickup_the_cup_head.mp4
@@ -144,6 +153,11 @@ The task directory is [pickup_the_cup/](../). Its relevant structure is:
           pickup_the_cup_arm_hand_constraints.mp4
           pickup_the_cup_arm_hand_constraints.keypoints.npz
           pickup_the_cup_arm_hand_constraints.json
+          pickup_the_cup_tactile.mp4
+          pickup_the_cup_tactile.tactile.npz
+          pickup_the_cup_tactile.dashboard.json
+
+The tactile force samples originate from `--tactile` replay. The dashboard combines those saved samples with matching wrist/external video frames and writes a separate presentation/provenance JSON. Camera names such as `external`, `head`, and `wrist_right` stay in the video index; they are not subdirectory names in this task's flat layout.
 
 The system_check.json file is a compact report from the full system verification. The ordinary run_task.py command creates the command/replay artifacts; it does not automatically run the entire test suite or regenerate that system-check report on every invocation.
 
@@ -162,7 +176,7 @@ The system_check.json file is a compact report from the full system verification
 | Shared robot prefab and pinned hand URDFs | Supply robot geometry, joint names, kinematics, and joint limits |
 | Native controller library | Implements arm IK, hand optimization, and trajectory constraints |
 
-The manifest also contains `default_cameras: ["external", "head", "wrist_right"]`, `default_constraint_preview_modes: ["arm_hand"]`, `robot_video_layout: "external_folder"`, and `camera_calibration: "assets/cameras.json"`. These settings choose the default views, default commanded skeleton preview, common robot-video output directory, and wrist mount. They do not replace the source dataset's camera extrinsics.
+The manifest also contains `default_cameras: ["external", "head", "wrist_right"]`, `default_constraint_preview_modes: ["arm_hand"]`, `video_layout: "flat"`, and `camera_calibration: "assets/cameras.json"`. These settings choose the default views, default commanded skeleton preview, common robot-video output directory, and wrist mount. They do not replace the source dataset's camera extrinsics.
 
 The robot is shared from the main SuperDex checkout, using the prefab:
 
@@ -669,12 +683,12 @@ The default video uses:
 
 | Property | Default |
 | --- | --- |
-| Resolution | 640×480 pixels |
+| Resolution | 640×480 pixels for ordinary camera videos |
 | Video frame rate | 30 FPS |
 | Encoding | H.264 MP4 through imageio/FFmpeg |
 | Audio | None |
 | Cameras | external, head, wrist_right |
-| Robot-video directory | videos/robot/external for all three views |
+| Robot-video directory | videos/robot for all three views |
 | Expected current frame count | 1,300 |
 | Expected replay timestamp span | 0–43.3 s |
 
@@ -682,26 +696,31 @@ At 30 FPS, 1,300 displayed frames span about 43.333 seconds. The controller's fi
 
 The camera captures on the physics sample grid, so adjacent capture timestamps can differ slightly from exactly 1/30 second. The difference is bounded by the 0.005-second physics sampling resolution.
 
+The tactile dashboard is a **1280×720 composite**, assembled from the synchronized wrist/external videos and saved force data at the same frame rate. Its two camera regions do not have a single camera matrix.
+
 ### Main output files
 
 | Output | Contents |
 | --- | --- |
-| [pickup_the_cup.mp4](../videos/robot/external/pickup_the_cup.mp4) | Rendered measured robot and mug motion |
-| [pickup_the_cup_head.mp4](../videos/robot/external/pickup_the_cup_head.mp4) | The same measured replay from the stationary virtual head position |
-| [pickup_the_cup_wrist_right.mp4](../videos/robot/external/pickup_the_cup_wrist_right.mp4) | The same measured replay from the moving right-wrist mount |
-| [pickup_the_cup.camera.npz](../videos/robot/external/pickup_the_cup.camera.npz) | External camera timestamps: (N,), world_from_camera: (N, 4, 4) |
-| [pickup_the_cup_head.camera.npz](../videos/robot/external/pickup_the_cup_head.camera.npz) | Head-position camera timestamps and poses with the same array schema |
-| [pickup_the_cup_wrist_right.camera.npz](../videos/robot/external/pickup_the_cup_wrist_right.camera.npz) | Right-wrist camera timestamps and moving poses with the same array schema |
-| [pickup_the_cup_arm_hand_constraints.mp4](../videos/robot/external/pickup_the_cup_arm_hand_constraints.mp4) | Default right-arm and hand skeleton preview reconstructed from commanded q_target |
-| [pickup_the_cup_arm_hand_constraints.keypoints.npz](../videos/robot/external/pickup_the_cup_arm_hand_constraints.keypoints.npz) | Preview timestamps, video timestamps, sampled q_target, joint names, arm/finger points, and provenance |
-| [pickup_the_cup_arm_hand_constraints.json](../videos/robot/external/pickup_the_cup_arm_hand_constraints.json) | Full-command constraint audit, preview settings and provenance |
+| [pickup_the_cup.mp4](../videos/robot/pickup_the_cup.mp4) | Rendered measured robot and mug motion |
+| [pickup_the_cup_head.mp4](../videos/robot/pickup_the_cup_head.mp4) | The same measured replay from the stationary virtual head position |
+| [pickup_the_cup_wrist_right.mp4](../videos/robot/pickup_the_cup_wrist_right.mp4) | The same measured replay from the moving right-wrist mount |
+| [pickup_the_cup.camera.npz](../videos/robot/pickup_the_cup.camera.npz) | External camera timestamps: (N,), world_from_camera: (N, 4, 4) |
+| [pickup_the_cup_head.camera.npz](../videos/robot/pickup_the_cup_head.camera.npz) | Head-position camera timestamps and poses with the same array schema |
+| [pickup_the_cup_wrist_right.camera.npz](../videos/robot/pickup_the_cup_wrist_right.camera.npz) | Right-wrist camera timestamps and moving poses with the same array schema |
+| [pickup_the_cup_arm_hand_constraints.mp4](../videos/robot/pickup_the_cup_arm_hand_constraints.mp4) | Default right-arm and hand skeleton preview reconstructed from commanded q_target |
+| [pickup_the_cup_arm_hand_constraints.keypoints.npz](../videos/robot/pickup_the_cup_arm_hand_constraints.keypoints.npz) | Preview timestamps, video timestamps, sampled q_target, joint names, arm/finger points, and provenance |
+| [pickup_the_cup_arm_hand_constraints.json](../videos/robot/pickup_the_cup_arm_hand_constraints.json) | Full-command constraint audit, preview settings and provenance |
+| [pickup_the_cup_tactile.mp4](../videos/robot/pickup_the_cup_tactile.mp4) | 1280×720 wrist/context force dashboard with measured per-link markers, readable totals/status, and history |
+| [pickup_the_cup_tactile.tactile.npz](../videos/robot/pickup_the_cup_tactile.tactile.npz) | Optional per-video-frame object-hand force samples, hand-link names, times, camera poses, and signal/scale descriptions |
+| [pickup_the_cup_tactile.dashboard.json](../videos/robot/pickup_the_cup_tactile.dashboard.json) | Dashboard's two source views/poses, measured-log and force provenance, synchronization and projection methods, and contact summary |
 | [videos/index.json](../videos/index.json) | Product, camera, run, frame count, FPS, clip path, and sidecar paths |
 
 The camera matrix maps camera coordinates into the simulation world. These saved poses describe virtual camera placement, not measured hardware sensor calibration.
 
 The arm-and-hand preview is generated before physics replay from the final prepared joint command stream. Forward kinematics places robot arm-joint origins and finger joints/tips at each video sample. It shows both the right arm and its fingers, including their relative motion in world coordinates. Its JSON audit checks the full command timeline's position, velocity and acceleration bounds; it does not use measured robot state, actuator effort or contact. Its `.keypoints.npz` is not a copy of the 21 human source points. In contrast, the three camera movies render the **measured** simulation state.
 
-Although all these files share the `external` directory, `videos/index.json` retains each camera's actual identity (`external`, `head`, or `wrist_right`) and distinguishes measured replay from commanded-keypoint preview. Directory placement does not mean that the wrist/head videos were recorded by the external camera.
+All robot products share `videos/robot/`. `videos/index.json` retains each camera's actual identity (`external`, `head`, or `wrist_right`) and distinguishes ordinary measured replay, commanded-keypoint preview, and simulated tactile replay. The plain external view uses the run name without a camera suffix; `_head` and `_wrist_right` distinguish the additional views. The source preview is directly in `videos/raw/`. No camera-specific output subdirectory is needed for this task.
 
 The ordinary main command does not create the human source preview. To regenerate that additional learning aid:
 
@@ -711,8 +730,8 @@ Its outputs are:
 
 | Output | Contents |
 | --- | --- |
-| [dexycb_mug_keypoints.mp4](../videos/raw/external/dexycb_mug_keypoints.mp4) | 62-frame visualization of source hand points and recorded object origin |
-| [dexycb_mug_keypoints.timestamps.npz](../videos/raw/external/dexycb_mug_keypoints.timestamps.npz) | Source timestamps and zero-based video timestamps |
+| [dexycb_mug_keypoints.mp4](../videos/raw/dexycb_mug_keypoints.mp4) | 62-frame visualization of source hand points and recorded object origin |
+| [dexycb_mug_keypoints.timestamps.npz](../videos/raw/dexycb_mug_keypoints.timestamps.npz) | Source timestamps and zero-based video timestamps |
 
 The source preview is drawn from annotations and is labeled accordingly. It is not original camera footage or proof of a robot grasp.
 
@@ -731,9 +750,9 @@ The expected progress markers are:
 
     [1/3 convert] .../data/processed/dexycb_mug_20200709_151032.npz
     [2/3 retarget] .../retarget/runs/pickup_the_cup/trajectory.npz
-    [3/3 video] .../videos/robot/external/pickup_the_cup.mp4
-    [3/3 video] .../videos/robot/external/pickup_the_cup_head.mp4
-    [3/3 video] .../videos/robot/external/pickup_the_cup_wrist_right.mp4
+    [3/3 video] .../videos/robot/pickup_the_cup.mp4
+    [3/3 video] .../videos/robot/pickup_the_cup_head.mp4
+    [3/3 video] .../videos/robot/pickup_the_cup_wrist_right.mp4
 
 The default arm-and-hand preview is also generated from the saved commands before replay. When the measured audit fails, the final markers still identify the saved diagnostic camera videos, followed by an explanatory failure message.
 
@@ -765,7 +784,7 @@ This still runs physics, writes measurements, and checks constraints. It does no
 
     PYOPENGL_PLATFORM=egl LIBGL_ALWAYS_SOFTWARE=1 .venv/bin/python adaptive_control_project/scripts/run_task.py --run study_01
 
-This creates retarget/runs/study_01/ and four videos directly in videos/robot/external/: study_01.mp4, study_01_head.mp4, study_01_wrist_right.mp4, and study_01_arm_hand_constraints.mp4, with matching sidecars. The canonical processed input is still shared because there is only one source sequence. Reusing a run name overwrites that run's generated outputs.
+This creates retarget/runs/study_01/ and four videos directly in videos/robot/: study_01.mp4, study_01_head.mp4, study_01_wrist_right.mp4, and study_01_arm_hand_constraints.mp4, with matching sidecars. The canonical processed input is still shared because there is only one source sequence. Reusing a run name overwrites that run's generated outputs.
 
 Use --run only when you want another experiment; it is unnecessary for the default focused video.
 
@@ -783,7 +802,7 @@ These options generate additional outputs. They are not required to produce the 
 
     PYOPENGL_PLATFORM=egl LIBGL_ALWAYS_SOFTWARE=1 .venv/bin/python adaptive_control_project/scripts/run_task.py --stage replay --human-keypoints
 
-This adds separate source-overlay videos for each selected camera, all directly in videos/robot/external/: pickup_the_cup_human_keypoints.mp4, pickup_the_cup_head_human_keypoints.mp4, and pickup_the_cup_wrist_right_human_keypoints.mp4 for the default views, each with a .keypoints.npz sidecar. Green markers show aligned human annotations, not measured robot joints. Their timing follows source_replay_timestamps, including held endpoint poses outside the demonstration interval.
+This adds separate source-overlay videos for each selected camera, all directly in videos/robot/: pickup_the_cup_human_keypoints.mp4, pickup_the_cup_head_human_keypoints.mp4, and pickup_the_cup_wrist_right_human_keypoints.mp4 for the default views, each with a .keypoints.npz sidecar. Green markers show aligned human annotations, not measured robot joints. Their timing follows source_replay_timestamps, including held endpoint poses outside the demonstration interval.
 
 ### Commanded robot skeletons
 
@@ -795,7 +814,7 @@ To request both available skeleton views:
 
     .venv/bin/python adaptive_control_project/scripts/render_constraint_preview.py --run pickup_the_cup --modes hand arm_hand --fps 30
 
-This writes two videos in videos/robot/external/:
+This writes two videos in videos/robot/:
 
 - pickup_the_cup_hand_constraints.mp4
 - pickup_the_cup_arm_hand_constraints.mp4
@@ -806,11 +825,116 @@ Alternatively, add --constraint-previews explicitly to run_task.py. That request
 
 ### Simulated contact-force display
 
-    PYOPENGL_PLATFORM=egl LIBGL_ALWAYS_SOFTWARE=1 .venv/bin/python adaptive_control_project/scripts/run_task.py --stage replay --tactile
+#### Rebuild the readable dashboard from saved data
 
-This writes the ordinary replays and default arm-and-hand preview, plus one contact-overlay video per selected camera. With default views, those extra files are pickup_the_cup_tactile.mp4, pickup_the_cup_head_tactile.mp4, and pickup_the_cup_wrist_right_tactile.mp4 in videos/robot/external/, each with a .tactile.npz sidecar. The sidecar contains timestamps, world_from_camera, link_names, and force_n with shape (video frames, number of sampled hand links).
+Run from `/home/hoan/project_superdex`:
 
-The values are sums of object-contact force magnitudes per hand link in **newtons**. The color scale is blue at 0 N through red at 5 N or more. This is a simulated force proxy, not a hardware pressure/taxel measurement. The focused replay's ordinary log.npz does not become a full-rate tactile recording merely because this camera overlay is enabled.
+    .venv/bin/python adaptive_control_project/scripts/render_tactile_dashboard.py
+
+This uses `--source-run pickup_the_cup` and `--tactile-run pickup_the_cup_tactile` by default. It rebuilds:
+
+- [pickup_the_cup_tactile.mp4](../videos/robot/pickup_the_cup_tactile.mp4)
+- [pickup_the_cup_tactile.dashboard.json](../videos/robot/pickup_the_cup_tactile.dashboard.json)
+
+The compositor reads the ordinary right-wrist and external MP4s and their `.camera.npz` sidecars, the original source run's `log.npz`, the tactile run's measured `log.npz`, and the existing `.tactile.npz`. It validates matching capture clocks and matching saved measured joint angles/object poses, and locates the measured joint sample belonging to each force capture. Different measured motion or unmatched clocks are rejected. It then computes forward kinematics from measured `q` to locate the hand links and draws the dashboard. It does not step physics, run retargeting, regenerate force samples, or render an OpenGL scene.
+
+The published **1280×720** video contains a large synchronized right-wrist view and a smaller external view showing the robot and task context. Projected markers identify per-link force values on the hand. Large text reports the right-hand total, contact/no-contact status, and palm/finger totals. A timeline shows the full recorded force history, shaded contact intervals, and the current video time. The full-history curve is a summary of this saved run, rather than a live prediction of future contact.
+
+All five existing source/robot videos, their data sidecars, both measured logs, and the force NPZ remain unchanged by this presentation rebuild. The video index is updated to describe the composite and its report. No extra source images or raw data are needed.
+
+The published force samples were generated with a separate measurement run, [`retarget/runs/pickup_the_cup_tactile/`](../retarget/runs/pickup_the_cup_tactile/), using the original saved commands. Its measured-state arrays exactly match the source run. The index records `run: "pickup_the_cup_tactile"`, `source_run: "pickup_the_cup"`, `primary_view: "wrist_right"`, and `context_view: "external"`. The tactile run's log and metrics remain the measurement provenance; the presentation rebuild does not change the original physics diagnostic failures.
+
+#### Generate new force samples with physics replay
+
+To run physics again and produce fresh tactile samples plus the dashboard:
+
+    PYOPENGL_PLATFORM=egl LIBGL_ALWAYS_SOFTWARE=1 MPLCONFIGDIR=/tmp/pickup-tactile-mpl \
+    .venv/bin/python adaptive_control_project/scripts/run_task.py --stage replay --tactile
+
+This reads the saved default `trajectory.npz`, refreshes the measured log/metrics, regenerates the default arm-and-hand preview, and records the default `external`, `head`, and `wrist_right` views. It creates an ordinary compact tactile view and `.tactile.npz` for each selected camera, then replaces the external tactile MP4 with the readable dashboard when both `external` and `wrist_right` are selected. The dashboard uses the same run's freshly captured views, measured log, and forces.
+
+To select just the two views needed for the dashboard, add `--cameras external wrist_right`. An external-only `--cameras external --tactile` replay keeps the compact single-camera force display and does not build the multi-view dashboard. Unlike the saved-data compositor, these replay commands overwrite that run's ordinary requested camera outputs and measured artifacts. They can still return status 1 after saving completed videos because measured robot acceleration/effort checks fail.
+
+After a default same-run tactile replay, rebuild that run's dashboard without physics by choosing its measurement run explicitly:
+
+    .venv/bin/python adaptive_control_project/scripts/render_tactile_dashboard.py \
+      --source-run pickup_the_cup --tactile-run pickup_the_cup
+
+#### What the display measures
+
+`tactile.py` queries the simulator for contact between each hand and the task mug at each video capture step. For each hand link, it adds the **magnitudes** of that link's object-contact forces, in **newtons (N)**. Each magnitude includes both normal and tangential force components. Multiple contacts on the same link add; opposing force vectors do not cancel. A link without mug contact receives 0 N. Table/arm contacts and motor efforts do not contribute to this signal.
+
+Marker colors go linearly from blue at 0 N through red at 5 N. Values of 5 N or more all use the same red; marker size also has a capped display range. The marker centers are the centers of each link's rendered mesh bounds, transformed using exact robot forward kinematics of measured joint states and projected into the saved wrist camera. Links without rendered geometry fall back to the link-frame origin. These are schematic anchors for a whole link's force value, rather than actual contact-point coordinates, sensor/taxel locations, or force-vector directions. They are drawn as overlays without an occlusion test, so a marker can appear over a surface hiding its link.
+
+The right-hand panel groups link values into palm, thumb, index, middle, ring, and pinky and shows their sum. Grouping reads the anatomical finger immediately after the side/link-index prefix: the middle segment of a ring or pinky finger stays in its own finger's group. Wrist/palm links count toward the palm. The totals are sums of force magnitudes, not a net resultant force on the whole hand. The dashboard's bar and timeline ranges are labeled and sized to the recorded peaks; their lengths preserve those values. Numerical labels and saved forces remain unclipped and are not amplified, smoothed, or replaced with invented nonzero signals. Contact status means the recorded right-hand magnitude sum is greater than zero; the video correctly shows no contact outside the short recorded interval.
+
+This is a **simulated tactile proxy**. There is no pressure calculation, contact-area estimate, taxel grid, hardware sensor reading, or learned tactile estimator. It requires the existing robot/mug geometry and physics state, without additional image, sensor asset, or raw tactile dataset. Force values depend on the simulated geometry, dynamics and controller, so colored contact alone does not certify a secure grasp or successful pickup.
+
+The signal is sampled on the video capture clock, normally 30 FPS, rather than saved at every 200 Hz physics step. Short contacts between captures may therefore be absent. The focused replay's ordinary `log.npz` does not become a full-rate tactile recording when this option is enabled.
+
+#### The tactile sidecar schema
+
+Open `pickup_the_cup_tactile.tactile.npz` with NumPy. Let `N` be the number of captured video frames and `L` the number of sampled hand links:
+
+| Field | Shape / type | Meaning |
+| --- | --- | --- |
+| `timestamps` | `(N,)`, floating point | Capture times in seconds on the replay clock; row `i` belongs to video frame `i` |
+| `world_from_camera` | `(N, 4, 4)`, floating point | Original external force-capture camera poses, mapping camera coordinates into simulation world; not wrist calibration or a single pose for the composite |
+| `link_names` | `(L,)`, strings | Ordered left/right hand-link names selected from the loaded robot; includes both sides even though this task commands the right side |
+| `force_n` | `(N, L)`, floating point | Finite nonnegative sums of mug-contact force magnitudes per link, in newtons; column `j` belongs to `link_names[j]` |
+| `force_color_max_n` | scalar, `5.0` | Upper endpoint of the display color/bar scale, in newtons; it does not cap `force_n` |
+| `signal_description` | scalar string | `SuperDex object-hand contact-force magnitude sum per link [N]; simulated tactile proxy` |
+
+The published sidecar has `N = 1300` and `L = 74`: 37 channels per hand, consisting of two wrist/palm links and seven links for each of the five fingers. The panel shows the active right hand; both sides remain available in the NPZ.
+
+The `.tactile.npz` is unchanged by dashboard composition. Its camera poses describe the original external force capture. They must not be used as the wrist view's calibration or interpreted as a single camera describing the composite. `videos/index.json` retains product `robot_replay_tactile`, kind `simulated_tactile_render`, and the original `camera: "external"` registration, while `primary_view`, `context_view`, `presentation`, and `report` identify the dashboard presentation.
+
+#### The dashboard provenance JSON
+
+[pickup_the_cup_tactile.dashboard.json](../videos/robot/pickup_the_cup_tactile.dashboard.json) describes how the composite was made. Its paths are relative to the task folder:
+
+| Fields | Meaning |
+| --- | --- |
+| `presentation`, `width`, `height`, `fps`, `frames` | Composite identity and output dimensions/frame timing: 1280×720, 30 FPS, 1,300 frames for the published run |
+| `source_run`, `tactile_run` | Which saved camera replay and force-measurement replay were used |
+| `views.primary`, `views.context` | Ordinary right-wrist and external source MP4 paths |
+| `camera_poses.wrist_right`, `camera_poses.external` | Each source view's own `.camera.npz` pose/timing sidecar |
+| `tactile_signals`, `tactile_signals_sha256` | Force NPZ path and SHA-256 hash identifying its unchanged contents |
+| `measured_states` | Measured force-replay `log.npz` used for marker forward kinematics |
+| `alignment`, `projection`, `marker_meaning`, `composite_calibration` | Synchronization, measured-state projection, marker limitations, and explanation that no one camera pose describes the composite |
+| `signal_description`, `force_color_max_n`, `force_numbers_clipped` | Signal definition, 5 N color endpoint, and confirmation that force numbers are not clipped |
+| `right_hand_contact_intervals_s`, `right_hand_peak_n`, `right_hand_peak_time_s` | Contact intervals and peak computed directly from the saved right-hand force samples |
+
+Inspect the data without rerunning the pipeline or modifying any files:
+
+    .venv/bin/python - <<'PY'
+    from pathlib import Path
+    import numpy as np
+
+    path = Path('adaptive_control_project/tasks/pickup_the_cup/'
+                'videos/robot/pickup_the_cup_tactile.tactile.npz')
+    with np.load(path, allow_pickle=False) as data:
+        times = data['timestamps']
+        names = data['link_names'].astype(str)
+        forces = data['force_n']
+        assert forces.shape == (len(times), len(names))
+        assert np.isfinite(forces).all() and np.all(forces >= 0)
+        assert data['world_from_camera'].shape == (len(times), 4, 4)
+        print('signal:', data['signal_description'].item())
+        print('frames / hand links:', forces.shape)
+        print('capture span [s]:', times[0], times[-1])
+        print('display maximum [N]:', data['force_color_max_n'].item())
+        right = np.array([name.startswith('right_link_') for name in names])
+        total = forces[:, right].sum(axis=1)
+        peak_frame = int(np.argmax(total))
+        print('peak right-hand magnitude sum [N]:', total[peak_frame])
+        print('peak capture time [s]:', times[peak_frame])
+        for name, value in zip(names[right], forces[peak_frame, right]):
+            if value > 0:
+                print(' ', name, float(value), 'N')
+    PY
+
+The printed peak is calculated from your saved replay; no assumed force value is built into this example. Use the ordered columns and capture times when comparing an individual link with the video. The video panel rounds numbers for readability; the NPZ retains the saved floating-point values.
 
 ### Other camera views and settings
 
@@ -818,7 +942,7 @@ Supported --cameras values are external, head, wrist_left, and wrist_right. For 
 
     PYOPENGL_PLATFORM=egl LIBGL_ALWAYS_SOFTWARE=1 .venv/bin/python adaptive_control_project/scripts/run_task.py --stage replay --cameras external head wrist_right --width 640 --height 480 --video-fps 15
 
-The task already selects external, head, and wrist_right by default. With `robot_video_layout` set to `external_folder`, all ordinary robot videos are written directly under `videos/robot/external/`: `<run>.mp4` for external and `<run>_<camera>.mp4` for other views. Selecting `--cameras external` records only the external camera; selecting a subset changes rendering rather than the saved robot commands. The automatic arm-and-hand preview is independent of this camera selection.
+The task already selects external, head, and wrist_right by default. With `video_layout` set to `flat`, all ordinary robot videos are written directly under `videos/robot/`: `<run>.mp4` for external and `<run>_<camera>.mp4` for other views. Selecting `--cameras external` records only the external camera; selecting a subset changes rendering rather than the saved robot commands. The automatic arm-and-hand preview is independent of this camera selection.
 
 The task's camera_calibration setting loads assets/cameras.json automatically. To override the virtual wrist mount, pass --camera-calibration followed by an existing task-local JSON file containing wrist_from_camera matrices. Its 4×4 matrix maps camera-local coordinates into wrist coordinates. The current camera then moves with world_from_camera = world_from_wrist × wrist_from_camera. Without a configured matrix, the renderer fits a virtual mount at initialization and holds it fixed relative to the wrist. This is visualization geometry, not hardware calibration. A camera that follows the wrist is not guaranteed to keep the mug in view throughout arbitrary movement, especially after the mug moves away.
 
@@ -846,7 +970,21 @@ The command audit has no measured actuator-effort input. Its effort_passed may t
 
 ### Current diagnostic outcome
 
-The corrected full pipeline was rerun on **2026-10-31**. All required runtime inputs were present, **143 tests passed**, and all five catalog videos fully decoded: the unchanged raw preview has 62 frames, and the four requested robot videos each have **1,300 frames at 640×480, 30 FPS**. Camera and keypoint sidecars were verified. The source annotations, prepared `q_target`, and command timestamps are exactly unchanged by the mug-orientation correction.
+The earlier upright-orientation verification on **2026-10-31** confirmed the required inputs and fully decoded the five then-existing catalog videos: the raw preview has 62 frames, and the four default robot videos each have **1,300 frames at 640×480, 30 FPS**. Camera and keypoint sidecars were verified. The source annotations, prepared `q_target`, and command timestamps were exactly unchanged by the mug-orientation correction.
+
+The improved-dashboard regression suite passes **194 tests**. The new tactile MP4 is **1280×720 with 1,300 frames at 30 FPS**, while the original five moved videos keep their existing dimensions and contents. The dashboard reuses the unchanged six-field NPZ containing a **(1300, 74)** force array. The flat catalog has **six clips: one raw preview and five robot videos**. Every measured-state array in [`pickup_the_cup_tactile/log.npz`](../retarget/runs/pickup_the_cup_tactile/log.npz) exactly reproduces the original upright replay; the presentation rebuild does not change simulated motion or force measurements.
+
+Independent verification fully decoded all 1,300 frames of the final dashboard and confirmed that the five original MP4s and six NPZ sidecars, including the force NPZ, retain their earlier file hashes. Encoded frames before, during, and after contact were inspected; the camera context, force numbers, markers, colors, and history agree with the saved synchronized samples.
+
+| Published tactile result | Measured outcome |
+| --- | --- |
+| Right-hand frames with object contact | 81 of 1,300 captured frames |
+| First / last captured contact times | 18.835 s / 21.500 s on the replay clock |
+| Peak sum of right-hand link force magnitudes | 24.685 N at 19.235 s |
+| Largest individual hand-link magnitude sum | 13.566 N |
+| Link-marker color upper endpoint | 5 N; numerical readings and NPZ values remain unclipped |
+
+These times identify captured contact samples rather than all contacts between video frames. They describe the published replay, not a minimum-force requirement for a successful grasp. See [Simulated contact-force display](#simulated-contact-force-display) for the signal definition and the [separate tactile-run metrics](../retarget/runs/pickup_the_cup_tactile/metrics.json) for replay measurements.
 
 The upright initialization remains stable through the one-second stationary physics initialization: the measured rim direction is approximately [−0.01600, −0.00296, 0.99987], or about 0.93° from vertical. The corrected replay then records **8,661 physics samples over 43.3 seconds**:
 
@@ -860,7 +998,7 @@ The upright initialization remains stable through the one-second stationary phys
 | Final mug-origin height change | −0.0002783 m, about −0.278 mm |
 | Sustained physical lift | Not observed; the mug largely remains on the table |
 
-The height values describe the mesh origin, not bottom clearance. The workflow does not certify physical manipulation success (`manipulation_success` remains null). The pipeline completes video generation and saves its measurements, then returns **exit status 1** because the measured acceleration/effort checks fail. See the fresh metrics.json, log.npz, and [system_check.json](../retarget/runs/pickup_the_cup/system_check.json) for this checked run. Earlier upside-down replay measurements are superseded; they describe different contact and dynamics.
+The height values describe the mesh origin, not bottom clearance. The workflow does not certify physical manipulation success (`manipulation_success` remains null). The pipeline completes video generation and saves its measurements, then returns **exit status 1** because the measured acceleration/effort checks fail. See the original metrics.json/log.npz, separate tactile-run measurements, and [system_check.json](../retarget/runs/pickup_the_cup/system_check.json) for the checked evidence. Earlier upside-down replay measurements are superseded; they describe different contact and dynamics.
 
 When measured robot constraints fail, the CLI saves the replay log, metrics and camera videos, then exits nonzero with:
 
@@ -968,32 +1106,46 @@ The suite checks conversion reproducibility, input validation, native hand/arm c
 
 The hash verifies which processed archive the trajectory used. If you reconvert the processed file after planning, rerun retargeting too before asserting that the old trajectory describes the newly written input archive.
 
-### Decode the entire output and compare its camera sidecar
+### Decode all robot outputs and compare their sidecars
 
     .venv/bin/python - <<'PY'
     from pathlib import Path
+    import json
     import imageio.v2 as imageio
     import numpy as np
 
     directory = Path('adaptive_control_project/tasks/pickup_the_cup/'
-                     'videos/robot/external')
+                     'videos/robot')
     camera_names = ('pickup_the_cup', 'pickup_the_cup_head',
                     'pickup_the_cup_wrist_right')
-    for name in (*camera_names, 'pickup_the_cup_arm_hand_constraints'):
+    tactile_name = 'pickup_the_cup_tactile'
+    for name in (*camera_names, 'pickup_the_cup_arm_hand_constraints',
+                 tactile_name):
         path = directory / f'{name}.mp4'
         frames = 0
+        expected_shape = (720, 1280) if name == tactile_name else (480, 640)
         with imageio.get_reader(path) as reader:
             print(name, 'video metadata:', reader.get_meta_data())
             for frame in reader:
-                assert frame.shape[:2] == (480, 640)
+                assert frame.shape[:2] == expected_shape
                 frames += 1
-        suffix = '.camera.npz' if name in camera_names else '.keypoints.npz'
+        suffix = ('.camera.npz' if name in camera_names else
+                  '.tactile.npz' if name == tactile_name else '.keypoints.npz')
         with np.load(path.with_suffix(suffix), allow_pickle=False) as sidecar:
             assert len(sidecar['timestamps']) == frames
             assert np.all(np.diff(sidecar['timestamps']) > 0)
             if name in camera_names:
                 assert sidecar['world_from_camera'].shape == (frames, 4, 4)
                 assert np.isfinite(sidecar['world_from_camera']).all()
+            elif name == tactile_name:
+                assert sidecar['force_n'].shape == (frames, len(sidecar['link_names']))
+                assert np.isfinite(sidecar['force_n']).all()
+                assert np.all(sidecar['force_n'] >= 0)
+                # These poses belong to the original external force capture;
+                # each source view has its own poses in the dashboard report.
+                report = json.loads(path.with_suffix('.dashboard.json').read_text())
+                assert (report['width'], report['height']) == (1280, 720)
+                assert report['frames'] == frames
             else:
                 assert sidecar['q_target'].shape == (frames, 54)
                 assert np.isfinite(sidecar['right_arm_world']).all()
@@ -1001,7 +1153,7 @@ The hash verifies which processed archive the trajectory used. If you reconvert 
         print(name, 'decoded frames:', frames)
     PY
 
-For the unchanged 43.3-second command timeline at the default 30 FPS, expect **1,300 frames per video**. Adjust the resolution or frame expectations if you deliberately changed those settings.
+For the unchanged 43.3-second command timeline at the default 30 FPS, expect **1,300 frames per robot video**. The tactile dashboard is 1280×720; the ordinary camera and arm/hand preview videos are 640×480. Adjust the expectations if you deliberately changed those settings, or generated the compact external-only tactile view instead of the dashboard.
 
 The compact [system_check.json](../retarget/runs/pickup_the_cup/system_check.json) records the full verification rerun's build/input/test/decode checks separately from its measured constraint failure. It is evidence for that checked run, not a promise that future edited inputs or settings will pass.
 
@@ -1018,6 +1170,7 @@ The files have different responsibilities:
 | Mug geometry, initial pose, mass or controller gains | assets/scene.json and mug.stl | Retarget to save the new scene, then replay |
 | Video resolution, FPS or view selection | Replay command flags | Replay only |
 | Fixed virtual wrist mount | assets/cameras.json or --camera-calibration | Replay only |
+| Tactile dashboard layout or readability using existing matching data | retarget_pipeline/tactile_dashboard.py | Run scripts/render_tactile_dashboard.py; no new physics or force samples |
 | C++ calculation changes | retarget_pipeline/cpp | Rebuild library, restart Python, retarget and replay |
 
 The simulator uses scene.json's operational mass and pose. asset.json is a readable catalog; changing its mass description alone does not change physics.
@@ -1026,7 +1179,7 @@ The saved trajectory contains a scene snapshot. Editing the current scene file a
 
 Use --optimizer vector or --optimizer adaptive during retargeting to select a different hand objective. Replay uses the optimizer output already stored in its trajectory. Likewise, --robot-from-source applies during retargeting, while replay uses the saved transform.
 
-The advanced --out option changes the saved-run directory. All robot videos still go directly under the task's videos/robot/external/ directory. They use that output directory's basename as the run stem, with _head, _wrist_right, and _arm_hand_constraints suffixes for the additional default products. The default --run behavior is easier to follow when learning.
+The advanced --out option changes the saved-run directory. All robot videos still go directly under the task's videos/robot/ directory. They use that output directory's basename as the run stem, with _head, _wrist_right, and _arm_hand_constraints suffixes for the additional default products. The default --run behavior is easier to follow when learning.
 
 ## 18. Troubleshooting
 
@@ -1047,7 +1200,7 @@ The advanced --out option changes the saved-run directory. All robot videos stil
 | "command trajectory fails ... before replay" | Inspect rejected_commands.json; invalid requested commands were rejected, so there is no completed new replay |
 | "measured robot constraints failed" after video saved | Read measured_constraints and replay in the fresh metrics.json; videos/logs can be complete while measured checks fail |
 | Cup still begins upside down after editing scene.json | Run --stage retarget before replay; the saved trajectory embeds its initial scene |
-| Head/wrist videos seem absent | Look directly in videos/robot/external/ for the _head and _wrist_right filenames; no separate camera directory is used by this task |
+| Head/wrist videos seem absent | Look directly in videos/robot/ for the _head and _wrist_right filenames; no separate camera directory is used by this task |
 | MP4 exists but cannot be read while a job is running | Wait for encoding/close to finish; an open encoder may not yet have finalized the MP4 |
 | Source and robot videos have different lengths | Source motion is about 2 s; the robot adds transitions and retimes to limits, currently about 43.3 s |
 | Robot drops the mug | Retargeting approximates hand geometry; grasp stability and measured compliance remain separate controller/contact problems |
@@ -1078,6 +1231,11 @@ Do not use shell constructs that force a success status and then report the fail
 | [scene.py](../../../retarget_pipeline/scene.py) | Robot, dynamic mug, table, controller and measured state |
 | [cameras.py](../../../retarget_pipeline/cameras.py) | Video capture, camera poses and optional overlays |
 | [render.py](../../../retarget_pipeline/render.py) | Mesh rendering and frame captions |
+| [tactile.py](../../../retarget_pipeline/tactile.py) | Simulated per-link object-contact force sampling, finger grouping and fixed color scale |
+| [scripts/render_tactile_dashboard.py](../../../scripts/render_tactile_dashboard.py) | Saved-data dashboard rebuild command with source/force run selection |
+| [tactile_video.py](../../../retarget_pipeline/tactile_video.py) | Source-motion/capture validation, video composition, provenance report and catalog registration |
+| [tactile_projection.py](../../../retarget_pipeline/tactile_projection.py) | Measured forward kinematics of mesh-bound centers and wrist-camera marker projection |
+| [tactile_dashboard.py](../../../retarget_pipeline/tactile_dashboard.py) | Readable wrist/context layout, link markers, force bars/status and history |
 | [cpp/](../../../retarget_pipeline/cpp/) | Native numerical calculations loaded through ctypes |
 
 ### Terms used in this project

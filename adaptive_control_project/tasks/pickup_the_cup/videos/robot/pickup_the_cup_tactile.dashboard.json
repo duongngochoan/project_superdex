@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "presentation": "synchronized_multi_view_tactile_dashboard",
+  "width": 1280,
+  "height": 720,
+  "fps": 30.0,
+  "frames": 1300,
+  "source_run": "pickup_the_cup",
+  "tactile_run": "pickup_the_cup_tactile",
+  "views": {
+    "primary": "videos/robot/pickup_the_cup_wrist_right.mp4",
+    "context": "videos/robot/pickup_the_cup.mp4"
+  },
+  "camera_poses": {
+    "wrist_right": "videos/robot/pickup_the_cup_wrist_right.camera.npz",
+    "external": "videos/robot/pickup_the_cup.camera.npz"
+  },
+  "tactile_signals": "videos/robot/pickup_the_cup_tactile.tactile.npz",
+  "tactile_signals_sha256": "621904edf915572faac30ef0545aa93c6faeaaa42359c766fcd4b2808a49a5f2",
+  "measured_states": "retarget/runs/pickup_the_cup_tactile/log.npz",
+  "alignment": "Identical capture clocks and measured q, object pose and replay times; no physics rerun",
+  "projection": "Exact prefab FK of measured q; GLB-to-Z-up rendered mesh bounds centers; 42 degree vertical FOV",
+  "marker_meaning": "Aggregated per-link force magnitude at schematic link center; not actual contact points, pressure taxels or force-vector direction. Markers are overlays without occlusion testing.",
+  "signal_description": "SuperDex object-hand contact-force magnitude sum per link [N]; simulated tactile proxy",
+  "force_color_max_n": 5.0,
+  "force_numbers_clipped": false,
+  "composite_calibration": "No single camera pose describes the dashboard. The unchanged tactile NPZ world_from_camera is the original external capture pose, not wrist view calibration.",
+  "right_hand_contact_intervals_s": [
+    [
+      18.835,
+      21.5
+    ]
+  ],
+  "right_hand_peak_n": 24.68521693156214,
+  "right_hand_peak_time_s": 19.235
+}

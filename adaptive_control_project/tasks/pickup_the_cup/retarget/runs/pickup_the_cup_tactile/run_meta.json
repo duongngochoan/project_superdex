@@ -1,0 +1,109 @@
+{
+  "task": "pickup_the_cup",
+  "motion_source": "annotations",
+  "source_sequences": {
+    "right": {
+      "path": "data/processed/dexycb_mug_20200709_151032.npz",
+      "sha256": "a463a7e97138e23484bf3dff710321d9ef440aeb35da55f7a8882ac9118b174a",
+      "source": "{\"dataset\": \"DexYCB\", \"sequence\": \"20200709_151032\", \"n_valid_hand_frames\": 62, \"ycb_id\": 14, \"frame\": \"apriltag (table) frame\"}"
+    }
+  },
+  "robot_from_source": [
+    [
+      -0.6499495636797206,
+      -0.7599773448416345,
+      0.0,
+      0.771885538886988
+    ],
+    [
+      0.7599773448416345,
+      -0.6499495636797206,
+      0.0,
+      -0.49454301494020136
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      0.2210278222815353
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "controller_backend": "cpp",
+  "optimizer": "adaptive",
+  "scene_config": {
+    "table_top": 0.22,
+    "table_size": [
+      0.7,
+      1.1,
+      0.03
+    ],
+    "table_center_xy": [
+      0.5,
+      0.0
+    ],
+    "cup_xy": [
+      0.2590971914723176,
+      -0.18120294670117537
+    ],
+    "cup_yaw": 0.8183447723525525,
+    "object_kind": "mesh",
+    "object_mesh": "/home/hoan/project_superdex/adaptive_control_project/tasks/pickup_the_cup/assets/mug.stl",
+    "object_mass": 0.118,
+    "object_bottom_offset": 0.039003,
+    "object_rotation_xyzw": [
+      0.0,
+      0.0,
+      0.3978501696874292,
+      0.9174504032805718
+    ],
+    "object_translation": [
+      0.2590971914723176,
+      -0.18120294670117537,
+      0.260003
+    ],
+    "object_color": [
+      70,
+      140,
+      220,
+      255
+    ],
+    "static_props": [],
+    "enforce_effort_limits": false,
+    "effort_elastic_fraction": 0.8,
+    "cup_scale": 1.0,
+    "arm_stiffness": 1000.0,
+    "arm_damping": 60.0,
+    "hand_stiffness": 25.0,
+    "hand_damping": 1.0,
+    "dt": 0.005,
+    "gravity": -9.81,
+    "num_threads": 0
+  },
+  "replay_trajectory": "/home/hoan/project_superdex/adaptive_control_project/tasks/pickup_the_cup/retarget/runs/pickup_the_cup/trajectory.npz",
+  "replay_trajectory_sha256": "09c0e120e7c25763350b2b3b5ff90ba074c5200b777684ee1d6bf636cd19c540",
+  "warmup_s": 1.0,
+  "video_fps": 30.0,
+  "camera_calibration": "assets/cameras.json",
+  "video_publication": {
+    "path": "videos/robot/pickup_the_cup_tactile.mp4",
+    "tactile_signals": "videos/robot/pickup_the_cup_tactile.tactile.npz",
+    "source_run": "pickup_the_cup",
+    "source_trajectory": "retarget/runs/pickup_the_cup/trajectory.npz",
+    "measured_state_max_abs_differences": {
+      "t": 0.0,
+      "q_target": 0.0,
+      "q": 0.0,
+      "q_vel": 0.0,
+      "effort_nm": 0.0,
+      "cup_pos": 0.0,
+      "object_quat": 0.0
+    },
+    "render_method": "Live per-link simulated contact force coloring and numeric panel"
+  }
+}

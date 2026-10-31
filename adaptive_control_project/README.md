@@ -2,7 +2,7 @@
 
 This project focuses on **DexYCB `20200709_151032`**, a right-hand mug demonstration. The main output is:
 
-[`tasks/pickup_the_cup/videos/robot/external/pickup_the_cup.mp4`](tasks/pickup_the_cup/videos/robot/external/pickup_the_cup.mp4)
+[`tasks/pickup_the_cup/videos/robot/pickup_the_cup.mp4`](tasks/pickup_the_cup/videos/robot/pickup_the_cup.mp4)
 
 The current command creates a reproducible reconstruction from the identified sequence and mug geometry, with explicit settings and measurements. 
 
@@ -17,7 +17,7 @@ PYOPENGL_PLATFORM=egl LIBGL_ALWAYS_SOFTWARE=1 \
 .venv/bin/python adaptive_control_project/scripts/run_task.py
 ```
 
-That one command reads raw labels, rebuilds the processed motion, computes robot commands, simulates, and renders external, head-position, and right-wrist views. It also creates an arm-and-hand commanded-keypoint preview. All four videos go directly into `tasks/pickup_the_cup/videos/robot/external/`:
+That one command reads raw labels, rebuilds the processed motion, computes robot commands, simulates, and renders external, head-position, and right-wrist views. It also creates an arm-and-hand commanded-keypoint preview. All four videos go directly into `tasks/pickup_the_cup/videos/robot/`:
 
 - `pickup_the_cup.mp4`: external measured simulation view.
 - `pickup_the_cup_head.mp4`: stationary virtual camera near the robot's head position.
@@ -43,7 +43,21 @@ PYOPENGL_PLATFORM=egl LIBGL_ALWAYS_SOFTWARE=1 \
 .venv/bin/python adaptive_control_project/scripts/run_task.py --stage replay
 ```
 
-The source preview is `videos/raw/external/dexycb_mug_keypoints.mp4`. Each camera video has a `.camera.npz` sidecar with capture times and camera poses. The commanded-keypoint preview has `.keypoints.npz` and `.json` sidecars; its audit covers commands rather than measured tracking. Intermediate commands, measurements and audits are in `retarget/runs/pickup_the_cup/`. `--no-video` suppresses camera videos and the automatic keypoint preview.
+The source preview is `videos/raw/dexycb_mug_keypoints.mp4`. Each camera video has a `.camera.npz` sidecar with capture times and camera poses. The commanded-keypoint preview has `.keypoints.npz` and `.json` sidecars; its audit covers commands rather than measured tracking. Intermediate commands, measurements and audits are in `retarget/runs/pickup_the_cup/`. `--no-video` suppresses camera videos and the automatic keypoint preview.
+
+To rebuild the tactile-force dashboard from the existing videos and saved measurements:
+
+```bash
+.venv/bin/python adaptive_control_project/scripts/render_tactile_dashboard.py
+```
+
+This rebuilds `videos/robot/pickup_the_cup_tactile.mp4` as a 1280×720 dashboard with a large right-wrist view, external context inset, per-link force markers, readable palm/finger totals, contact status, and force history. It checks that the saved camera clocks and measured motion match before combining them. It runs no physics or OpenGL rendering and preserves the original five videos and force NPZ.
+
+The markers show simulated object-contact force magnitude sums per link, placed at measured robot mesh-bound centers. They are overlays without an occlusion test, rather than contact-point locations, force vectors, pressure, taxels, or hardware readings. Marker colors saturate at 5 N; numbers remain unclipped. The `.dashboard.json` sidecar describes both camera views and data provenance. The original `.tactile.npz` camera poses still describe the external force capture, not the composite. See the [tactile data guide](tasks/pickup_the_cup/data/README.md#simulated-contact-force-display) for inspection and replay commands.
+
+The task uses `video_layout: "flat"`: source previews go in `videos/raw/` and robot products in `videos/robot/`. The video index retains camera identities `external`, `head`, and `wrist_right`; `_head` and `_wrist_right` filename suffixes distinguish the latter views.
+
+The force samples came from a separate `retarget/runs/pickup_the_cup_tactile/` measurement run whose measured state arrays exactly match the original replay. Contact occurs from 18.835 to 21.500 s; inspect around 19.2 s for the peak. The improved presentation uses the same 1,300 force captures at 30 FPS; all 194 regression tests pass. The [detailed guide](tasks/pickup_the_cup/data/README.md#current-diagnostic-outcome) records verification evidence and remaining measured constraint failures.
 
 ## What remains
 
@@ -64,8 +78,8 @@ tasks/pickup_the_cup/
       dexycb_mug_20200709_151032.npz
   retarget/runs/pickup_the_cup/     Current commands, logs and audit results
   videos/
-    raw/external/                 Human keypoint preview
-    robot/external/               Three camera views + arm/hand keypoint preview
+    raw/                          Human keypoint preview
+    robot/                        Camera views, arm/hand preview, tactile overlay
   docs/task.md                    Detailed beginner guide
 ```
 

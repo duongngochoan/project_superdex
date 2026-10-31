@@ -44,34 +44,34 @@
     "cameras": {
       "raw": {
         "external": {
-          "directory": "videos/raw/external",
+          "directory": "videos/raw",
           "status": "keypoint_preview",
-          "latest_clip": "videos/raw/external/dexycb_mug_keypoints.mp4",
+          "latest_clip": "videos/raw/dexycb_mug_keypoints.mp4",
           "kind": "keypoint_preview",
           "product": "dataset_keypoints"
         }
       },
       "robot": {
         "external": {
-          "directory": "videos/robot/external",
+          "directory": "videos/robot",
           "status": "pending_regeneration",
-          "latest_clip": "videos/robot/external/pickup_the_cup.mp4",
+          "latest_clip": "videos/robot/pickup_the_cup.mp4",
           "kind": "simulation_render",
           "product": "robot_replay",
           "run": "pickup_the_cup"
         },
         "head": {
-          "directory": "videos/robot/external",
+          "directory": "videos/robot",
           "status": "pending_regeneration",
-          "latest_clip": "videos/robot/external/pickup_the_cup_head.mp4",
+          "latest_clip": "videos/robot/pickup_the_cup_head.mp4",
           "kind": "simulation_render",
           "product": "robot_replay",
           "run": "pickup_the_cup"
         },
         "wrist_right": {
-          "directory": "videos/robot/external",
+          "directory": "videos/robot",
           "status": "pending_regeneration",
-          "latest_clip": "videos/robot/external/pickup_the_cup_wrist_right.mp4",
+          "latest_clip": "videos/robot/pickup_the_cup_wrist_right.mp4",
           "kind": "simulation_render",
           "product": "robot_replay",
           "run": "pickup_the_cup"
@@ -84,7 +84,6 @@
       "recorded_rgb_video": false,
       "note": "Fresh auditable reconstruction from DexYCB 20200709_151032. The historical reference clip is not an input to this workflow."
     },
-    "robot_video_layout": "external_folder",
     "default_cameras": [
       "external",
       "head",
@@ -93,7 +92,8 @@
     "default_constraint_preview_modes": [
       "arm_hand"
     ],
-    "camera_calibration": "assets/cameras.json"
+    "camera_calibration": "assets/cameras.json",
+    "video_layout": "flat"
   },
   "scene_config": {
     "table_top": 0.22,
